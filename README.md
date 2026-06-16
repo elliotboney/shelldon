@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo_v10.png" alt="sheldon" width="320">
+</p>
+
 # sheldon
 
 > An E-Ink AI pet for the Raspberry Pi Zero 2W — chat-first, remote-LLM brain, a face that lives on your desk.
@@ -52,13 +56,15 @@ Sensors and other peripherals are **optional**, added as plugins.
 
 ## Roadmap
 
-- [ ] **Epic 1 — Talking Pet** (walking skeleton: chat turn end-to-end + face)
-- [ ] **Epic 2 — Resilient Brain** (provider fallback, degrade-to-reflex)
-- [ ] **Epic 3 — A Pet That Feels Alive** (reflexes, mood, expressive face)
-- [ ] **Epic 4 — Memory & Continuity** (conversation history + curated memory)
-- [ ] **Epic 5 — Autonomous Life** (scheduler, proactive action, battery-aware)
-- [ ] **Epic 6 — Dreaming & Learning** (capture + consolidate)
-- [ ] **Epic 7 — Extensibility & Optional Embodiment** (plugins, XP, sensors)
+**Daily-driver line** — Epics 1–4 (+ the endurance soak) are the version that lives on the desk every day. Epics 5–7 are enrichment, added when wanted.
+
+- [ ] **Epic 1 — Talking Pet** (walking skeleton: chat turn end-to-end + face + endurance soak) ⭐ daily-driver
+- [ ] **Epic 2 — Resilient Brain** (provider fallback, degrade-to-reflex) ⭐ daily-driver
+- [ ] **Epic 3 — A Pet That Feels Alive** (reflexes, mood, expressive face) ⭐ daily-driver
+- [ ] **Epic 4 — Memory & Continuity** (conversation history + curated memory + owner directive) ⭐ daily-driver
+- [ ] **Epic 5 — Autonomous Life** (scheduler, proactive action, battery-aware) — enrichment
+- [ ] **Epic 6 — Dreaming & Learning** (capture + consolidate) — enrichment
+- [ ] **Epic 7 — Extensibility & Optional Embodiment** (plugins, XP, sensors) — enrichment
 
 ## Credits
 
