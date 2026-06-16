@@ -12,3 +12,8 @@ ARCHITECTURE_V2.md
 logos/*
 
 glm_claude.sh
+
+# tooling / framework installs (not product code)
+.claude/
+.agents/
+_bmad/
