@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.shelldon/
+
+ARCHITECTURE_V2.md
+
+logos/*
+
+glm_claude.sh

@@ -1,0 +1,8 @@
+shelldon
+Copyright (c) 2026 Elliot Boney
+
+This project is a ground-up v2 rebuild inspired by openclawgotchi,
+created by Dmitry Turmyshev (https://github.com/turmyshevd), MIT-licensed.
+
+shelldon is a clean-room reimplementation: openclawgotchi is studied as a
+reference, not copied. Credit and thanks to Dmitry for the original work.

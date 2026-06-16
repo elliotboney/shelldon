@@ -1,0 +1,43 @@
+[project]
+name = "shelldon"
+version = "0.1.0"
+description = "An E-Ink AI pet for the Raspberry Pi Zero 2W — chat-first, remote-LLM brain."
+readme = "README.md"
+requires-python = ">=3.13"          # Pi OS target is 3.13.x; local dev may be newer
+license = { file = "LICENSE" }
+authors = [{ name = "Elliot Boney" }]
+dependencies = []                    # stdlib asyncio only; deps arrive per story (msgspec in 1.2)
+
+[dependency-groups]
+dev = [
+    "import-linter>=2.3",
+    "pytest>=8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["shelldon"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# AD-1: core/ must never import an LLM/provider library — enforced mechanically.
+[tool.importlinter]
+root_package = "shelldon"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "core is LLM-free (AD-1)"
+type = "forbidden"
+source_modules = ["shelldon.core"]
+forbidden_modules = [
+    "openai",
+    "anthropic",
+    "google",
+    "litellm",
+    "zhipuai",
+    "ollama",
+]

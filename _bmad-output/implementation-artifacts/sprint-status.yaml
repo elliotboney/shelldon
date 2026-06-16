@@ -31,7 +31,7 @@
 # - Daily-driver line = Epics 1-4 + story 1-9 (soak); Epics 5-7 are enrichment
 
 generated: 2026-06-16 10:47:47 CDT
-last_updated: 2026-06-16 10:47:47 CDT
+last_updated: 2026-06-16 11:00:25 CDT
 project: shelldon
 project_key: NOKEY
 tracking_system: file-system
@@ -39,8 +39,8 @@ story_location: {project-root}/_bmad-output/implementation-artifacts
 
 development_status:
   # --- Epic 1: Talking Pet (walking skeleton) ---
-  epic-1: backlog
-  1-1-greenfield-scaffold-with-an-enforced-llm-free-core-and-m0-tests: backlog
+  epic-1: in-progress
+  1-1-greenfield-scaffold-with-an-enforced-llm-free-core-and-m0-tests: review
   1-2-versioned-message-contracts: backlog
   1-3-envelope-bus-over-unix-domain-sockets-hub-routed-through-core: backlog
   1-4-capability-broker-with-one-provider-and-basic-retry: backlog
