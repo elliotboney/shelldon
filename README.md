@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="docs/logo_v10.png" alt="sheldon" width="320">
+  <img src="docs/logo_v10.png" alt="shelldon" width="320">
 </p>
 
-# sheldon
+# shelldon
 
 > An E-Ink AI pet for the Raspberry Pi Zero 2W — chat-first, remote-LLM brain, a face that lives on your desk.
 
-`sheldon` is a ground-up v2 rebuild of [openclawgotchi](https://github.com/) (MIT, by Dmitry Turmyshev). At its core it's a **chat-bot pet**: you converse with a remote-LLM brain by text, over a **pluggable chat transport** (not hardcoded to any one service), while the pet's face and mood live on a Waveshare E-Ink screen. It's built to be genuinely *owned* — a clean, tested spine that designs out v1's documented pains.
+`shelldon` is a ground-up v2 rebuild of [openclawgotchi](https://github.com/) (MIT, by Dmitry Turmyshev). At its core it's a **chat-bot pet**: you converse with a remote-LLM brain by text, over a **pluggable chat transport** (not hardcoded to any one service), while the pet's face and mood live on a Waveshare E-Ink screen. It's built to be genuinely *owned* — a clean, tested spine that designs out v1's documented pains.
 
 ## Status
 
@@ -17,7 +17,7 @@ The full planning chain is done and self-consistent:
 | Artifact | Path |
 |---|---|
 | Spec (the contract — 11 capabilities) | [`SPEC.md`](_bmad-output/specs/spec-openclawgotchi-v2/SPEC.md) |
-| Architecture spine (15 decisions) | [`ARCHITECTURE-SPINE.md`](_bmad-output/planning-artifacts/architecture/architecture-sheldon-2026-06-15/ARCHITECTURE-SPINE.md) |
+| Architecture spine (15 decisions) | [`ARCHITECTURE-SPINE.md`](_bmad-output/planning-artifacts/architecture/architecture-shelldon-2026-06-15/ARCHITECTURE-SPINE.md) |
 | Epics & stories (7 epics) | [`epics.md`](_bmad-output/planning-artifacts/epics.md) |
 
 ## What makes it different from v1
@@ -68,7 +68,7 @@ Sensors and other peripherals are **optional**, added as plugins.
 
 ## Credits
 
-Built on the ideas of **openclawgotchi** by **Dmitry Turmyshev** (MIT). `sheldon` is a clean-room reimplementation — v1 is studied as reference, never copied.
+Built on the ideas of **openclawgotchi** by **Dmitry Turmyshev** (MIT). `shelldon` is a clean-room reimplementation — v1 is studied as reference, never copied.
 
 ## License
 
