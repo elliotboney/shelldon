@@ -21,8 +21,8 @@ async def test_oversized_frame_closes_connection_but_hub_survives(sock_path):
     srv = BusServer(socket_path=sock_path)
     await srv.start()
     try:
-        reader, writer = await connect(srv.socket_path)
-        # Raw oversized header (bypassing write_frame) — declares a huge payload.
+        reader, writer = await connect(srv.socket_path, Actor.WORKER)
+        # Raw oversized header (bypassing write_frame) in the envelope stream.
         writer.write((MAX_FRAME_BYTES + 1).to_bytes(4, "big"))
         await writer.drain()
 
@@ -30,7 +30,7 @@ async def test_oversized_frame_closes_connection_but_hub_survives(sock_path):
         assert await asyncio.wait_for(read_frame(reader), timeout=1.0) is None
 
         # The hub is still alive for a fresh client: RESULT routes to core_inbox.
-        _, w2 = await connect(srv.socket_path)
+        _, w2 = await connect(srv.socket_path, Actor.WORKER)
         res = Envelope(id="r", kind=MsgKind.RESULT, src=Actor.WORKER, dst=Actor.CORE, body=Result(ok=True))
         await write_frame(w2, res)
         assert await asyncio.wait_for(srv.core_inbox.get(), timeout=1.0) == res
@@ -59,7 +59,7 @@ async def test_write_to_dead_target_keeps_source_alive(sock_path):
     try:
         srv._registry[Actor.BROKER] = _DeadWriter()  # broker "connected" but dead
 
-        _, w = await connect(srv.socket_path)
+        _, w = await connect(srv.socket_path, Actor.WORKER)
         # JOB -> BROKER: routing this raises inside _route; it must be swallowed.
         job = Envelope(id="j", kind=MsgKind.JOB, src=Actor.WORKER, dst=Actor.BROKER, body=Job(payload="x"))
         await write_frame(w, job)
