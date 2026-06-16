@@ -34,8 +34,8 @@ A **vision to realize**, driven by **autonomy and craft**: Elliot wants an E-Ink
   success: The pet initiates an action (e.g. greeting on presence, a mood-driven idle behavior) with no prior prompt, demonstrable.
 
 - id: CAP-5
-  intent: All privileged operations — credential access, the LLM call itself, tool execution, and safety policy — pass through a single capability broker, which also abstracts the choice of LLM provider.
-  success: A test demonstrates that accessing credentials, calling the model, or running a tool from outside the broker is impossible by construction; swapping the provider requires no change outside the broker.
+  intent: All privileged operations — credential access and the LLM call itself — pass through a single capability broker, which also abstracts the choice of LLM provider. (Tool execution and safety-policy enforcement are deferred — see Non-goals — but the broker is the designated home for both if added later.)
+  success: A test demonstrates that accessing credentials or calling the model from outside the broker is impossible by construction; swapping the provider requires no change outside the broker.
 
 - id: CAP-6
   intent: Context persists across ephemeral turns via a HYBRID memory — (a) a sqlite store holding the conversation-history (ordered, timestamped messages with FTS5 keyword recall; single-owner now, schema shaped so chat_id/user_id can be added non-breaking later) and a `learnings` table of captured observations (dedup by pattern_key, recurrence_count, status pending; see CAP-11's capture/promote pipeline), and (b) a filesystem markdown curated layer: a rewritable about.md doc, discrete facts/, a people/ directory (people the owner MENTIONS in conversation — not humans detected via BLE), and a broker-gated vault/, curated by the LLM (no vector DB) — though workers are spawned and die per turn. Separately, a human-only `DIRECTIVE.md` is owner-authored and read by the bot as authoritative (injected into every prompt) but NEVER written by the bot — the pet's owner-controlled "constitution." The bot may fully rewrite its own about.md; the directive file is off-limits to it. sqlite is raw+queryable; markdown is curated+durable; the dream cycle (CAP-11) bridges them. Writer sets are disjoint: core owns about.md + curated tree + sqlite; the owner solely owns DIRECTIVE.md.
@@ -76,7 +76,7 @@ A **vision to realize**, driven by **autonomy and craft**: Elliot wants an E-Ink
 - The chat transport is pluggable behind a transport-agnostic message contract; Telegram (or any one transport) must never be hardcoded into core. Single owner now — an owner identity exists, and the conversation schema is shaped so chat_id/user_id keys can be added later without a breaking change.
 - Credential split: the chat transport adapter holds its OWN connection credential (e.g. bot token); the capability broker remains the sole holder of MODEL and TOOL credentials.
 - Core is the sole WRITER of all state and memory, including the sqlite conversation store; workers may only READ history and non-vault markdown and propose writes via Result.
-- No bypass of the capability broker: nothing outside it may hold model or tool credentials, call the model, or run tools.
+- No bypass of the capability broker: nothing outside it may hold model credentials or call the model. (Tool execution is deferred; when added, tools route through the broker too — see Non-goals.)
 - Typed, versioned contracts (Envelope/Job/Result) with a test harness present from the first milestone (M0). v1 shipped with zero tests.
 - Built ground-up; v1 is reference only (study the guts, own the spine), never a code source.
 - MIT attribution to Dmitry Turmyshev is retained (README/NOTICE plus the MIT notice).
@@ -93,6 +93,8 @@ A **vision to realize**, driven by **autonomy and craft**: Elliot wants an E-Ink
 - Group chat / multi-user / web interface in the initial build (architected-for via the pluggable-transport adapter model and a non-breaking conversation schema, but not implemented now — build single-owner).
 - Copying v1 code (v1 is conceptual reference only — see `architecture-spine.md`).
 - XP / gamification in core: XP/leveling is an OPTIONAL behavioral plugin (CAP-7), not core, and not necessarily in the default build.
+- Tool execution / the v1 "40+ tool patterns" (deferred — v2 is chat-first; the pet converses but does not yet call tools). When added, tools route through the capability broker per CAP-5; the `tool-used` broadcast event (CAP-7 plugins) stays a no-op until then.
+- v1-style safety-list content policy (deferred — single-owner personal device; the broker stays the designated enforcement point if a safety layer is added later).
 
 ## Success signal
 
@@ -102,5 +104,5 @@ A **vision to realize**, driven by **autonomy and craft**: Elliot wants an E-Ink
 
 - Primary IO = the pluggable chat transport (the owner's text conversation in and the pet's replies out), with the Waveshare V4 display as the pet's face/state surface (out). Physical input — the PiSugar2 button and BLE presence — is OPTIONAL, arriving via the peripheral plugin model (CAP-3/CAP-7), not core. No sound in or out in the default build; additional sensors/peripherals arrive via plugins (CAP-7).
 - "M0" denotes the first build milestone, with the test harness present from the start.
-- Safety policy content is ported conceptually from v1's safety lists rather than newly authored here; the broker enforces it.
+- Safety-policy content (v1-style safety lists) is deferred from the initial build (see Non-goals); the broker remains its enforcement point if added later.
 - "Dreaming" and the scheduler are autonomous background behavior, bounded by the battery + credit budget — the pet runs scheduled cycles on its own (multi-cadence, cost-tiered) and backs off on battery, never spending unbounded LLM credit in the background (CAP-10/CAP-11).
