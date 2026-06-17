@@ -3,7 +3,7 @@ baseline_commit: 884586864069d4b5da35a573a8619d70cefb84e4
 ---
 # Story 4.1: Conversation-history store
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
