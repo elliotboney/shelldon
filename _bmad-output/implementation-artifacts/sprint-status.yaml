@@ -56,7 +56,7 @@ development_status:
   2-1-provider-abstraction-and-an-ordered-chain: done
   2-2-automatic-fallback-through-the-chain: done
   2-3-degrade-to-reflex-only-when-the-whole-chain-fails: done
-  epic-2-retrospective: optional
+  epic-2-retrospective: done
 
   # --- Epic 3: A Pet That Feels Alive ---
   epic-3: backlog
