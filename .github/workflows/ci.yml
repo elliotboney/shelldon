@@ -10,7 +10,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
-      - run: uv sync
+      - run: uv sync --locked
       - name: Enforce LLM-free core (AD-1)
         run: uv run lint-imports
       - name: Tests (M0 harness)
