@@ -2,6 +2,16 @@
 
 This file tracks work intentionally deferred from reviews, with reasons for why it was deferred and when it should be revisited.
 
+## Deferred from: code review of 1-5-fork-server-worker-that-runs-one-turn-and-dies (2026-06-16)
+
+- **Child exits 0 on `asyncio.run()` exception in fork child** — `forkserver.py:_os_fork_spawn` try/finally always calls `os._exit(0)`; a failed job send is invisible to the parent. Add exit-code handling when supervisor/error path is scoped in Epic 2.
+- **`_os_waitpid_reap` has no timeout** — if child is unkillable (debugger, stuck kernel sleep), `reap_current()` loops forever. Add watchdog/SIGKILL escalation in resilience hardening.
+- **`Arbiter` and `ForkServer.worker_in_flight` are independent and never connected** — by design for the 1.5 skeleton; wire together in 1.8 when the full arbiter is built.
+- **`Arbiter.try_begin` not async-safe** — no `asyncio.Lock` between read-check and write. Safe while no `await` exists between them; add a lock when 1.8 defines the concurrency model.
+- **Child inherits parent FDs after fork** — acknowledged fork-without-exec risk; production fix is `os.closerange(3, os.sysconf('SC_OPEN_MAX'))` before `asyncio.run()` in child. Defer to resilience/hardening story.
+- **No `TurnFence` eviction boundary test** — closing exactly `max_closed + 1` distinct IDs is untested; manual inspection confirms correctness. Add coverage when TurnFence is extended.
+- **`gc.disable()` not re-enabled on `preload()` exception path** — intentional for COW fork pattern; test teardown re-enables for isolation. Revisit if process lifecycle changes.
+
 ## Deferred from: code review of 1-4-capability-broker-with-one-provider-and-basic-retry (2026-06-16)
 
 - **Potential credential leak via `str(sdk_exc)` in `Result.error`** — SDK error messages don't typically include the API key, but no runtime value test verifies this. Revisit if credential hygiene audit is done.
