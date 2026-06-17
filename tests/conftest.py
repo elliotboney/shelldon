@@ -1,5 +1,6 @@
-"""Shared test fixtures."""
+"""Shared test fixtures and helpers."""
 
+import asyncio
 import shutil
 import tempfile
 from pathlib import Path
@@ -8,6 +9,20 @@ import pytest
 
 import shelldon.broker.broker as _broker
 import shelldon.broker.service as _service
+import shelldon.core.runtime as _runtime
+
+
+@pytest.fixture(autouse=True)
+def _isolate_state_checkpoint(tmp_path, monkeypatch):
+    """Never let a test write the real ~/.shelldon/state.json.
+
+    A Core constructed without an explicit checkpoint_path falls back to
+    DEFAULT_CHECKPOINT_PATH (~/.shelldon/state.json). Story 3.2 makes state dirty on
+    every inbound message (last_interaction), so teardown's flush-if-dirty would hit
+    real $HOME. Redirect the default at a tmp file for every test (Story 3.1/3.2:
+    "no test may write real $HOME").
+    """
+    monkeypatch.setattr(_runtime, "DEFAULT_CHECKPOINT_PATH", tmp_path / "state.json")
 
 
 @pytest.fixture(autouse=True)
@@ -19,6 +34,27 @@ def _no_broker_backoff(monkeypatch):
     """
     monkeypatch.setattr(_broker, "_RETRY_BACKOFF_S", 0)
     monkeypatch.setattr(_service, "_RECONNECT_BACKOFF_S", 0)
+
+
+async def await_true(predicate, timeout=2.0):
+    """Poll a state predicate to a bounded deadline (no fixed-sleep anchors — Epic 2
+    retro #1). Shared by the state/reflex suites so an interface change fails in one
+    place."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError("condition not met within timeout")
+
+
+class DummySpawner:
+    """A spawner whose `ready()` is a no-op; used where a Core is constructed but its
+    turn loop is never driven (state/reflex unit tests)."""
+
+    async def ready(self):  # pragma: no cover - never run in these tests
+        pass
 
 
 @pytest.fixture
