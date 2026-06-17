@@ -31,7 +31,7 @@
 # - Daily-driver line = Epics 1-4 + story 1-9 (soak); Epics 5-7 are enrichment
 
 generated: 2026-06-16 10:47:47 CDT
-last_updated: 2026-06-17 CDT  # Epic 3 done + retro complete; 3.4 deferred to Epic 4.2
+last_updated: 2026-06-17 CDT  # story 4.1 implemented (review)
 project: shelldon
 project_key: NOKEY
 tracking_system: file-system
@@ -66,8 +66,8 @@ development_status:
   epic-3-retrospective: done
 
   # --- Epic 4: Memory & Continuity ---
-  epic-4: backlog
-  4-1-conversation-history-store: backlog
+  epic-4: in-progress
+  4-1-conversation-history-store: review
   4-2-curated-markdown-memory-and-memory-ops: backlog
   3-4-self-modify-faces-via-chat: backlog  # deferred from Epic 3 (2026-06-17): rides the AD-6 memory-op protocol designed in 4.2 — LLM proposes add_face over a Result, core applies via 3.3's apply_add_face. Build AFTER 4-2.
   4-3-vault-with-os-level-isolation: backlog

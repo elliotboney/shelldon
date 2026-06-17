@@ -24,6 +24,7 @@ def _isolate_state_checkpoint(tmp_path, monkeypatch):
     """
     monkeypatch.setattr(_runtime, "DEFAULT_CHECKPOINT_PATH", tmp_path / "state.json")
     monkeypatch.setattr(_runtime, "DEFAULT_FACES_PATH", tmp_path / "faces.toml")
+    monkeypatch.setattr(_runtime, "DEFAULT_HISTORY_PATH", tmp_path / "history.db")
 
 
 @pytest.fixture(autouse=True)
