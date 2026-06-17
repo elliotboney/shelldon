@@ -6,7 +6,9 @@ readme = "README.md"
 requires-python = ">=3.13,<3.14"     # pinned to the Pi OS target (3.13.x)
 license = { file = "LICENSE" }
 authors = [{ name = "Elliot Boney" }]
-dependencies = []                    # stdlib asyncio only; deps arrive per story (msgspec in 1.2)
+dependencies = [
+    "msgspec==0.21.1",               # versioned typed contracts + bus framing (AD-4/AD-10)
+]
 
 [dependency-groups]
 dev = [
