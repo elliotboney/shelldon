@@ -6,7 +6,7 @@
 
 > An E-Ink AI pet for the Raspberry Pi Zero 2W — chat-first, remote-LLM brain, a face that lives on your desk.
 
-`shelldon` is a ground-up v2 rebuild of [openclawgotchi](https://github.com/) (MIT, by Dmitry Turmyshev). At its core it's a **chat-bot pet**: you converse with a remote-LLM brain by text, over a **pluggable chat transport** (not hardcoded to any one service), while the pet's face and mood live on a Waveshare E-Ink screen. It's built to be genuinely *owned* — a clean, tested spine that designs out v1's documented pains.
+`shelldon` is a ground-up v2 rebuild of [openclawgotchi](https://github.com/turmyshevd/openclawgotchi) (MIT, by [Dmitry Turmyshev](https://github.com/turmyshevd)). At its core it's a **chat-bot pet**: you converse with a remote-LLM brain by text, over a **pluggable chat transport** (not hardcoded to any one service), while the pet's face and mood live on a Waveshare E-Ink screen. It's built to be genuinely *owned* — a clean, tested spine that designs out v1's documented pains.
 
 ## Status
 
@@ -72,8 +72,8 @@ _Disclaimer: Amazon Affiliate Links to help me out with development_
 
 ## Credits
 
-Built on the ideas of **openclawgotchi** by **Dmitry Turmyshev** (MIT). `shelldon` is a clean-room reimplementation — v1 is studied as reference, never copied.
+Built on the ideas of **[openclawgotchi](https://github.com/turmyshevd/openclawgotchi)** by [Dmitry Turmyshev](https://github.com/turmyshevd) (MIT). `shelldon` is a clean-room reimplementation — v1 is studied as reference, never copied.
 
 ## License
 
-[MIT](LICENSE) — see also `NOTICE` for attribution.
+[MIT](LICENSE) — see also [NOTICE](NOTICE) for attribution.
