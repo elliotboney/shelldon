@@ -48,11 +48,15 @@ Everything talks over an Envelope bus (Unix domain sockets); `core/` is mechanic
 
 ## Hardware
 
-- Raspberry Pi Zero 2W (~512MB RAM)
-- Waveshare V4 E-Ink display
-- PiSugar2 battery HAT (power + button)
+- [Raspberry Pi Zero 2W (~512MB RAM)](https://amzn.to/3QN8Pk6)
+- [Waveshare V4 E-Ink display](https://amzn.to/4exgDi1)
+- [PiSugar2 battery HAT (power + button)](https://amzn.to/4vh59WZ)
+- [SANDISK 32GB High Endurance microSDHC](https://amzn.to/4vRh6lW)
 
 Sensors and other peripherals are **optional**, added as plugins.
+
+_Disclaimer: Amazon Affiliate Links to help me out with development_
+
 
 ## Roadmap
 
