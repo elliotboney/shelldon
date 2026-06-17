@@ -2,6 +2,37 @@
 
 This file tracks work intentionally deferred from reviews, with reasons for why it was deferred and when it should be revisited.
 
+## Resolved from: code review of 1-7-display-service-shows-the-pets-face-from-core-state (2026-06-16)
+
+- **[RESOLVED] `BusServer.stop()` hung on an idle client connection whose peer never disconnects** — surfaced while writing the 1.7 display tests. Root cause: `Server.wait_closed()` (3.13) blocks until all handler tasks finish, and a client parked in `read_frame` never EOFs just because its writer is closed. **Fix** (`core/bus/server.py`): the hub now tracks handler tasks (`_handlers`) and `stop()` **cancels** them deterministically — looping so a handler that registers during the gather-yield is still caught — then closes connections, then closes the listening server last (close-last avoids an asyncio `Server._wakeup` race under force-close on 3.13). Regression test: `tests/test_bus_disconnect.py::test_stop_with_idle_connected_client_does_not_hang` (idle settled + racing-mid-registration clients; `stop()` must return promptly). 77 pass / 1 skipped, both import-linters KEPT.
+
+## Resolved (2026-06-16 — deferred-item sweep, test-only hardening)
+
+Cheap coverage gaps over already-shipped code, completed in parallel without scope expansion (full suite 69 passed / 1 skipped, both import-linters KEPT):
+
+- **[1.6] Hub-disconnect teardown (`read_frame → None`)** — now tested: `tests/test_cli_transport.py::test_outbound_loop_exits_on_hub_disconnect`.
+- **[1.6] `_outbound_loop` `ValidationError→skip`** — now tested: `tests/test_cli_transport.py::test_outbound_loop_skips_invalid_frame_and_continues`. *(The framing `ValueError→clean-exit` sub-branch remains untested — see Still deferred below.)*
+- **[1.5] `TurnFence` eviction boundary** — now tested: `tests/test_turn_fence.py::test_closed_set_eviction_is_bounded` (closes `max_closed + 1` ids, asserts the oldest is evicted from `_closed` and the cap holds).
+- **[1.4] `service.py` non-Job skip + clean-EOF branches** — now tested: `tests/test_broker_service_branches.py` (`test_non_job_envelope_is_skipped`, `test_clean_eof_ends_connection`), driving `_serve_connection` directly with a fed `StreamReader`.
+- **[1.3] Oversized-frame `ValueError` cap** — found **already covered**: `tests/test_bus_frame.py::test_oversized_length_raises_before_allocating` (+ `tests/test_bus_errors.py::test_oversized_frame_closes_connection_but_hub_survives`). No new test needed.
+
+### Rejected (kept as-is, with reason)
+
+- **[1.3] `conftest.py` `/tmp` → `tempfile.gettempdir()`** — **rejected.** `/tmp` is hardcoded *because* macOS's default `$TMPDIR` (`/var/folders/…`) overflows the AF_UNIX ~104-char path cap; `gettempdir()` would reintroduce that exact failure. The original deferred note's rationale is incorrect. If/when a Linux CI target is defined, gate the dir on platform rather than switching unconditionally.
+
+### Still deferred (sweep judged not worthy now)
+
+- **[1.6] framing-`ValueError → clean-exit` in `_outbound_loop` untested** — only reachable via a corrupt length prefix on the adapter's own connection (the hub validates upstream); low value, add alongside 1.8 end-to-end wiring.
+- All other items below remain deferred per their original reasons (resilience/Epic 2, or by-design-until-1.8).
+
+## Deferred from: code review of 1-6-one-chat-transport-adapter-over-a-transport-agnostic-contract (2026-06-16)
+
+- **`_default_inbound` executor thread leak on cancellation** — `sys.stdin.readline` in `run_in_executor` cannot be interrupted; thread blocks until process exit if the transport is torn down before stdin closes. Fix requires custom executor or non-blocking stdin approach (e.g. `aioconsole`). Revisit when production CLI use cases are hardened.
+- **Hub-disconnect path (`read_frame → None`) untested** — outbound loop exiting first (hub gone) and cancelling the inbound loop is a valid teardown path that has no test. Add in 1.8 end-to-end wiring.
+- **`ValidationError→skip` / `ValueError→clean-exit` in `_outbound_loop` untested** — resilience branches exist in code but have no test coverage. Add when integration testing expands.
+- **Both asyncio tasks done simultaneously → second exception silently lost** — `for task in done: task.result()` raises on first and skips second. Fix when error reporting is hardened.
+- **`outbound()` callable not protected from exceptions** — if a non-trivial sink (socket-backed stdout) raises, the outbound loop crashes. Protect when such sinks are wired.
+
 ## Deferred from: code review of 1-5-fork-server-worker-that-runs-one-turn-and-dies (2026-06-16)
 
 - **Child exits 0 on `asyncio.run()` exception in fork child** — `forkserver.py:_os_fork_spawn` try/finally always calls `os._exit(0)`; a failed job send is invisible to the parent. Add exit-code handling when supervisor/error path is scoped in Epic 2.
