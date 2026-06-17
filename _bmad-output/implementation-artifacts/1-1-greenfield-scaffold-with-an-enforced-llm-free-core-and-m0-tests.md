@@ -4,7 +4,7 @@ baseline_commit: 60f8382b06d53acf357abf40f2a383e8918f58c3
 
 # Story 1.1: Greenfield scaffold with an enforced LLM-free core and M0 tests
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
