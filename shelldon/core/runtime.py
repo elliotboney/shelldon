@@ -1,0 +1,203 @@
+"""The core runtime / turn orchestrator (AD-9/AD-12/AD-13/AD-5/AD-1).
+
+`Core` ties the five actors together around one real turn: an INBOUND_MSG becomes
+a worker turn, the worker's Result returns over the bus and is fenced, a reply
+leaves as OUTBOUND_MSG, and the display is pushed a face snapshot on every turn
+lifecycle event. It is the single-consumer loop over `bus.core_inbox`, so the
+Arbiter (admission policy) is accessed serially — no lock needed.
+
+LLM-free (AD-1): this imports no provider lib and not `worker/`. It depends on an
+injected **spawner** (anything with `async spawn_turn(turn_id, prompt)`,
+`async reap_current()`, `async ready()`) so `core/` never reaches into an adapter;
+the composition root (the integration test, or a later `app.py`) injects the real
+`ForkServer`.
+
+Scope (1.8): ≤1 + coalescing + degrade-on-failure + a minimal turn timeout. The
+prompt IS the owner's message text (real prompt assembly is Epic 4); faces are
+placeholder lifecycle tokens (real expressions are Story 3.3); cooldown/budget and
+the full provider chain are Epic 2 / Epic 5; a full watchdog/supersession escalation
+is Epic 2.
+"""
+
+import asyncio
+import logging
+from uuid import uuid4
+
+from shelldon.contracts import (
+    Actor,
+    Envelope,
+    MsgKind,
+    OutboundMessage,
+    Region,
+    Result,
+    StateSnapshot,
+)
+from shelldon.core.arbiter import Arbiter
+from shelldon.core.bus import BusServer
+from shelldon.core.turn import TurnFence
+
+log = logging.getLogger("shelldon.core.runtime")
+
+#: Placeholder lifecycle face tokens — the real expression vocabulary and the
+#: mood->face mapping are Story 3.3; the personality-state struct is Epic 3.
+FACE_THINKING = "thinking"
+FACE_REPLY = "happy"
+FACE_DEGRADED = "cant-think"
+
+#: Graceful "can't think right now" reply (AC3). Full degrade-to-reflex is Epic 2.
+DEGRADE_TEXT = "…can't think right now…"
+
+#: Default turn timeout (AC3 "rather than hanging"). Tests inject a small value.
+DEFAULT_TURN_TIMEOUT = 30.0
+
+
+class Core:
+    """The turn orchestrator: owns the bus, fence, arbiter, and an injected spawner."""
+
+    def __init__(self, socket_path, spawner, *, turn_timeout: float = DEFAULT_TURN_TIMEOUT):
+        self.bus = BusServer(socket_path=socket_path)
+        self.fence = TurnFence()
+        self.arbiter = Arbiter()
+        self.spawner = spawner
+        self.turn_timeout = turn_timeout
+        self._seq = 0
+        self._timeout_task: asyncio.Task | None = None
+        self._bg: set[asyncio.Task] = set()
+
+    async def run(self) -> None:
+        """Start the bus, wait for the spawner, then consume core_inbox forever.
+
+        Single consumer: only this loop touches the arbiter/fence, so admission is
+        serial (no `await` interleaves a second submit mid-decision). On
+        cancellation (teardown) it cancels every background task it scheduled.
+        """
+        await self.bus.start()
+        await self.spawner.ready()
+        try:
+            while True:
+                env = await self.bus.core_inbox.get()
+                if env.kind is MsgKind.INBOUND_MSG:
+                    prompt = self.arbiter.submit(env.body.text)
+                    if prompt is not None:
+                        await self._start_turn(prompt)
+                elif env.kind is MsgKind.RESULT:
+                    await self._handle_result(env)
+                else:
+                    log.warning("core ignoring unexpected inbox envelope %s (%s)", env.id, env.kind)
+        finally:
+            self._cleanup()
+
+    async def _start_turn(self, prompt: str) -> None:
+        """Open a fenced turn, push the 'thinking' face, spawn the worker, schedule
+        its reap (fire-and-forget — the Result returns over the bus), arm the timeout."""
+        turn_id = uuid4().hex
+        self.fence.open(turn_id)
+        await self._push_face(FACE_THINKING)
+        try:
+            await self.spawner.spawn_turn(turn_id, prompt)
+        except Exception as exc:
+            # The turn never actually started. Two real paths land here: an OS-level
+            # spawn failure, and the timeout+catch-up race where the prior worker's
+            # reap hasn't released ForkServer.worker_in_flight yet, so spawn_turn
+            # raises WorkerBusyError. Release BOTH guards — otherwise the fence stays
+            # open and the arbiter slot stays reserved forever, silently coalescing
+            # every later message into a pending slot that never flushes. The dropped
+            # catch-up prompt is accepted degraded behavior (redelivery is Epic 2).
+            log.warning("spawn_turn failed for %s (%s); releasing turn guards", turn_id, exc)
+            self.fence.close(turn_id)
+            self.arbiter.reset()
+            return
+        self._track(asyncio.create_task(self.spawner.reap_current()))
+        self._arm_timeout(turn_id)
+
+    async def _handle_result(self, env: Envelope) -> None:
+        """Admit a Result only for the open turn (AD-12); reply+react or degrade,
+        then drive at most one coalesced catch-up turn."""
+        if not self.fence.accept(env):
+            return  # late / zombie / superseded — discard (AD-12)
+        self._disarm_timeout()  # synchronous, before any await — can't race the timeout
+        self.fence.close(env.turn_id)
+        result: Result = env.body
+        if result.ok:
+            await self._send_reply(result.payload)
+            await self._push_face(FACE_REPLY)
+        else:
+            await self._degrade()
+        folded = self.arbiter.complete()
+        if folded is not None:
+            await self._start_turn(folded)
+
+    # --- turn timeout (AC3 "rather than hanging") ---
+
+    def _arm_timeout(self, turn_id: str) -> None:
+        self._timeout_task = asyncio.create_task(self._timeout_watch(turn_id))
+
+    def _disarm_timeout(self) -> None:
+        if self._timeout_task is not None:
+            self._timeout_task.cancel()
+            self._timeout_task = None
+
+    async def _timeout_watch(self, turn_id: str) -> None:
+        """Fire if no Result is accepted in time: close the turn (so a late Result
+        is then discarded by the fence — AD-12), degrade, and maybe start the
+        coalesced next turn. Cancelled (disarmed) the moment a Result lands."""
+        try:
+            await asyncio.sleep(self.turn_timeout)
+        except asyncio.CancelledError:
+            return
+        if self.fence.current != turn_id:
+            return  # already closed/superseded by the Result path
+        self.fence.close(turn_id)
+        self._timeout_task = None
+        await self._degrade()
+        folded = self.arbiter.complete()
+        if folded is not None:
+            await self._start_turn(folded)
+
+    # --- emit helpers (core ORIGINATES traffic via bus.deliver) ---
+
+    async def _send_reply(self, text: str) -> None:
+        await self.bus.deliver(
+            Envelope(
+                id=uuid4().hex,
+                kind=MsgKind.OUTBOUND_MSG,
+                src=Actor.CORE,
+                dst=Actor.CHAT_TRANSPORT,
+                body=OutboundMessage(text=text),
+            )
+        )
+
+    async def _push_face(self, face: str) -> None:
+        await self.bus.deliver(
+            Envelope(
+                id=uuid4().hex,
+                kind=MsgKind.STATE_SNAPSHOT,
+                src=Actor.CORE,
+                dst=Actor.DISPLAY,
+                body=StateSnapshot(region=Region.FACE, seq=self._next_seq(), face=face),
+            )
+        )
+
+    async def _degrade(self) -> None:
+        """Graceful 'can't think right now' (AC3): a reply + an error face. Called on
+        a failure Result AND on turn timeout."""
+        await self._send_reply(DEGRADE_TEXT)
+        await self._push_face(FACE_DEGRADED)
+
+    def _next_seq(self) -> int:
+        self._seq += 1
+        return self._seq
+
+    # --- background task bookkeeping ---
+
+    def _track(self, task: asyncio.Task) -> None:
+        self._bg.add(task)
+        task.add_done_callback(self._bg.discard)
+
+    def _cleanup(self) -> None:
+        if self._timeout_task is not None:
+            self._timeout_task.cancel()
+            self._timeout_task = None
+        for task in list(self._bg):
+            task.cancel()
+        self._bg.clear()

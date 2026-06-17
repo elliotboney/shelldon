@@ -1,0 +1,270 @@
+"""Story 1.8 — the end-to-end turn, all five actors in-process on one BusServer.
+
+The full turn is exercised cross-platform with the worker spawned via the
+fork-server's INJECTED spawn seam (`asyncio.create_task(run_worker(...))`) — no real
+`os.fork()` (that path stays Linux-gated in 1.5). The provider is always a fake.
+
+This wires the two ≤1 guards the 1.5 review left independent: the **Arbiter** is the
+single *policy* gate (it won't request a second spawn until `complete()`), and
+**ForkServer.worker_in_flight** is the *mechanical* backstop — they never conflict
+because the arbiter serializes turn requests on the single-consumer core loop (which
+also makes Arbiter access serial: no lock needed — resolves the 1.5 async-safety item).
+
+Production shape (NOT built here): the fork-server runs as its own single-threaded
+process driven by core over an IPC control channel (never fork from the asyncio
+loop). 1.8 proves the turn *lifecycle* in-process; multi-process + IPC is a later
+deployment-hardening story.
+"""
+
+import asyncio
+
+import pytest
+
+from shelldon.broker.provider import TransientProviderError
+from shelldon.broker.service import run_broker
+from shelldon.contracts import Actor
+from shelldon.core.runtime import DEGRADE_TEXT, FACE_DEGRADED, Core
+from shelldon.display.renderer import StubRenderer
+from shelldon.display.service import run_display
+from shelldon.transport.cli import run_cli_transport
+from shelldon.worker.forkserver import ForkServer
+from shelldon.worker.worker import run_worker
+
+
+# --- controllable inbound source (the 1.6 _Source pattern) ---
+
+
+class _Source:
+    """A controllable inbound line source: `feed()` queues a line, `close()` ends
+    the stream. Stays open so the outbound half can be exercised before teardown."""
+
+    def __init__(self):
+        self._q: asyncio.Queue[str | None] = asyncio.Queue()
+
+    def feed(self, line: str) -> None:
+        self._q.put_nowait(line)
+
+    def close(self) -> None:
+        self._q.put_nowait(None)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> str:
+        item = await self._q.get()
+        if item is None:
+            raise StopAsyncIteration
+        return item
+
+
+# --- fake providers ---
+
+
+class OkProvider:
+    """Returns a reply immediately."""
+
+    async def complete(self, prompt: str) -> str:
+        return f"reply to: {prompt}"
+
+
+class GatedProvider:
+    """Blocks every call on a gate so a turn can be held 'in flight'. Once the gate
+    is opened it stays open, so later (catch-up) turns complete immediately."""
+
+    def __init__(self):
+        self.gate = asyncio.Event()
+        self.entered = 0
+
+    async def complete(self, prompt: str) -> str:
+        self.entered += 1
+        await self.gate.wait()
+        return f"reply to: {prompt}"
+
+
+class AlwaysTransientProvider:
+    """Raises a transient error on every attempt — forces the broker's single retry
+    to exhaust and return Result(ok=False) (AC3 failure path)."""
+
+    async def complete(self, prompt: str) -> str:
+        raise TransientProviderError("provider down")
+
+
+# --- in-process spawn seam with a concurrency counter (AC1/AC2) ---
+
+
+class Spawns:
+    """The in-process fork-server seam: `spawn` runs the worker as an asyncio task
+    and tracks max concurrency to assert ≤1; `reap` awaits the task."""
+
+    def __init__(self, worker=run_worker):
+        self._worker = worker
+        self.count = 0
+        self.live = 0
+        self.max_live = 0
+
+    async def spawn(self, socket_path, turn_id, prompt):
+        self.count += 1
+        self.live += 1
+        self.max_live = max(self.max_live, self.live)
+        return asyncio.create_task(self._worker(socket_path, turn_id, prompt))
+
+    async def reap(self, handle):
+        try:
+            await handle
+        finally:
+            self.live -= 1
+
+
+# --- harness: start all five actors in-process on one socket ---
+
+
+class Harness:
+    def __init__(self, core, tasks, source, outbound, renderer, spawns):
+        self.core = core
+        self.tasks = tasks
+        self.source = source
+        self.outbound = outbound
+        self.renderer = renderer
+        self.spawns = spawns
+
+    async def teardown(self):
+        for task in self.tasks:
+            task.cancel()
+        await asyncio.gather(*self.tasks, return_exceptions=True)
+        await self.core.bus.stop()
+
+
+async def _await(predicate, timeout=2.0):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition not met within timeout")
+
+
+async def build_harness(sock_path, *, provider, spawns, turn_timeout=5.0):
+    fs = ForkServer(sock_path, spawn=spawns.spawn, reap=spawns.reap, manage_gc=False)
+    await fs.preload()
+    core = Core(sock_path, fs, turn_timeout=turn_timeout)
+
+    source = _Source()
+    outbound: list[str] = []
+    renderer = StubRenderer()
+
+    async def sink(text: str) -> None:
+        outbound.append(text)
+
+    tasks = [
+        asyncio.create_task(core.run()),
+        asyncio.create_task(run_broker(sock_path, provider)),
+        asyncio.create_task(run_display(sock_path, renderer)),
+        asyncio.create_task(run_cli_transport(sock_path, inbound=source, outbound=sink)),
+    ]
+
+    # Bus must be up, and every receiver-side actor registered, before core emits to
+    # them (an unregistered destination drops the envelope).
+    await _await(lambda: core.bus._server is not None)
+    await _await(
+        lambda: all(
+            core.bus._registry.get(a) is not None
+            for a in (Actor.BROKER, Actor.DISPLAY, Actor.CHAT_TRANSPORT)
+        )
+    )
+    return Harness(core, tasks, source, outbound, renderer, spawns)
+
+
+# --- Task 5: AC1 — full turn round-trip ---
+
+
+async def test_ac1_full_turn_round_trip(sock_path):
+    spawns = Spawns()
+    h = await build_harness(sock_path, provider=OkProvider(), spawns=spawns)
+    try:
+        h.source.feed("hello pet")
+
+        # (a) the reply reaches the CLI outbound sink
+        await _await(lambda: h.outbound == ["reply to: hello pet"])
+        # (b) the display rendered at least one face snapshot (face reacted)
+        await _await(lambda: len(h.renderer.rendered) >= 1)
+        # (c) exactly one worker was spawned, never two concurrent
+        assert spawns.count == 1
+        assert spawns.max_live == 1
+    finally:
+        await h.teardown()
+
+
+# --- Task 6: AC2 — coalesce, never drop, never double-spawn ---
+
+
+async def test_ac2_coalesce_never_drop_never_double_spawn(sock_path):
+    provider = GatedProvider()
+    spawns = Spawns()
+    h = await build_harness(sock_path, provider=provider, spawns=spawns)
+    try:
+        # A starts a turn and blocks in the provider (turn in flight).
+        h.source.feed("A")
+        await _await(lambda: provider.entered == 1)
+        assert spawns.count == 1  # exactly one turn so far
+
+        # B arrives mid-turn: it must NOT spawn a second worker — it coalesces.
+        h.source.feed("B")
+        await asyncio.sleep(0.1)  # give a (wrong) second spawn a chance to happen
+        assert spawns.count == 1
+        assert spawns.max_live == 1
+
+        # Release the gate: A completes, then exactly ONE catch-up turn folds B in.
+        provider.gate.set()
+        await _await(lambda: h.outbound == ["reply to: A", "reply to: B"])
+        assert spawns.count == 2       # exactly two turns total
+        assert spawns.max_live == 1    # never two workers at once
+    finally:
+        await h.teardown()
+
+
+# --- Task 7: AC3 — graceful degrade, never hang ---
+
+
+async def test_ac3_degrade_on_failure_result(sock_path):
+    """Broker exhausts its single retry on a transient error -> Result(ok=False);
+    core surfaces the graceful 'can't think' reply + an error face, no hang."""
+    spawns = Spawns()
+    h = await build_harness(sock_path, provider=AlwaysTransientProvider(), spawns=spawns)
+    try:
+        h.source.feed("hello?")
+        await _await(lambda: h.outbound == [DEGRADE_TEXT])
+        await _await(
+            lambda: any(s.face == FACE_DEGRADED for s in h.renderer.rendered)
+        )
+    finally:
+        await h.teardown()
+
+
+async def test_ac3_turn_timeout_no_hang_and_late_result_discarded(sock_path):
+    """A worker that sends its Job only AFTER the turn timeout: core degrades within
+    the timeout (no hang), closes the turn, and the late Result is discarded by the
+    fence (AD-12) — no double-delivery, no second turn from the stale Result."""
+
+    async def late_worker(socket_path, turn_id, prompt):
+        await asyncio.sleep(0.6)  # longer than the turn timeout below
+        await run_worker(socket_path, turn_id, prompt)
+
+    spawns = Spawns(worker=late_worker)
+    h = await build_harness(
+        sock_path, provider=OkProvider(), spawns=spawns, turn_timeout=0.2
+    )
+    try:
+        h.source.feed("are you there?")
+
+        # Degrades within the timeout rather than hanging.
+        await _await(lambda: h.outbound == [DEGRADE_TEXT], timeout=1.0)
+
+        # The late Result eventually arrives (worker sleeps 0.6s) but is fenced out:
+        # the outbound sink still holds ONLY the degrade reply — no second delivery,
+        # no catch-up turn from the stale Result.
+        await asyncio.sleep(0.8)
+        assert h.outbound == [DEGRADE_TEXT]
+        assert spawns.count == 1  # no second turn spawned from the stale Result
+    finally:
+        await h.teardown()
