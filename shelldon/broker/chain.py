@@ -11,11 +11,14 @@ Story 2.1 builds + orders the chain; the broker executes the **primary** only. T
 automatic fallback that advances through this list is Story 2.2.
 """
 
+import logging
 import os
 
 from shelldon.broker.anthropic_provider import AnthropicProvider
 from shelldon.broker.openai_provider import OpenAIProvider
 from shelldon.broker.provider import LLMProvider
+
+log = logging.getLogger("shelldon.broker")
 
 _ZAI_BASE_URL = "https://api.z.ai/api/anthropic"
 
@@ -25,6 +28,7 @@ def _glm(env) -> LLMProvider:
         api_key=env.get("GLM_API_KEY") or env.get("ANTHROPIC_API_KEY"),
         base_url=env.get("GLM_BASE_URL") or env.get("ANTHROPIC_BASE_URL") or _ZAI_BASE_URL,
         model=env.get("GLM_MODEL") or env.get("ANTHROPIC_MODEL") or "glm-4.7",
+        name="glm",
     )
 
 
@@ -33,6 +37,7 @@ def _claude(env) -> LLMProvider:
         api_key=env.get("ANTHROPIC_API_KEY"),
         base_url=None,  # SDK default = native Anthropic
         model=env.get("CLAUDE_MODEL"),  # None → adapter's Claude default
+        name="claude",
     )
 
 
@@ -48,6 +53,7 @@ def _ollama(env) -> LLMProvider:
         api_key=env.get("OLLAMA_API_KEY") or "ollama",  # ignored by Ollama; SDK needs non-empty
         base_url=base,
         model=env.get("OLLAMA_MODEL"),
+        name="ollama",
     )
 
 
@@ -80,6 +86,7 @@ def _make_openai_compat(name, default_base, key_env, model_env):
             api_key=env.get(key_env),
             base_url=env.get(f"{name.upper()}_BASE_URL") or default_base,
             model=model,
+            name=name,
         )
 
     return build
@@ -97,9 +104,23 @@ def build_chain(env=None) -> list[LLMProvider]:
     missing — a misconfigured chain must not start silently degraded.
     """
     env = os.environ if env is None else env
-    names = [n.strip().lower() for n in env.get("PROVIDER_CHAIN", "glm").split(",") if n.strip()]
+    raw = env.get("PROVIDER_CHAIN", "glm").split(",")
+    names = [n.strip().lower() for n in raw if n.strip()]
+    if len(names) < len(raw):
+        # A stray/empty entry (e.g. "glm,,openai" or a trailing comma) is dropped —
+        # warn like the duplicate path rather than swallowing a likely typo silently.
+        log.warning("dropping %d blank entr(y/ies) from PROVIDER_CHAIN", len(raw) - len(names))
     if not names:
         raise RuntimeError("PROVIDER_CHAIN is empty")
+    # Drop duplicates (first occurrence wins): a repeated preset only wastes a
+    # fallback slot on the same provider (Story 2.2). Warn rather than silently build.
+    deduped: list[str] = []
+    for name in names:
+        if name in deduped:
+            log.warning("dropping duplicate provider preset %r from chain", name)
+            continue
+        deduped.append(name)
+    names = deduped
     chain: list[LLMProvider] = []
     for name in names:
         builder = _PRESETS.get(name)

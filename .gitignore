@@ -1,21 +1,73 @@
-__pycache__/
-*.py[cod]
-.venv/
+# Environment variables files
 .env
 .env.*
-.pytest_cache/
-*.egg-info/
-dist/
-build/
-.shelldon/
-
-ARCHITECTURE_V2.md
-
-logos/*
-
-glm_claude.sh
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+!.env.example
 
 # tooling / framework installs (not product code)
 .claude/
 .agents/
 _bmad/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+
+# Local logo files I want to ignore, but not the ones in the repo
+logos/
+
+# Local scripts I want to ignore, but not the ones in the repo
+glm_claude.sh

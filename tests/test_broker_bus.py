@@ -12,6 +12,8 @@ from shelldon.core.bus import BusServer, connect, write_frame
 
 
 class _OK:
+    name = "test"
+
     def __init__(self, text="pong"):
         self.text = text
 

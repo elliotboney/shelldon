@@ -10,6 +10,10 @@ from typing import Protocol, runtime_checkable
 
 @runtime_checkable
 class LLMProvider(Protocol):
+    #: Audit label (the chain preset name, e.g. "glm"/"ollama") — never a credential.
+    #: The fallback chain records which provider answered by this name (Story 2.2).
+    name: str
+
     async def complete(self, prompt: str) -> str:
         """Return the model's text completion for `prompt`."""
         ...

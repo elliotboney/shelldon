@@ -37,6 +37,8 @@ class _Collector:
 class _RecordingProvider:
     """Provider stub that fails the test if `complete` is ever called."""
 
+    name = "test"
+
     def __init__(self):
         self.calls = 0
 
@@ -69,7 +71,7 @@ async def test_non_job_envelope_is_skipped():
     out = _Collector()
     provider = _RecordingProvider()
 
-    await asyncio.wait_for(_serve_connection(reader, out, provider), timeout=5)
+    await asyncio.wait_for(_serve_connection(reader, out, [provider]), timeout=5)
 
     assert provider.calls == 0      # non-Job was skipped, not handled
     assert len(out.buf) == 0        # nothing written back for a skipped frame
@@ -82,7 +84,7 @@ async def test_clean_eof_ends_connection():
     out = _Collector()
     provider = _RecordingProvider()
 
-    await asyncio.wait_for(_serve_connection(reader, out, provider), timeout=5)
+    await asyncio.wait_for(_serve_connection(reader, out, [provider]), timeout=5)
 
     assert provider.calls == 0
     assert len(out.buf) == 0
