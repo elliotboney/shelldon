@@ -37,6 +37,7 @@ from shelldon.contracts import (
 from shelldon.core.arbiter import Arbiter
 from shelldon.core.bus import BusServer
 from shelldon.core.faces import DEFAULT_FACES_PATH, FaceRegistry
+from shelldon.core.history import DEFAULT_HISTORY_PATH, HistoryStore
 from shelldon.core.reflexes import compute_reflex_patch
 from shelldon.core.state import DEFAULT_CHECKPOINT_PATH, PersistentState
 from shelldon.core.turn import TurnFence
@@ -79,6 +80,7 @@ class Core:
         checkpoint_interval: float = DEFAULT_CHECKPOINT_INTERVAL,
         reflex_interval: float = DEFAULT_REFLEX_INTERVAL,
         faces_path=None,
+        history_path=None,
     ):
         if checkpoint_interval <= 0:
             raise ValueError(f"checkpoint_interval must be positive, got {checkpoint_interval!r}")
@@ -98,6 +100,13 @@ class Core:
         #: The editable faces registry — core owns the mood->face vocabulary (AD-5)
         #: and maps the drifting mood to a token (Story 3.3); the display renders it.
         self.faces = FaceRegistry.load(faces_path if faces_path is not None else DEFAULT_FACES_PATH)
+        #: Conversation history — core is the sole writer (AD-6/AD-5); records each
+        #: completed turn's (owner, pet) pair. Workers read it read-only (Story 4.4).
+        self.history = HistoryStore.open(history_path if history_path is not None else DEFAULT_HISTORY_PATH)
+        #: The owner prompt + turn_id of the in-flight turn (≤1, AD-9), stashed at
+        #: turn start so a completed/degraded turn can be paired and recorded.
+        self._current_prompt: str | None = None
+        self._current_turn_id: str | None = None
         #: The face token currently on screen — both lifecycle and mood pushes update
         #: it, so a mood face re-pushes after a lifecycle face and identical mood ticks
         #: don't spam the display.
@@ -142,6 +151,8 @@ class Core:
         """Open a fenced turn, push the 'thinking' face, spawn the worker, schedule
         its reap (fire-and-forget — the Result returns over the bus), arm the timeout."""
         turn_id = uuid4().hex
+        self._current_prompt = prompt  # stash to pair with the reply for history (4.1)
+        self._current_turn_id = turn_id
         self.fence.open(turn_id)
         await self._push_face(FACE_THINKING)
         try:
@@ -172,6 +183,7 @@ class Core:
         if result.ok:
             await self._send_reply(result.payload)
             await self._push_face(FACE_REPLY)
+            self._record_turn(result.payload)
         else:
             await self._degrade()
         folded = self.arbiter.complete()
@@ -235,6 +247,19 @@ class Core:
         a failure Result AND on turn timeout."""
         await self._send_reply(DEGRADE_TEXT)
         await self._push_face(FACE_DEGRADED)
+        self._record_turn(DEGRADE_TEXT)  # the degrade ack IS the pet's reply this turn
+
+    def _record_turn(self, pet_text: str) -> None:
+        """Record the in-flight turn's (owner, pet) pair to history (AD-6). Skipped
+        if no turn is in flight (e.g. a spawn that never produced a reply)."""
+        if self._current_prompt is None:
+            return
+        try:
+            self.history.record_turn(self._current_turn_id, self._current_prompt, pet_text, datetime.now(UTC))
+        except Exception as exc:
+            # History is best-effort bookkeeping — the reply is already delivered.
+            # A sqlite failure (locked/disk-full) must NOT take down the turn loop.
+            log.warning("history record failed (%s); reply already delivered", exc)
 
     def _next_seq(self) -> int:
         self._seq += 1
@@ -342,3 +367,7 @@ class Core:
             self._checkpoint_if_dirty()
         except Exception as exc:  # pragma: no cover - defensive teardown guard
             log.warning("checkpoint on shutdown failed (%s); state left at last good", exc)
+        try:
+            self.history.close()
+        except Exception as exc:  # pragma: no cover - defensive teardown guard
+            log.warning("history close failed (%s)", exc)
