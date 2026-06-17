@@ -47,8 +47,8 @@ development_status:
   1-5-fork-server-worker-that-runs-one-turn-and-dies: done
   1-6-one-chat-transport-adapter-over-a-transport-agnostic-contract: done
   1-7-display-service-shows-the-pets-face-from-core-state: done
-  1-8-end-to-end-turn-message-in-reply-out-face-reacts: review
-  1-9-endurance-sustained-turns-without-memory-growth: backlog
+  1-8-end-to-end-turn-message-in-reply-out-face-reacts: done
+  1-9-endurance-sustained-turns-without-memory-growth: review
   epic-1-retrospective: optional
 
   # --- Epic 2: Resilient Brain ---

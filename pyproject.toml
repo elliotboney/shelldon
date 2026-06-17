@@ -28,6 +28,9 @@ packages = ["shelldon"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "soak: long-running endurance/soak proof (NFR2)",
+]
 
 # AD-1: core/ must never import an LLM/provider library — enforced mechanically.
 [tool.importlinter]
