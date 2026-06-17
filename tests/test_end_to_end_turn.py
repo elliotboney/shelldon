@@ -63,6 +63,8 @@ class _Source:
 class OkProvider:
     """Returns a reply immediately."""
 
+    name = "fake"
+
     async def complete(self, prompt: str) -> str:
         return f"reply to: {prompt}"
 
@@ -70,6 +72,8 @@ class OkProvider:
 class GatedProvider:
     """Blocks every call on a gate so a turn can be held 'in flight'. Once the gate
     is opened it stays open, so later (catch-up) turns complete immediately."""
+
+    name = "fake"
 
     def __init__(self):
         self.gate = asyncio.Event()
@@ -85,8 +89,26 @@ class AlwaysTransientProvider:
     """Raises a transient error on every attempt — forces the broker's single retry
     to exhaust and return Result(ok=False) (AC3 failure path)."""
 
+    name = "fake"
+
     async def complete(self, prompt: str) -> str:
         raise TransientProviderError("provider down")
+
+
+class RecoverableProvider:
+    """Down while `self.down` is True (raises like an outage), then answers once
+    flipped — drives AC3 auto-recovery: a turn degrades during the outage, and the
+    NEXT turn completes normally with no latched 'degraded mode' to clear."""
+
+    name = "fake"
+
+    def __init__(self):
+        self.down = True
+
+    async def complete(self, prompt: str) -> str:
+        if self.down:
+            raise TransientProviderError("offline")
+        return f"reply to: {prompt}"
 
 
 # --- in-process spawn seam with a concurrency counter (AC1/AC2) ---
@@ -144,7 +166,15 @@ async def _await(predicate, timeout=2.0):
     raise AssertionError("condition not met within timeout")
 
 
-async def build_harness(sock_path, *, provider, spawns, turn_timeout=5.0):
+async def build_harness(sock_path, *, provider=None, spawns, turn_timeout=5.0, chain=None):
+    # `provider=` (single fake) and `chain=` (a real multi-element provider chain,
+    # AC1) are mutually exclusive — exactly one must be given.
+    if provider is None and chain is None:
+        raise ValueError("build_harness: pass one of provider= or chain= (got neither)")
+    if provider is not None and chain is not None:
+        raise ValueError("build_harness: pass one of provider= or chain= (got both)")
+    broker_chain = chain if chain is not None else [provider]
+
     fs = ForkServer(sock_path, spawn=spawns.spawn, reap=spawns.reap, manage_gc=False)
     await fs.preload()
     core = Core(sock_path, fs, turn_timeout=turn_timeout)
@@ -158,7 +188,7 @@ async def build_harness(sock_path, *, provider, spawns, turn_timeout=5.0):
 
     tasks = [
         asyncio.create_task(core.run()),
-        asyncio.create_task(run_broker(sock_path, [provider])),
+        asyncio.create_task(run_broker(sock_path, broker_chain)),
         asyncio.create_task(run_display(sock_path, renderer)),
         asyncio.create_task(run_cli_transport(sock_path, inbound=source, outbound=sink)),
     ]
@@ -266,5 +296,84 @@ async def test_ac3_turn_timeout_no_hang_and_late_result_discarded(sock_path):
         await asyncio.sleep(0.8)
         assert h.outbound == [DEGRADE_TEXT]
         assert spawns.count == 1  # no second turn spawned from the stale Result
+    finally:
+        await h.teardown()
+
+
+# --- Story 2.3: AC1 — whole-CHAIN exhaustion degrades end-to-end ---
+
+
+async def test_ac1_whole_chain_exhaustion_degrades(sock_path):
+    """A real 2-provider chain where BOTH providers fail: the broker iterates both,
+    exhausts the chain (Story 2.2), returns the terminal failure Result, and core
+    degrades — proving AC1's literal 'whole chain' (not just a single provider)."""
+    spawns = Spawns()
+    h = await build_harness(
+        sock_path,
+        chain=[AlwaysTransientProvider(), AlwaysTransientProvider()],
+        spawns=spawns,
+    )
+    try:
+        h.source.feed("hello?")
+        await _await(lambda: h.outbound == [DEGRADE_TEXT])
+        await _await(
+            lambda: any(s.face == FACE_DEGRADED for s in h.renderer.rendered)
+        )
+        # Process stays alive: no latch, ready for the next turn.
+        await _await(lambda: h.core.arbiter.is_idle)
+        assert h.core.fence.is_idle
+    finally:
+        await h.teardown()
+
+
+# --- Story 2.3: AC3 — auto-recovery (no latched degraded mode) ---
+
+
+async def test_ac3_auto_recovers_when_provider_returns(sock_path):
+    """Degrade during an outage, then resume normal turns the instant the provider
+    answers again — no latched 'degraded mode', because each turn independently
+    re-attempts the chain."""
+    provider = RecoverableProvider()
+    spawns = Spawns()
+    h = await build_harness(sock_path, provider=provider, spawns=spawns)
+    try:
+        # Outage: the turn degrades.
+        h.source.feed("are you there?")
+        await _await(lambda: h.outbound == [DEGRADE_TEXT])
+
+        # Provider comes back; the NEXT turn completes normally with model text.
+        provider.down = False
+        h.source.feed("you back?")
+        await _await(
+            lambda: h.outbound == [DEGRADE_TEXT, "reply to: you back?"]
+        )
+        assert spawns.count == 2  # two real turns ran; nothing latched
+    finally:
+        await h.teardown()
+
+
+# --- Story 2.3: AC2 — offline acknowledges promptly (no hang) ---
+
+
+async def test_ac2_offline_acknowledges_without_hanging(sock_path):
+    """Fully offline (every provider raises) with a LONG turn timeout: the degrade
+    ack must arrive fast — from the chain's fast failure Result, NOT by waiting out
+    the turn timeout. A bounded 2s wait against a 30s timeout proves 'no hang'."""
+    spawns = Spawns()
+    h = await build_harness(
+        sock_path,
+        chain=[AlwaysTransientProvider(), AlwaysTransientProvider()],
+        spawns=spawns,
+        turn_timeout=30.0,
+    )
+    try:
+        h.source.feed("anyone home?")
+        # Well under the 30s turn timeout — the failure Result drives degrade.
+        # 5s gives slack for a loaded CI host while still proving 6× headroom vs
+        # the timeout (degrade came from the failure path, not the timeout).
+        await _await(lambda: h.outbound == [DEGRADE_TEXT], timeout=5.0)
+        # The slot is released after degrade (arbiter.complete() ran on the
+        # failure path) — a stuck-True slot would coalesce every later turn.
+        await _await(lambda: h.core.arbiter.is_idle)
     finally:
         await h.teardown()

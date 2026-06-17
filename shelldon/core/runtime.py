@@ -12,11 +12,12 @@ injected **spawner** (anything with `async spawn_turn(turn_id, prompt)`,
 the composition root (the integration test, or a later `app.py`) injects the real
 `ForkServer`.
 
-Scope (1.8): ≤1 + coalescing + degrade-on-failure + a minimal turn timeout. The
+Scope: ≤1 + coalescing + degrade-on-chain-exhaustion + a minimal turn timeout. The
 prompt IS the owner's message text (real prompt assembly is Epic 4); faces are
-placeholder lifecycle tokens (real expressions are Story 3.3); cooldown/budget and
-the full provider chain are Epic 2 / Epic 5; a full watchdog/supersession escalation
-is Epic 2.
+placeholder lifecycle tokens (real expressions are Story 3.3). The provider chain +
+fallback + the degrade-to-reflex-ack on whole-chain exhaustion are live (Epic 2,
+Story 2.3); cooldown/budget are Epic 5; a full watchdog/supersession escalation is
+later.
 """
 
 import asyncio
@@ -44,7 +45,8 @@ FACE_THINKING = "thinking"
 FACE_REPLY = "happy"
 FACE_DEGRADED = "cant-think"
 
-#: Graceful "can't think right now" reply (AC3). Full degrade-to-reflex is Epic 2.
+#: Graceful "can't think right now" reply (AC3) — the chain-exhaustion reflex ack
+#: (Story 2.3). The real resident reflex loop is Epic 3 / Story 3.2.
 DEGRADE_TEXT = "…can't think right now…"
 
 #: Default turn timeout (AC3 "rather than hanging"). Tests inject a small value.

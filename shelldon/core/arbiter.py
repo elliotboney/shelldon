@@ -4,8 +4,8 @@ Core decides whether a turn may begin; the fork-server (worker/) executes it.
 While a turn is in flight, further owner messages do NOT spawn a second worker and
 are NOT dropped — they coalesce into a SINGLE pending catch-up slot, and the next
 turn folds in everything accumulated since it started (AD-9: "a single pending
-catch-up slot — never a growing backlog of turns"). Cooldown, credit/battery
-budget, and the full degrade-to-reflex chain are Epic 2 / Epic 5.
+catch-up slot — never a growing backlog of turns"). The degrade-to-reflex ack on
+whole-chain exhaustion is live (Story 2.3); cooldown, credit/battery budget are Epic 5.
 
 Pure policy — no I/O, no asyncio. The core runtime (single-consumer loop) calls
 it, so access is already serial; no lock is needed for that design.
@@ -18,6 +18,15 @@ class Arbiter:
     def __init__(self):
         self.worker_in_flight = False
         self._pending: list[str] = []
+
+    @property
+    def is_idle(self) -> bool:
+        """True when no turn is in flight (slot free, ready for the next turn).
+
+        Lets callers/tests assert on intent ("idle?") rather than the
+        `worker_in_flight` field, which may be reshaped by later admission policy
+        (cooldown/credit/battery — Epic 5)."""
+        return not self.worker_in_flight
 
     def submit(self, text: str) -> str | None:
         """Admit an owner message.
@@ -55,7 +64,8 @@ class Arbiter:
         error) — without this the slot stays reserved forever and every later
         message silently coalesces into a pending slot that never flushes. The
         dropped catch-up is accepted degraded behavior; guaranteed redelivery for
-        a failed-to-start turn is Epic 2.
+        a failed-to-start turn is still deferred — Epic 2 delivered the provider
+        chain + degrade-to-reflex (Story 2.3), NOT redelivery.
         """
         self.worker_in_flight = False
         self._pending.clear()
