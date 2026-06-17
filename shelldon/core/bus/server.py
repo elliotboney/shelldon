@@ -116,6 +116,15 @@ class BusServer:
                 self._handlers.discard(task)
             writer.close()
 
+    async def deliver(self, env: Envelope) -> None:
+        """Emit a core-originated envelope onto the bus (AD-13/AD-5).
+
+        Core is the hub AND a source: the runtime (Story 1.8) calls this to push
+        OUTBOUND_MSG/STATE_SNAPSHOT outward. It routes identically to an inbound
+        frame — a thin wrapper over `_route`, no new routing logic.
+        """
+        await self._route(env)
+
     async def _route(self, env: Envelope) -> None:
         dest = ROUTING_TABLE[env.kind]
         if dest is Actor.CORE:

@@ -25,6 +25,14 @@ Cheap coverage gaps over already-shipped code, completed in parallel without sco
 - **[1.6] framing-`ValueError → clean-exit` in `_outbound_loop` untested** — only reachable via a corrupt length prefix on the adapter's own connection (the hub validates upstream); low value, add alongside 1.8 end-to-end wiring.
 - All other items below remain deferred per their original reasons (resilience/Epic 2, or by-design-until-1.8).
 
+## Deferred from: code review of 1-8-end-to-end-turn-message-in-reply-out-face-reacts (2026-06-16)
+
+- **Timeout + pending catch-up prompt dropped on `WorkerBusyError`** — when P1 catches `WorkerBusyError` in `_start_turn`, the coalesced catch-up prompt is lost (not re-queued). Full watchdog/reschedule with guaranteed delivery is Epic 2 scope.
+- **`_handle_result` — `arbiter.complete()` not called if `bus.deliver` raises** — `_route` already catches `OSError` so risk is low; handle in resilience hardening story.
+- **AC1 test missing face token assertions** — `len(renderer.rendered) >= 1` is checked but not the face token values (`FACE_THINKING` then `FACE_REPLY`). AC is met; add token assertions with display integration test.
+- **Timeout test timing flakiness** — `asyncio.sleep(0.8)` after degrade assert has no anchor to turn start; fix with direct `fence.current` state assertion when test hardening begins.
+- **`_await` helper poor diagnostics** — raises bare `AssertionError("condition not met")` with no registry state; add context when CI debugging is needed.
+
 ## Deferred from: code review of 1-6-one-chat-transport-adapter-over-a-transport-agnostic-contract (2026-06-16)
 
 - **`_default_inbound` executor thread leak on cancellation** — `sys.stdin.readline` in `run_in_executor` cannot be interrupted; thread blocks until process exit if the transport is torn down before stdin closes. Fix requires custom executor or non-blocking stdin approach (e.g. `aioconsole`). Revisit when production CLI use cases are hardened.
