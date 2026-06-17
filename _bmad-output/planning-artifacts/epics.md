@@ -21,7 +21,7 @@ FR1 (CAP-1): The owner sends a text message over the pluggable chat transport; a
 FR2 (CAP-2): Resident reflexes (blink, idle, time-of-day mood) run continuously between LLM turns off a persistent mood/energy/last-interaction struct, independent of the ephemeral brain and even with the network down.
 FR3 (CAP-3, optional): Optional physical sensing — PiSugar2 button and BLE presence of paired devices — feeds the pet's state/reactions via the plugin model; the chat-bot pet functions fully without it.
 FR4 (CAP-4): The pet acts proactively, initiating behavior with no preceding user input, driven by personality state and environment.
-FR5 (CAP-5): All privileged operations — credential access, the LLM call, tool execution, safety policy — pass through a single capability broker that also abstracts the LLM provider.
+FR5 (CAP-5): All privileged operations — credential access and the LLM call — pass through a single capability broker that also abstracts the LLM provider. (Tool execution + safety policy deferred — see SPEC Non-goals; broker is their designated home if added later.)
 FR6 (CAP-6): Hybrid memory persists context across ephemeral turns — sqlite conversation history (ordered, timestamped, FTS5 recall) + a `learnings` table; markdown curated layer (`about.md`, `facts/`, `people/`, broker-gated `vault/`). Prior-turn content is recallable and curated facts influence later behavior.
 FR7 (CAP-7): One generalized plugin model (hardware + behavioral) — plugins emit events, subscribe to broadcast event kinds, own private state, and claim a display region; a new plugin is added without changing `core/` and the import-linter still passes.
 FR8 (CAP-8): On an LLM call failure (error/timeout/rate-limit) the broker retries and falls through the ordered provider chain; if every provider fails, the pet degrades to reflex-only.
@@ -183,7 +183,7 @@ So that a single GLM hiccup doesn't kill a turn and no other process ever touche
 
 **Acceptance Criteria:**
 
-**Given** the broker process holding the GLM credential (GLM-5.2 via the Z.ai OpenAI-compatible endpoint)
+**Given** the broker process holding the GLM credential (GLM-5.2 via the Z.ai **Anthropic-compatible** endpoint — the Anthropic-format adapter is the first one built)
 **When** core sends a model `Job` over the bus
 **Then** the broker injects the credential internally, calls the model, and returns a `Result` — with the credential never appearing on the bus or in core
 
@@ -305,7 +305,7 @@ So that GLM is just the first choice and alternates are one config line away —
 **Given** the broker
 **When** providers are configured
 **Then** each provider sits behind one common adapter interface, and the broker reads an ordered chain (GLM first, then alternates) from config
-**And** a single OpenAI-compatible adapter serves the OpenAI-compatible endpoints (Ollama-over-LAN, OpenAI, OpenRouter), with GLM via its compatible endpoint
+**And** adapters group by wire format: the **first adapter built is Anthropic-format** (serving GLM-5.2 via Z.ai's Anthropic-compatible endpoint, plus native Claude), a single **OpenAI-compatible** adapter serves the OpenAI-compatible endpoints (Ollama-over-LAN, OpenAI, OpenRouter), and **Gemini** — compatible with neither — gets its own adapter
 
 **Given** a reordered or extended provider chain in config
 **When** the broker restarts
