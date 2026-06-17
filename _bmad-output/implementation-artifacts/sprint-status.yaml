@@ -1,0 +1,96 @@
+# generated: 2026-06-16 10:47:47 CDT
+# last_updated: 2026-06-16 10:47:47 CDT
+# project: shelldon
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: {project-root}/_bmad-output/implementation-artifacts
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in stories folder
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when first story is created
+# - Stories can be worked in parallel if team capacity allows
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+# - Daily-driver line = Epics 1-4 + story 1-9 (soak); Epics 5-7 are enrichment
+
+generated: 2026-06-16 10:47:47 CDT
+last_updated: 2026-06-16 10:47:47 CDT
+project: shelldon
+project_key: NOKEY
+tracking_system: file-system
+story_location: {project-root}/_bmad-output/implementation-artifacts
+
+development_status:
+  # --- Epic 1: Talking Pet (walking skeleton) ---
+  epic-1: backlog
+  1-1-greenfield-scaffold-with-an-enforced-llm-free-core-and-m0-tests: backlog
+  1-2-versioned-message-contracts: backlog
+  1-3-envelope-bus-over-unix-domain-sockets-hub-routed-through-core: backlog
+  1-4-capability-broker-with-one-provider-and-basic-retry: backlog
+  1-5-fork-server-worker-that-runs-one-turn-and-dies: backlog
+  1-6-one-chat-transport-adapter-over-a-transport-agnostic-contract: backlog
+  1-7-display-service-shows-the-pets-face-from-core-state: backlog
+  1-8-end-to-end-turn-message-in-reply-out-face-reacts: backlog
+  1-9-endurance-sustained-turns-without-memory-growth: backlog
+  epic-1-retrospective: optional
+
+  # --- Epic 2: Resilient Brain ---
+  epic-2: backlog
+  2-1-provider-abstraction-and-an-ordered-chain: backlog
+  2-2-automatic-fallback-through-the-chain: backlog
+  2-3-degrade-to-reflex-only-when-the-whole-chain-fails: backlog
+  epic-2-retrospective: optional
+
+  # --- Epic 3: A Pet That Feels Alive ---
+  epic-3: backlog
+  3-1-persistent-personality-state-struct: backlog
+  3-2-resident-reflex-loop: backlog
+  3-3-expressive-face-via-the-display-compositor: backlog
+  epic-3-retrospective: optional
+
+  # --- Epic 4: Memory & Continuity ---
+  epic-4: backlog
+  4-1-conversation-history-store: backlog
+  4-2-curated-markdown-memory-and-memory-ops: backlog
+  4-3-vault-with-os-level-isolation: backlog
+  4-4-memory-shapes-the-turn: backlog
+  epic-4-retrospective: optional
+
+  # --- Epic 5: Autonomous Life ---
+  epic-5: backlog
+  5-1-core-scheduler-with-named-multi-cadence-jobs: backlog
+  5-2-cost-tier-gating-and-credit-budget: backlog
+  5-3-battery-aware-backoff: backlog
+  5-4-proactive-action: backlog
+  epic-5-retrospective: optional
+
+  # --- Epic 6: Dreaming & Learning ---
+  epic-6: backlog
+  6-1-capture-learnings-on-the-hot-path: backlog
+  6-2-dream-cycle-classify-promote-prune: backlog
+  epic-6-retrospective: optional
+
+  # --- Epic 7: Extensibility & Optional Embodiment ---
+  epic-7: backlog
+  7-1-plugin-host-and-the-generalized-plugin-contract: backlog
+  7-2-broadcast-event-subscriptions: backlog
+  7-3-xp-leveling-plugin-optional: backlog
+  7-4-optional-physical-sensing-button-ble-presence: backlog
+  epic-7-retrospective: optional
