@@ -165,7 +165,7 @@ async def test_real_fork_rss_stays_flat(sock_path):
     the PARENT's RSS stays flat over a sustained run. Linux/Pi only."""
     fs = ForkServer(sock_path)  # real os.fork() + os.waitpid(); preload freezes GC
     await fs.preload()
-    core = Core(sock_path, fs, turn_timeout=10.0)
+    core = Core(sock_path, fs, turn_timeout=10.0, reflex_interval=3600)  # no mood push during the soak
 
     source = _Source()
     outbound: list[str] = []

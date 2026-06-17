@@ -14,15 +14,16 @@ import shelldon.core.runtime as _runtime
 
 @pytest.fixture(autouse=True)
 def _isolate_state_checkpoint(tmp_path, monkeypatch):
-    """Never let a test write the real ~/.shelldon/state.json.
+    """Never let a test write real ~/.shelldon files.
 
-    A Core constructed without an explicit checkpoint_path falls back to
-    DEFAULT_CHECKPOINT_PATH (~/.shelldon/state.json). Story 3.2 makes state dirty on
-    every inbound message (last_interaction), so teardown's flush-if-dirty would hit
-    real $HOME. Redirect the default at a tmp file for every test (Story 3.1/3.2:
-    "no test may write real $HOME").
+    A Core constructed without explicit paths falls back to DEFAULT_CHECKPOINT_PATH
+    (~/.shelldon/state.json) and DEFAULT_FACES_PATH (~/.shelldon/faces.toml). Story
+    3.2 dirties state on every inbound message; Story 3.3 seeds faces.toml on load —
+    both would hit real $HOME. Redirect the defaults at tmp files for every test
+    (Story 3.1/3.2/3.3: "no test may write real $HOME").
     """
     monkeypatch.setattr(_runtime, "DEFAULT_CHECKPOINT_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(_runtime, "DEFAULT_FACES_PATH", tmp_path / "faces.toml")
 
 
 @pytest.fixture(autouse=True)

@@ -417,6 +417,28 @@ So that I can read how my pet feels at a glance — the soul on the screen.
 **When** each state is set
 **Then** each renders a visibly distinct, recognizable face — not a single static placeholder, and not a vaguer "some faces" interpretation
 
+> **Owner decision 2026-06-17 — faces are self-modifiable data, not a hardcoded enum.** The starter set is *seeded* into an editable `~/.shelldon/faces.toml` registry; **core** (sole writer of soul data, AD-5) owns it, maps mood→face, and pushes the token (the display stays a dumb renderer — a sanctioned deviation from "display maps"). Story 3.3 builds the substrate + the in-core `apply_add_face` (validate + atomic comment-preserving write). The **chat-driven** half is split to Story 3.4.
+
+### Story 3.4: Self-modify faces via chat
+
+As the owner,
+I want to tell the pet (in chat) to add or tweak a face, and have it do so,
+So that its expressions grow with it — the v1 capability I loved, made safe under single-writer core.
+
+**Acceptance Criteria:**
+
+**Given** an owner message asking for a new/changed face
+**When** the turn runs
+**Then** the worker proposes a structured `add_face` memory-op in its `Result` (the first AD-6 memory-op — `Result` carries *proposed* changes, no free-text writes), with **no credentials and no direct write** (workers never write — AD-5)
+
+**Given** a proposed `add_face`
+**When** core receives the `Result`
+**Then** core **validates and applies** it via Story 3.3's `apply_add_face` (atomic, comment-preserving `faces.toml` write), rejecting a malformed proposal without mutating anything, and the new face is selectable on the next mood match
+
+**Given** this is the first memory-op
+**When** Epic 4 builds the full memory-op suite (`remember`/`rewrite_about`/`log_episode`/`capture_learning`, AD-6)
+**Then** they **reuse** this `Result`-carries-proposed-ops + core-validates-and-applies machinery — 3.4 seeds the pattern, it is not a throwaway
+
 ---
 
 ## Epic 4: Memory & Continuity

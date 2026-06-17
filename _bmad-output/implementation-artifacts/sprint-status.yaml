@@ -31,7 +31,7 @@
 # - Daily-driver line = Epics 1-4 + story 1-9 (soak); Epics 5-7 are enrichment
 
 generated: 2026-06-16 10:47:47 CDT
-last_updated: 2026-06-17 CDT  # story 3.2 review addressed (4 fixed, 1 declined)
+last_updated: 2026-06-17 CDT  # story 3.3 implemented (review)
 project: shelldon
 project_key: NOKEY
 tracking_system: file-system
@@ -61,8 +61,9 @@ development_status:
   # --- Epic 3: A Pet That Feels Alive ---
   epic-3: in-progress
   3-1-persistent-personality-state-struct: done
-  3-2-resident-reflex-loop: review
-  3-3-expressive-face-via-the-display-compositor: backlog
+  3-2-resident-reflex-loop: done
+  3-3-expressive-face-via-the-display-compositor: review
+  3-4-self-modify-faces-via-chat: backlog  # split from 3.3 (2026-06-17): LLM proposes add_face over a Result; core applies via 3.3's apply_add_face (AD-6 memory-op seed)
   epic-3-retrospective: optional
 
   # --- Epic 4: Memory & Continuity ---
