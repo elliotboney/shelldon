@@ -46,3 +46,20 @@ forbidden_modules = [
     "zhipuai",
     "ollama",
 ]
+
+# AD-13/NFR9: a chat-transport adapter owns only its own connection credential and
+# never touches model/tool creds — the broker is the sole holder (AD-2). Proven
+# mechanically: transport/ imports no provider SDK and no broker cred path.
+[[tool.importlinter.contracts]]
+name = "transport holds no model/tool creds (AD-13/NFR9)"
+type = "forbidden"
+source_modules = ["shelldon.transport"]
+forbidden_modules = [
+    "openai",
+    "anthropic",
+    "google",
+    "litellm",
+    "zhipuai",
+    "ollama",
+    "shelldon.broker",
+]

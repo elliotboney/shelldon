@@ -31,6 +31,19 @@ class MsgKind(StrEnum):
 
     JOB = "job"
     RESULT = "result"
+    INBOUND_MSG = "inbound-message"
+    OUTBOUND_MSG = "outbound-message"
+    STATE_SNAPSHOT = "state-snapshot"
+
+
+class Region(StrEnum):
+    """Closed/registered display region ids (AD-5). The display is a compositor of
+    regions, each with its own latest-wins snapshot stream; core owns the `face`
+    region. A typo can't silently mint a new region — that's why this is an enum,
+    not a free string. Plugin-claimed widget regions are added here in Epic 7.
+    """
+
+    FACE = "face"
 
 
 class Job(msgspec.Struct, frozen=True, tag="job", forbid_unknown_fields=True):
@@ -52,9 +65,55 @@ class Result(msgspec.Struct, frozen=True, tag="result", forbid_unknown_fields=Tr
     error: str | None = None
 
 
+class InboundMessage(msgspec.Struct, frozen=True, tag="inbound-message", forbid_unknown_fields=True):
+    """An owner message entering core from a chat-transport adapter (AD-13).
+
+    The transport-agnostic inbound half of the message contract: a CLI, Telegram,
+    or web adapter all emit this, so core never knows which surface produced it.
+    Single-owner for now; a later multi-user adapter adds `chat_id`/`user_id` as an
+    OPTIONAL field with a default — a non-breaking wire add (AD-13/AD-6) — so do not
+    introduce one before that story needs it.
+    """
+
+    text: str
+
+
+class OutboundMessage(msgspec.Struct, frozen=True, tag="outbound-message", forbid_unknown_fields=True):
+    """A pet reply leaving core for a chat-transport adapter to render (AD-13).
+
+    The transport-agnostic outbound half: core emits this without knowing whether
+    the adapter prints to a terminal or posts to a bot. Same single-owner shaping
+    note as InboundMessage.
+    """
+
+    text: str
+
+
+class StateSnapshot(msgspec.Struct, frozen=True, tag="state-snapshot", forbid_unknown_fields=True):
+    """A face/state snapshot core pushes to the display (AD-5). Core is the sole
+    writer; the display never reads shared memory — it renders what arrives.
+
+    `seq` is the per-region monotonic sequence: the display applies latest-wins and
+    drops any snapshot whose `seq` is not strictly greater than the latest it has
+    accepted for that region. `face` is a minimal placeholder expression token for
+    the walking skeleton — the real starter emotion set and the mood->face mapping
+    are Story 3.3, not here.
+    """
+
+    region: Region
+    seq: int
+    face: str
+
+
 #: Body type -> the header `kind` it must travel under (single source of truth
 #: for the kind<->body agreement enforced in Envelope.__post_init__).
-_KIND_FOR_BODY = {Job: MsgKind.JOB, Result: MsgKind.RESULT}
+_KIND_FOR_BODY = {
+    Job: MsgKind.JOB,
+    Result: MsgKind.RESULT,
+    InboundMessage: MsgKind.INBOUND_MSG,
+    OutboundMessage: MsgKind.OUTBOUND_MSG,
+    StateSnapshot: MsgKind.STATE_SNAPSHOT,
+}
 
 
 class Envelope(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -75,7 +134,7 @@ class Envelope(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     kind: MsgKind
     src: Actor
     dst: Actor | None
-    body: Job | Result
+    body: Job | Result | InboundMessage | OutboundMessage | StateSnapshot
     v: int = SCHEMA_VERSION
     turn_id: str | None = None
 
@@ -94,6 +153,9 @@ class Envelope(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
 ROUTING_TABLE: dict[MsgKind, Actor] = {
     MsgKind.JOB: Actor.BROKER,
     MsgKind.RESULT: Actor.CORE,
+    MsgKind.INBOUND_MSG: Actor.CORE,
+    MsgKind.OUTBOUND_MSG: Actor.CHAT_TRANSPORT,
+    MsgKind.STATE_SNAPSHOT: Actor.DISPLAY,
 }
 
 
@@ -123,8 +185,12 @@ __all__ = [
     "SCHEMA_VERSION",
     "Actor",
     "MsgKind",
+    "Region",
     "Job",
     "Result",
+    "InboundMessage",
+    "OutboundMessage",
+    "StateSnapshot",
     "Envelope",
     "ROUTING_TABLE",
     "encode",
