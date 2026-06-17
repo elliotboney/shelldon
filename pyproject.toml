@@ -30,6 +30,7 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "soak: long-running endurance/soak proof (NFR2)",
+    "live: hits a real network provider; skipped unless its credential env var is set",
 ]
 
 # AD-1: core/ must never import an LLM/provider library — enforced mechanically.
