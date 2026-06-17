@@ -88,6 +88,15 @@ class Envelope(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
             )
 
 
+#: Static point-to-point routing table (AD-11 mode 1): the hub forwards an
+#: envelope to the destination its `kind` maps to. Every MsgKind must have an
+#: entry (enforced by test). Later stories add rows as they introduce kinds.
+ROUTING_TABLE: dict[MsgKind, Actor] = {
+    MsgKind.JOB: Actor.BROKER,
+    MsgKind.RESULT: Actor.CORE,
+}
+
+
 _decoder = msgspec.msgpack.Decoder(Envelope)
 
 
@@ -117,6 +126,7 @@ __all__ = [
     "Job",
     "Result",
     "Envelope",
+    "ROUTING_TABLE",
     "encode",
     "decode",
 ]

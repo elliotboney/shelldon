@@ -14,6 +14,7 @@ dependencies = [
 dev = [
     "import-linter~=2.3",
     "pytest>=8",
+    "pytest-asyncio==1.4.0",
 ]
 
 [build-system]
@@ -25,6 +26,7 @@ packages = ["shelldon"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
 
 # AD-1: core/ must never import an LLM/provider library — enforced mechanically.
 [tool.importlinter]

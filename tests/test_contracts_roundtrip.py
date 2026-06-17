@@ -9,6 +9,7 @@ import msgspec
 import pytest
 
 from shelldon.contracts import (
+    ROUTING_TABLE,
     SCHEMA_VERSION,
     Actor,
     Envelope,
@@ -111,6 +112,14 @@ def test_unknown_wire_fields_rejected():
     )
     with pytest.raises(msgspec.ValidationError):
         decode(raw)
+
+
+def test_every_kind_has_a_route():
+    """AD-11 point-to-point: every MsgKind must resolve to a destination — a kind
+    added without a routing entry would be unroutable on the bus."""
+    for kind in MsgKind:
+        assert kind in ROUTING_TABLE, f"MsgKind.{kind.name} has no ROUTING_TABLE entry"
+        assert isinstance(ROUTING_TABLE[kind], Actor)
 
 
 def test_kind_must_match_body():
