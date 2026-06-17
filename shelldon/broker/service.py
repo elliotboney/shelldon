@@ -54,10 +54,17 @@ async def _serve_connection(reader, writer, provider: LLMProvider) -> None:
             break
 
 
-async def run_broker(socket_path: str, provider: LLMProvider) -> None:
-    """Connect as BROKER and serve Job→Result over the bus until the hub closes."""
+async def run_broker(socket_path: str, chain: list[LLMProvider]) -> None:
+    """Connect as BROKER and serve Job→Result over the bus until the hub closes.
+
+    `chain` is the ordered provider chain (Story 2.1). 2.1 executes the **primary**
+    (`chain[0]`) with the existing single-retry; Story 2.2 changes `_serve_connection`
+    to advance through the chain on failure (the single fallback seam).
+    """
+    if not chain:
+        raise RuntimeError("run_broker requires a non-empty provider chain")
     reader, writer = await connect(socket_path, Actor.BROKER)
     try:
-        await _serve_connection(reader, writer, provider)
+        await _serve_connection(reader, writer, chain[0])
     finally:
         writer.close()

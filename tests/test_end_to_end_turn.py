@@ -158,7 +158,7 @@ async def build_harness(sock_path, *, provider, spawns, turn_timeout=5.0):
 
     tasks = [
         asyncio.create_task(core.run()),
-        asyncio.create_task(run_broker(sock_path, provider)),
+        asyncio.create_task(run_broker(sock_path, [provider])),
         asyncio.create_task(run_display(sock_path, renderer)),
         asyncio.create_task(run_cli_transport(sock_path, inbound=source, outbound=sink)),
     ]

@@ -2,6 +2,19 @@
 
 This file tracks work intentionally deferred from reviews, with reasons for why it was deferred and when it should be revisited.
 
+---
+
+## 🔭 Deliberate tradeoffs to revisit (post-epic / trigger-gated)
+
+> Conscious architecture choices that are RIGHT for now but should be reconsidered if a specific trigger fires. Unlike the per-story review punts below (picked up mid-epic), these are "look again once the daily-driver is real / all epics are done." Check this section during epic retrospectives.
+
+- **Native Gemini adapter dropped in favor of the OpenAI-compatible endpoint (Story 2.1, 2026-06-17).**
+  - **Decision:** Gemini is reached via its OpenAI-compatible endpoint (`.../v1beta/openai/`) as a plain `OpenAIProvider` preset — no `google-genai` SDK, no per-provider adapter. Chosen because the broker chain's interface is provider-agnostic (`complete(prompt) -> str`), so native-only features can't be carried without special-casing Gemini and breaking the abstraction; and GLM (Z.ai) is the primary, Gemini a fallback.
+  - **What we lose without the native adapter:** (1) **thinking/reasoning-budget control** (`thinking_config`) on 2.5 models; (2) **safety-threshold tuning** (`safety_settings` — e.g. loosening harm categories so the pet can be edgier/more playful); (3) **native Google Search grounding**; (4) **explicit context caching** (cost savings on repeated context, e.g. injected memory).
+  - **Re-add trigger:** if we want **Gemini free-tier-first / Gemini as the PRIMARY provider** (its free tier is generous — 1,500 req/day, 1M context), OR Epic 3 wants Gemini-specific safety loosening, OR Epic 4/5 wants explicit context caching for cost. Then re-introduce `GeminiProvider` (`google-genai`) as its own story with real ACs — and note this needs a way to pass per-provider options through the chain (the abstraction question above). Re-add cost is ~50 lines + the dep; it was never committed, so reconstruct rather than revert.
+
+---
+
 ## Resolved from: code review of 1-7-display-service-shows-the-pets-face-from-core-state (2026-06-16)
 
 - **[RESOLVED] `BusServer.stop()` hung on an idle client connection whose peer never disconnects** — surfaced while writing the 1.7 display tests. Root cause: `Server.wait_closed()` (3.13) blocks until all handler tasks finish, and a client parked in `read_frame` never EOFs just because its writer is closed. **Fix** (`core/bus/server.py`): the hub now tracks handler tasks (`_handlers`) and `stop()` **cancels** them deterministically — looping so a handler that registers during the gather-yield is still caught — then closes connections, then closes the listening server last (close-last avoids an asyncio `Server._wakeup` race under force-close on 3.13). Regression test: `tests/test_bus_disconnect.py::test_stop_with_idle_connected_client_does_not_hang` (idle settled + racing-mid-registration clients; `stop()` must return promptly). 77 pass / 1 skipped, both import-linters KEPT.
@@ -75,3 +88,10 @@ Cheap coverage gaps over already-shipped code, completed in parallel without sco
 - **Dynamic imports not validated** — Out of scope for static import-linter; would need runtime guard. Revisit if dynamic imports become a concern.
 - **No platform-specific Pi validation** — ARM/Raspberry Pi specific testing will be added in later stories when hardware integration begins.
 - **No verification after LLM SDK installation** — Guard will be verified when LLM SDKs are actually added as dependencies in Story 1.4 (broker).
+
+## Deferred from: code review of 2-1-provider-abstraction-and-an-ordered-chain (2026-06-17)
+
+- **`OpenAIProvider.complete()` — `message=None` → AttributeError** — OpenAI SDK contract says `message` is never None; defensive guard is theoretical. Revisit if an OpenAI-compat endpoint is found that violates this.
+- **`build_chain` catches only `RuntimeError`** — All known builder errors are RuntimeErrors; other exceptions lose preset-name context. Revisit if builders start raising ValueError/TypeError.
+- **Missing model env var error doesn't name the env var** — Usability: error says "requires a model" but not which env var. Revisit when improving DX for first-time setup.
+- **Duplicate preset names in `PROVIDER_CHAIN` silently builds duplicate providers** — e.g. `"glm,glm"` wastes a fallback slot. Deduplication or warning belongs in Story 2.2 when chain iteration is implemented.

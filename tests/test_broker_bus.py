@@ -22,7 +22,7 @@ class _OK:
 async def test_job_over_bus_yields_result_to_core(sock_path):
     srv = BusServer(socket_path=sock_path)
     await srv.start()
-    broker_task = asyncio.create_task(run_broker(sock_path, _OK("pong")))
+    broker_task = asyncio.create_task(run_broker(sock_path, [_OK("pong")]))
     try:
         await asyncio.sleep(0.05)  # let the broker register as BROKER
 
