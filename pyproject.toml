@@ -8,6 +8,7 @@ license = { file = "LICENSE" }
 authors = [{ name = "Elliot Boney" }]
 dependencies = [
     "msgspec==0.21.1",               # versioned typed contracts + bus framing (AD-4/AD-10)
+    "anthropic==0.109.2",            # broker-only: GLM-5.2 via Z.ai Anthropic-compatible endpoint (AD-2)
 ]
 
 [dependency-groups]

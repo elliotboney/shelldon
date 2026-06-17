@@ -2,6 +2,15 @@
 
 This file tracks work intentionally deferred from reviews, with reasons for why it was deferred and when it should be revisited.
 
+## Deferred from: code review of 1-4-capability-broker-with-one-provider-and-basic-retry (2026-06-16)
+
+- **Potential credential leak via `str(sdk_exc)` in `Result.error`** — SDK error messages don't typically include the API key, but no runtime value test verifies this. Revisit if credential hygiene audit is done.
+- **No backoff between transient retries** — Immediate retry into a rate-limited endpoint wastes the only retry budget. Add exponential backoff when retry logic is enhanced in Epic 2.
+- **`connect()` has no timeout** — A hung server blocks the broker indefinitely. Add `asyncio.wait_for` wrapper when resilience hardening begins.
+- **Sequential job processing in `run_broker`** — `await handle_job` blocks the read loop; concurrent Jobs require a task pool. Address in Epic 2 or when throughput becomes a concern.
+- **No test for non-Job envelope path or hub-disconnect path in `service.py`** — The `log.warning + continue` and `env is None: break` branches are untested. Add coverage when integration testing expands.
+- **`run_broker` has no reconnect logic** — A transient hub restart kills the broker permanently. Add supervisor/reconnect loop when resilience story is scoped.
+
 ## Deferred from: code review of 1-3-envelope-bus-over-unix-domain-sockets-hub-routed-through-core (2026-06-16)
 
 - **Tests synchronize via `asyncio.sleep(0.05)`** — Timing-based sync is fragile on slow CI; no event-based mechanism to confirm hub has processed a disconnect or registered an actor. Revisit if tests start flaking in CI.

@@ -21,16 +21,12 @@ async def _server(sock_path):
 async def test_job_routed_to_broker(sock_path):
     srv = await _server(sock_path)
     try:
-        # Broker connects and registers itself (lazy-src) by sending one frame.
-        b_reader, b_writer = await connect(srv.socket_path)
-        await write_frame(
-            b_writer,
-            Envelope(id="hello", kind=MsgKind.RESULT, src=Actor.BROKER, dst=Actor.CORE, body=Result(ok=True)),
-        )
-        await asyncio.sleep(0.05)  # let the hub register the broker connection
+        # Broker connects and registers explicitly as BROKER on connect.
+        b_reader, b_writer = await connect(srv.socket_path, Actor.BROKER)
+        await asyncio.sleep(0.05)  # let the hub process the registration
 
         # A worker sends a JOB; the table routes JOB -> BROKER.
-        w_reader, w_writer = await connect(srv.socket_path)
+        w_reader, w_writer = await connect(srv.socket_path, Actor.WORKER)
         job = Envelope(id="j1", kind=MsgKind.JOB, src=Actor.WORKER, dst=Actor.BROKER, body=Job(payload="think"))
         await write_frame(w_writer, job)
 
@@ -43,7 +39,7 @@ async def test_job_routed_to_broker(sock_path):
 async def test_result_routed_to_core_inbox(sock_path):
     srv = await _server(sock_path)
     try:
-        _, w_writer = await connect(srv.socket_path)
+        _, w_writer = await connect(srv.socket_path, Actor.WORKER)
         res = Envelope(id="r1", kind=MsgKind.RESULT, src=Actor.WORKER, dst=Actor.CORE, body=Result(ok=True, payload="done"))
         await write_frame(w_writer, res)
 

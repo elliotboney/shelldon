@@ -16,7 +16,7 @@ from pathlib import Path
 import msgspec
 
 from shelldon.contracts import ROUTING_TABLE, Actor, Envelope
-from shelldon.core.bus.frame import read_frame, write_frame
+from shelldon.core.bus.frame import read_frame, read_registration, write_frame
 
 log = logging.getLogger("shelldon.bus")
 
@@ -72,6 +72,18 @@ class BusServer:
         actor: Actor | None = None
         self._conns.add(writer)
         try:
+            # Every client announces its identity as the mandatory first frame, so
+            # the hub can address receiver-first actors (e.g. the broker waiting on
+            # Jobs). An unknown actor or EOF before registration drops the connection.
+            try:
+                actor = await read_registration(reader)
+            except (msgspec.ValidationError, ValueError) as exc:
+                log.warning("bad registration, closing connection: %s", exc)
+                return
+            if actor is None:
+                return
+            self._registry[actor] = writer
+
             while True:
                 try:
                     env = await read_frame(reader)
@@ -87,8 +99,6 @@ class BusServer:
                     break
                 if env is None:  # clean EOF / peer gone (incl. mid-frame)
                     break
-                actor = env.src
-                self._registry[env.src] = writer  # lazy-src registration
                 await self._route(env)
         finally:
             if actor is not None and self._registry.get(actor) is writer:
