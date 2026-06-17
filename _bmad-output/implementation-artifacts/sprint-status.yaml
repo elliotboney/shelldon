@@ -67,7 +67,7 @@ development_status:
 
   # --- Epic 4: Memory & Continuity ---
   epic-4: in-progress
-  4-1-conversation-history-store: review
+  4-1-conversation-history-store: done
   4-2-curated-markdown-memory-and-memory-ops: backlog
   3-4-self-modify-faces-via-chat: backlog  # deferred from Epic 3 (2026-06-17): rides the AD-6 memory-op protocol designed in 4.2 — LLM proposes add_face over a Result, core applies via 3.3's apply_add_face. Build AFTER 4-2.
   4-3-vault-with-os-level-isolation: backlog
