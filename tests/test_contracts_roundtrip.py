@@ -13,9 +13,13 @@ from shelldon.contracts import (
     SCHEMA_VERSION,
     Actor,
     Envelope,
+    InboundMessage,
     Job,
     MsgKind,
+    OutboundMessage,
+    Region,
     Result,
+    StateSnapshot,
     decode,
     encode,
 )
@@ -49,6 +53,30 @@ def _envelopes():
             dst=Actor.CORE,
             body=Result(ok=False, error="boom"),
             turn_id="turn-3",
+        ),
+        # InboundMessage: owner -> core over a chat-transport adapter (AD-13)
+        Envelope(
+            id="env-4",
+            kind=MsgKind.INBOUND_MSG,
+            src=Actor.CHAT_TRANSPORT,
+            dst=Actor.CORE,
+            body=InboundMessage(text="hello pet"),
+        ),
+        # OutboundMessage: core -> chat-transport adapter (AD-13)
+        Envelope(
+            id="env-5",
+            kind=MsgKind.OUTBOUND_MSG,
+            src=Actor.CORE,
+            dst=Actor.CHAT_TRANSPORT,
+            body=OutboundMessage(text="hi back"),
+        ),
+        # StateSnapshot: core -> display, face region with a monotonic seq (AD-5)
+        Envelope(
+            id="env-6",
+            kind=MsgKind.STATE_SNAPSHOT,
+            src=Actor.CORE,
+            dst=Actor.DISPLAY,
+            body=StateSnapshot(region=Region.FACE, seq=7, face="neutral"),
         ),
     ]
 
@@ -132,6 +160,32 @@ def test_kind_must_match_body():
             src=Actor.CORE,
             dst=Actor.BROKER,
             body=Job(payload="hi"),
+        )
+
+
+def test_message_kind_must_match_body():
+    """The closed-header kind<->body guard (AD-11) bites for the transport message
+    types too: an inbound `kind` with an OutboundMessage body is rejected."""
+    with pytest.raises(ValueError):
+        Envelope(
+            id="x",
+            kind=MsgKind.INBOUND_MSG,  # contradicts the OutboundMessage body
+            src=Actor.CORE,
+            dst=Actor.CHAT_TRANSPORT,
+            body=OutboundMessage(text="hi"),
+        )
+
+
+def test_state_snapshot_kind_must_match_body():
+    """The closed-header kind<->body guard (AD-11) bites for the display snapshot
+    too: a STATE_SNAPSHOT kind with a non-snapshot body is rejected."""
+    with pytest.raises(ValueError):
+        Envelope(
+            id="x",
+            kind=MsgKind.STATE_SNAPSHOT,  # contradicts the Result body
+            src=Actor.CORE,
+            dst=Actor.DISPLAY,
+            body=Result(ok=True),
         )
 
 
