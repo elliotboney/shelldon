@@ -45,3 +45,19 @@ def test_close_is_idempotent():
     f.close("t1")
     f.close("t1")  # closing twice is safe
     assert f.accept(_result_env("t1")) is False
+
+
+def test_closed_set_eviction_is_bounded():
+    cap = 3
+    f = TurnFence(max_closed=cap)
+    ids = [f"t{i}" for i in range(cap + 1)]  # one more than the cap
+    for tid in ids:
+        f.open(tid)
+        f.close(tid)
+        assert len(f._closed) <= cap  # closed set never grows past the cap
+
+    oldest = ids[0]
+    assert oldest not in f._closed  # oldest closed id was evicted
+    assert ids[-1] in f._closed     # a recently-closed id is still retained
+    # observable behavior for the evicted id is still "discard" (unknown turn)
+    assert f.accept(_result_env(oldest)) is False

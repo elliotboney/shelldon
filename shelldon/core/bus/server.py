@@ -36,6 +36,7 @@ class BusServer:
         self.core_inbox: asyncio.Queue[Envelope] = asyncio.Queue()
         self._registry: dict[Actor, asyncio.StreamWriter] = {}
         self._conns: set[asyncio.StreamWriter] = set()
+        self._handlers: set[asyncio.Task] = set()
         self._server: asyncio.Server | None = None
 
     async def start(self) -> None:
@@ -47,18 +48,22 @@ class BusServer:
         self._server = await asyncio.start_unix_server(self._handle, path=self.socket_path)
 
     async def stop(self) -> None:
-        # Force-close active connections first: Server.wait_closed() (3.13) blocks
-        # until open connections finish, and handlers idle in read_frame until EOF.
-        writers = list(self._conns)
-        for writer in writers:
+        # Drain every connection handler BEFORE closing the listening server. A silent
+        # client parked in read_frame won't EOF just because we close its writer, and
+        # Server.wait_closed() (3.13) blocks until all handler tasks finish — so we
+        # CANCEL them. Loop because a just-accepted handler may register only after we
+        # yield inside gather; cancelling each removes it (its finally discards from
+        # `_handlers`), so the set drains to empty. Closing the server only once every
+        # connection has detached avoids an asyncio Server._wakeup race under 3.13.
+        while self._handlers:
+            handlers = list(self._handlers)
+            for task in handlers:
+                task.cancel()
+            await asyncio.gather(*handlers, return_exceptions=True)
+        for writer in list(self._conns):
             writer.close()
         self._conns.clear()
         self._registry.clear()
-        for writer in writers:
-            try:
-                await writer.wait_closed()  # let the transport finish draining
-            except Exception:
-                pass
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
@@ -70,6 +75,9 @@ class BusServer:
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         actor: Actor | None = None
+        task = asyncio.current_task()
+        if task is not None:
+            self._handlers.add(task)
         self._conns.add(writer)
         try:
             # Every client announces its identity as the mandatory first frame, so
@@ -104,6 +112,8 @@ class BusServer:
             if actor is not None and self._registry.get(actor) is writer:
                 del self._registry[actor]
             self._conns.discard(writer)
+            if task is not None:
+                self._handlers.discard(task)
             writer.close()
 
     async def _route(self, env: Envelope) -> None:
