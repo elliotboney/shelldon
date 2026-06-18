@@ -1,5 +1,5 @@
 # generated: 2026-06-16 10:47:47 CDT
-# last_updated: 2026-06-17 (story 4.5 done)
+# last_updated: 2026-06-18 (Epic 4 done + retro complete; Story 5.0 resilience-prep added; chores iceboxed)
 # project: shelldon
 # project_key: NOKEY
 # tracking_system: file-system
@@ -31,7 +31,7 @@
 # - Daily-driver line = Epics 1-4 + story 1-9 (soak); Epics 5-7 are enrichment
 
 generated: 2026-06-16 10:47:47 CDT
-last_updated: 2026-06-17 CDT  # 4.1 done; 4.2 created (split — apply half); 4.5 wire follow-up added (topology A); 3.4 rides 4.5
+last_updated: 2026-06-18 CDT  # Epic 4 done + retrospective complete (epic-4-retro-2026-06-18.md); Story 5.0 resilience-prep added; 5 chores iceboxed
 project: shelldon
 project_key: NOKEY
 tracking_system: file-system
@@ -66,17 +66,18 @@ development_status:
   epic-3-retrospective: done
 
   # --- Epic 4: Memory & Continuity ---
-  epic-4: in-progress
+  epic-4: done  # 2026-06-18: all stories done (4.1, 4.2, 4.5, 3.4, 4.3, 4.4); retrospective complete
   4-1-conversation-history-store: done
   4-2-curated-markdown-memory-and-memory-ops: done
   4-5-worker-proposes-ops-wire: done  # split from 4.2 (2026-06-17): the turn-topology reshape — worker receives the completion, parses -> Result.proposed_ops -> core (decision A); core routes to apply_memory_op (4.2) / apply_add_face (3.3). Build AFTER 4-2; unblocks 3-4.
   3-4-self-modify-faces-via-chat: done  # deferred from Epic 3 (2026-06-17): rides the 4-5 wire (LLM proposes add_face over a Result, core applies via 3.3's apply_add_face). Build AFTER 4-5.
-  4-3-vault-with-os-level-isolation: backlog
-  4-4-memory-shapes-the-turn: backlog
-  epic-4-retrospective: optional
+  4-3-vault-with-os-level-isolation: done  # built 2026-06-18: OS uid-drop in fork child + vault/ 0o700 + broker surface_vault authority + shelldon/app.py composition root. Real uid-denial Linux+root-gated; suite green (286 pass / 3 skip). Owner decisions 2026-06-18: (1) OS barrier + broker vault-authority now, defer prompt-injection to 4.4; (2) build the multi-process app.py root + real worker uid-drop now.
+  4-4-memory-shapes-the-turn: done  # built 2026-06-18: worker assembles the prompt from DIRECTIVE+about+recent-history+FTS5 recall (AD-6 order), fail-soft; CAP-6 proven (earlier fact reaches later prompt). +13 tests, suite 306 pass/3 skip. Vault surfacing scoped OUT (broker-gated, follow-on — open question). Was previously mis-marked done.
+  epic-4-retrospective: done  # 2026-06-18: epic-4-retro-2026-06-18.md — +111 tests (196→307), 0 deps, 0 incidents, CAP-6 proven; key insight: chores w/o a story slot don't happen (Epic 3 #1/#4/#5/#6/#7 all slipped) → fixed via Story 5.0 + icebox + dev-loop-checklist.md
 
   # --- Epic 5: Autonomous Life ---
   epic-5: backlog
+  5-0-resilience-hardening-prep: backlog  # Epic 4 retro (2026-06-18): GATES 5.1. Absorbs the now-unowned resilience debt — 4.5 worker-completion timeout align/inject (_COMPLETION_TIMEOUT_S vs core degrade), outbound write_frame timeout (worker→core), 120/90/30s asymmetry + worker_in_flight freeze, Epic 2 #3 arbiter/fork resilience (os.fork OSError, waitpid timeout/SIGKILL, child FD closerange, Arbiter.try_begin lock). Its OWN story so it can't be skipped under feature pressure.
   5-1-core-scheduler-with-named-multi-cadence-jobs: backlog
   5-2-cost-tier-gating-and-credit-budget: backlog
   5-3-battery-aware-backoff: backlog
@@ -105,3 +106,10 @@ icebox:
   # is a later option. Natural neighbor = Epic 7 (extensibility; self-coded tools are bot-authored plugins).
   # A-vs-B decision NOT locked; do not schedule until Epic 4 done. Full design note in memory: shelldon-self-coding-tools.
   self-coding-tools: deferred
+
+  # --- Iceboxed from Epic 4 retro (2026-06-18): standalone chores that slipped in Epic 3 because they had no story slot ---
+  panel-emulator-render-spike: deferred  # prove ONE render path (real Waveshare V4 or omni-epd emulator) for the 6 faces. Carried from Epic 2 #5 / Epic 3 action #1. Trigger: hardware bring-up. Faces are token-only verified today.
+  soak-background-emitter-doc: deferred  # document in test_endurance_soak.py that any new core background emitter must park its interval or _seq/_bg invariants break. Epic 3 action #4. Trigger: next core background emitter added (Epic 5 scheduler).
+  await-true-timeout-diagnostics: deferred  # dump registry/turn state on await_true timeout (bare AssertionError today). Epic 2 #1 leftover / Epic 3 action #7. Trigger: CI debugging pain.
+  test-hygiene-burndown: deferred  # Epic 2 #4 + 4.x deferred-work: _Collector dup across test_broker_service*.py, hardcoded retry-count asserts, _no_broker_backoff docstring overstatement. Trigger: next broker-test change.
+  atomic-write-helper-extract: deferred  # temp→fsync→os.replace idiom triplicated across core/faces.py, core/state.py, core/memory.py. Trigger: a 4th writer is added — extract to one core util then.
