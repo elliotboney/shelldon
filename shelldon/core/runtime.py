@@ -36,6 +36,7 @@ from shelldon.contracts import (
 )
 from shelldon.core.arbiter import Arbiter
 from shelldon.core.bus import BusServer
+from shelldon.core.faces import DEFAULT_FACES_PATH, FaceRegistry
 from shelldon.core.reflexes import compute_reflex_patch
 from shelldon.core.state import DEFAULT_CHECKPOINT_PATH, PersistentState
 from shelldon.core.turn import TurnFence
@@ -77,6 +78,7 @@ class Core:
         checkpoint_path=None,
         checkpoint_interval: float = DEFAULT_CHECKPOINT_INTERVAL,
         reflex_interval: float = DEFAULT_REFLEX_INTERVAL,
+        faces_path=None,
     ):
         if checkpoint_interval <= 0:
             raise ValueError(f"checkpoint_interval must be positive, got {checkpoint_interval!r}")
@@ -93,6 +95,13 @@ class Core:
         #: Personality state lives in RAM for the process lifetime, restored from the
         #: last checkpoint (defaults cleanly on first run — AC1).
         self.state = PersistentState.load(self.checkpoint_path)
+        #: The editable faces registry — core owns the mood->face vocabulary (AD-5)
+        #: and maps the drifting mood to a token (Story 3.3); the display renders it.
+        self.faces = FaceRegistry.load(faces_path if faces_path is not None else DEFAULT_FACES_PATH)
+        #: The face token currently on screen — both lifecycle and mood pushes update
+        #: it, so a mood face re-pushes after a lifecycle face and identical mood ticks
+        #: don't spam the display.
+        self._last_face: str | None = None
         self._seq = 0
         self._timeout_task: asyncio.Task | None = None
         #: The periodic checkpoint flush AND the resident reflex tick are long-lived
@@ -210,6 +219,7 @@ class Core:
         )
 
     async def _push_face(self, face: str) -> None:
+        self._last_face = face  # track what's on screen (lifecycle AND mood pushes)
         await self.bus.deliver(
             Envelope(
                 id=uuid4().hex,
@@ -269,6 +279,7 @@ class Core:
                 await asyncio.sleep(self.reflex_interval)
                 try:
                     self._reflex_tick()
+                    await self._maybe_push_mood_face()
                 except Exception as exc:
                     # One bad tick must NOT permanently kill reflexes — log and keep
                     # ticking (the pet stays alive). Same hardening as the checkpoint
@@ -281,6 +292,24 @@ class Core:
         patch = compute_reflex_patch(self.state.state, datetime.now(UTC))
         if patch:
             self.state.apply_patch(patch)
+
+    async def _maybe_push_mood_face(self) -> None:
+        """Push the mood-derived face token BETWEEN turns only (Story 3.3). While a
+        turn is in flight the lifecycle face (thinking/reply/cant-think) owns the
+        screen, so skip — the reflex still mutated state (3.2). Push only on a token
+        change to avoid spamming identical snapshots."""
+        if not (self.fence.is_idle and self.arbiter.is_idle):
+            return
+        m = self.state.state
+        token = self.faces.select(m.mood.valence, m.mood.arousal, m.energy)
+        if token != self._last_face:
+            await self._push_face(token)
+
+    def apply_add_face(self, name: str, **kwargs) -> None:
+        """Validate and apply a face addition to the registry (atomic, comment-
+        preserving). The single-writer apply path (AD-5); Story 3.4 wires the LLM
+        proposal to call this. Raises ValueError on an invalid/duplicate face."""
+        self.faces.add_face(name, **kwargs)
 
     def _mark_interaction(self) -> None:
         """Record 'now' as the last interaction (the idle signal the reflex reads),

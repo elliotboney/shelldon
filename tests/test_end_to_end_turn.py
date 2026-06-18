@@ -177,7 +177,9 @@ async def build_harness(sock_path, *, provider=None, spawns, turn_timeout=5.0, c
 
     fs = ForkServer(sock_path, spawn=spawns.spawn, reap=spawns.reap, manage_gc=False)
     await fs.preload()
-    core = Core(sock_path, fs, turn_timeout=turn_timeout)
+    # reflex_interval is parked far out: these tests count lifecycle face pushes
+    # (_seq), and a mood-face push from the reflex tick (Story 3.3) would perturb that.
+    core = Core(sock_path, fs, turn_timeout=turn_timeout, reflex_interval=3600)
 
     source = _Source()
     outbound: list[str] = []
