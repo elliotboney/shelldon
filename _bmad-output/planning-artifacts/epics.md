@@ -421,6 +421,8 @@ So that I can read how my pet feels at a glance — the soul on the screen.
 
 ### Story 3.4: Self-modify faces via chat
 
+> **Deferred 2026-06-17 — scheduled into Epic 4, built after Story 4.2.** The chat-driven path needs the AD-6 memory-op protocol (the worker proposes structured ops in its `Result`; core validates + applies), which reshapes the fire-and-forget turn topology. That protocol is Epic 4.2's job, so 3.4 rides it rather than designing it under Epic 3. The "core applies" half (`apply_add_face`) already shipped in Story 3.3 and is waiting.
+
 As the owner,
 I want to tell the pet (in chat) to add or tweak a face, and have it do so,
 So that its expressions grow with it — the v1 capability I loved, made safe under single-writer core.
