@@ -28,6 +28,7 @@ from shelldon.display.renderer import StubRenderer
 from shelldon.display.service import run_display
 from shelldon.transport.cli import run_cli_transport
 from shelldon.worker.forkserver import ForkServer
+from shelldon.worker.prompt import SYSTEM_INSTRUCTION
 from shelldon.worker.worker import run_worker
 
 
@@ -114,11 +115,32 @@ class RecoverableProvider:
 # --- in-process spawn seam with a concurrency counter (AC1/AC2) ---
 
 
+async def _passthrough_worker(socket_path, turn_id, prompt):
+    """Lifecycle-harness worker: IDENTITY prompt assembly (Story 4.4) so these tests
+    assert on the raw owner message, not the assembled prompt. Real assembly has its
+    own tests (test_prompt_assembly.py); the CAP-6 path uses `worker=run_worker`."""
+    await run_worker(socket_path, turn_id, prompt, assemble=lambda m: m)
+
+
+class RecordingProvider:
+    """Records every prompt it is asked to complete — used to assert WHAT reached the
+    brain (Story 4.4 / CAP-6), not just that a reply came back."""
+
+    name = "fake"
+
+    def __init__(self):
+        self.seen: list[str] = []
+
+    async def complete(self, prompt: str) -> str:
+        self.seen.append(prompt)
+        return "noted"
+
+
 class Spawns:
     """The in-process fork-server seam: `spawn` runs the worker as an asyncio task
     and tracks max concurrency to assert ≤1; `reap` awaits the task."""
 
-    def __init__(self, worker=run_worker):
+    def __init__(self, worker=_passthrough_worker):
         self._worker = worker
         self.count = 0
         self.live = 0
@@ -280,7 +302,7 @@ async def test_ac3_turn_timeout_no_hang_and_late_result_discarded(sock_path):
 
     async def late_worker(socket_path, turn_id, prompt):
         await asyncio.sleep(0.6)  # longer than the turn timeout below
-        await run_worker(socket_path, turn_id, prompt)
+        await run_worker(socket_path, turn_id, prompt, assemble=lambda m: m)
 
     spawns = Spawns(worker=late_worker)
     h = await build_harness(
@@ -377,5 +399,39 @@ async def test_ac2_offline_acknowledges_without_hanging(sock_path):
         # The slot is released after degrade (arbiter.complete() ran on the
         # failure path) — a stuck-True slot would coalesce every later turn.
         await _await(lambda: h.core.arbiter.is_idle)
+    finally:
+        await h.teardown()
+
+
+# --- Story 4.4: CAP-6 — a fact from an earlier turn reaches a later prompt ---
+
+
+async def test_cap6_fact_from_earlier_turn_reaches_later_prompt(sock_path):
+    """The headline of Epic 4: a fact stated in an earlier turn is present in a LATER
+    turn's assembled prompt (via the recent window / FTS5 recall), proving memory shapes
+    the turn. Uses the REAL assembler (`worker=run_worker`) and a recording provider, and
+    asserts on the PROMPT the broker received — never on a model's (non-deterministic)
+    wording. Memory roots default to the conftest-redirected tmp `$HOME`."""
+    # A distinctive token that does NOT appear in SYSTEM_INSTRUCTION's example — else the
+    # assertion would pass on the static instruction alone, never actually testing recall.
+    fact = "Cassandra-x9f3"
+    assert fact not in SYSTEM_INSTRUCTION  # guard the guard
+
+    provider = RecordingProvider()
+    spawns = Spawns(worker=run_worker)  # real prompt assembly (default build_prompt)
+    h = await build_harness(sock_path, provider=provider, spawns=spawns)
+    try:
+        h.source.feed(f"my preferred datastore is {fact}")
+        # Turn 1 fully handled (reply delivered ⇒ core.record_turn has committed it).
+        await _await(lambda: len(h.outbound) >= 1)
+
+        h.source.feed("what is my preferred datastore?")
+        await _await(lambda: len(provider.seen) >= 2)
+
+        assembled = provider.seen[-1]
+        # Strip the static system instruction so the fact can ONLY come from recall/recent.
+        body = assembled.replace(SYSTEM_INSTRUCTION, "")
+        assert fact in body  # the earlier fact reached the later prompt via memory
+        assert "what is my preferred datastore?" in body  # current message present (last)
     finally:
         await h.teardown()
