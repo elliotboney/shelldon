@@ -8,6 +8,7 @@ structs and their msgpack encode/decode.
 """
 
 from enum import StrEnum
+from typing import Literal
 
 import msgspec
 
@@ -105,6 +106,47 @@ class StateSnapshot(msgspec.Struct, frozen=True, tag="state-snapshot", forbid_un
     face: str
 
 
+#: --- Memory-ops (AD-6): the closed, fixed-arg vocabulary core validates+applies ---
+#: The three curated-memory ops, as frozen tagged structs with closed arg schemas —
+#: "fixed arg schemas in contracts/, no free-text deltas" (AD-6). They are the shared
+#: vocabulary core and the future worker both speak. Defined here now so both sides
+#: agree on one type; 4.2 does NOT yet attach `MemoryOp` to `Result`/`Envelope` — that
+#: is the worker-proposes wire follow-up (Story 4.5). `forbid_unknown_fields` makes a
+#: typo'd field a decode error; the tags make a typo'd op (`remembr`) a decode error.
+
+
+class Remember(msgspec.Struct, frozen=True, tag="remember", forbid_unknown_fields=True):
+    """Record a fact or a person the owner mentioned, under the closed `collection`.
+
+    `name` becomes a filename (core slugifies + path-guards it); `content` is the
+    curated markdown body. `collection` is a closed Literal — a value outside the set
+    is rejected by core on apply (msgspec only enforces it on decode, not on direct
+    construction, so core re-validates)."""
+
+    collection: Literal["facts", "people"]
+    name: str
+    content: str
+
+
+class RewriteAbout(msgspec.Struct, frozen=True, tag="rewrite_about", forbid_unknown_fields=True):
+    """Replace the bot-owned `about.md` with a freshly curated doc (AC2)."""
+
+    content: str
+
+
+class LogEpisode(msgspec.Struct, frozen=True, tag="log_episode", forbid_unknown_fields=True):
+    """Append a dated episode note to the curated log. `tags` is optional and closed."""
+
+    content: str
+    tags: tuple[str, ...] = ()
+
+
+#: The closed memory-op union the wire will carry as a tagged body (Story 4.5) and
+#: core dispatches on today. `capture_learning` (AD-6) belongs to the learnings/dream
+#: work (Epic 6), not here.
+MemoryOp = Remember | RewriteAbout | LogEpisode
+
+
 #: Body type -> the header `kind` it must travel under (single source of truth
 #: for the kind<->body agreement enforced in Envelope.__post_init__).
 _KIND_FOR_BODY = {
@@ -191,6 +233,10 @@ __all__ = [
     "InboundMessage",
     "OutboundMessage",
     "StateSnapshot",
+    "Remember",
+    "RewriteAbout",
+    "LogEpisode",
+    "MemoryOp",
     "Envelope",
     "ROUTING_TABLE",
     "encode",

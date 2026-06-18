@@ -421,7 +421,7 @@ So that I can read how my pet feels at a glance — the soul on the screen.
 
 ### Story 3.4: Self-modify faces via chat
 
-> **Deferred 2026-06-17 — scheduled into Epic 4, built after Story 4.2.** The chat-driven path needs the AD-6 memory-op protocol (the worker proposes structured ops in its `Result`; core validates + applies), which reshapes the fire-and-forget turn topology. That protocol is Epic 4.2's job, so 3.4 rides it rather than designing it under Epic 3. The "core applies" half (`apply_add_face`) already shipped in Story 3.3 and is waiting.
+> **Deferred 2026-06-17 — rides the write-back wire (Story 4.5).** The chat-driven path needs the worker-proposes-over-`Result` wire (the turn-topology reshape, decision: worker-emits-Result), which is **Story 4.5**. 3.4 = "when the LLM proposes an `add_face` op, core applies it via 3.3's `apply_add_face`" — a thin add once 4.5 exists. The "core applies" half (`apply_add_face`) already shipped in Story 3.3.
 
 As the owner,
 I want to tell the pet (in chat) to add or tweak a face, and have it do so,
@@ -469,6 +469,8 @@ So that the pet can remember and reference what we've said.
 **Then** it is shaped so a `chat_id`/`user_id` key can be added later without a breaking migration (architected, not implemented)
 
 ### Story 4.2: Curated markdown memory and memory-ops
+
+> **Split + topology decision 2026-06-17 (Epic 4 planning gate).** 4.2 builds the **"core applies" half**: the closed memory-op schemas in `contracts/`, the `about.md`/`facts/`/`people/` markdown tree written atomically by `core.apply_memory_op`, and the read-only `DIRECTIVE.md` accessor (disjoint writers). The **"worker proposes" wire** is split to a follow-up (**Story 4.5**) carrying the recorded topology decision: **worker-emits-Result** — the broker returns the completion to the worker, which parses → `Result.proposed_ops` → core; the broker stays pure egress (AD-2). **Story 3.4 rides 4.5** too. Mirrors the 3.3→3.4 split.
 
 As the owner,
 I want the pet to keep a human-readable, LLM-curated record of what matters,
@@ -523,6 +525,24 @@ So that memory is real, not just stored.
 **Given** a fact established in an earlier turn
 **When** a later, related turn runs
 **Then** the reply demonstrably reflects that fact (CAP-6 success)
+
+### Story 4.5: Worker proposes ops over the Result (the write-back wire)
+
+> **Added 2026-06-17 — split out of 4.2.** The shared write-back protocol for ALL proposed ops (memory-ops AND faces). Build after 4.2; unblocks 3.4.
+
+As the owner,
+I want the pet to actually act on what it decides to remember or change,
+So that the apply-halves built in 4.2 (`apply_memory_op`) and 3.3 (`apply_add_face`) are reachable from a real turn.
+
+**Acceptance Criteria:**
+
+**Given** a turn completes (topology decision: **worker-emits-Result**)
+**When** the broker returns the completion to the worker
+**Then** the worker parses its own reply into a structured `Result` (`payload` + a closed `proposed_ops` list), and sends `Result → core` — reshaping the fire-and-forget worker + `RESULT→CORE` routing from 1.5/1.8, while preserving `turn_id` fencing (AD-12) and the ≤1-worker bound (AD-9); the broker stays a pure egress/safety boundary (no pet-domain parsing — AD-2)
+
+**Given** a `Result` carrying `proposed_ops`
+**When** core fences and accepts it
+**Then** core validates and applies each op via the existing apply paths (`apply_memory_op` for memory-ops, `apply_add_face` for faces — Story 3.4), sole-writer (AD-5); an invalid/oversized proposal is rejected without side effects, and the user-facing reply is unaffected
 
 ---
 
