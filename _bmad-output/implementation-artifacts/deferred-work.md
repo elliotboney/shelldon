@@ -112,3 +112,10 @@ Cheap coverage gaps over already-shipped code, completed in parallel without sco
 - **`build_chain` catches only `RuntimeError`** — All known builder errors are RuntimeErrors; other exceptions lose preset-name context. Revisit if builders start raising ValueError/TypeError.
 - **Missing model env var error doesn't name the env var** — Usability: error says "requires a model" but not which env var. Revisit when improving DX for first-time setup.
 - **Duplicate preset names in `PROVIDER_CHAIN` silently builds duplicate providers** — e.g. `"glm,glm"` wastes a fallback slot. Deduplication or warning belongs in Story 2.2 when chain iteration is implemented.
+
+## Deferred from: code review of 3-1-persistent-personality-state-struct (2026-06-17)
+
+- **`_checkpoint_task.cancel()` not awaited before shutdown flush** [`runtime.py:_cleanup`] — `_cleanup()` is sync; structurally can't await. Low-severity "Task destroyed but pending" warning risk. Revisit when _cleanup is refactored to async or Epic 5 scheduler takes over.
+- **Type mismatch in `apply_patch` values not validated** [`state.py:apply_patch`] — nan/inf/wrong-type values pass `setattr` but may cause `msgspec.json.encode` to raise at checkpoint time. Mitigated by the loop-recovery patch (finding #1). Revisit when value-range invariants are formalized (3.2 will define drift bounds).
+- **Mutable `Mood`/`PersonalityState` structs allow direct attribute bypass of `apply_patch`** [`state.py:Mood`] — Design tradeoff: mutable by spec, enforced by convention. Story 3.2's reflex loop must call `apply_patch`. Revisit if multiple writers are added beyond core.
+- **`Core.checkpoint_path` is a public mutable attribute** [`runtime.py:__init__`] — Hygiene: caller can change the path mid-run, causing loop and shutdown to diverge. Revisit if Core grows a public API surface.

@@ -35,6 +35,7 @@ from shelldon.contracts import (
 )
 from shelldon.core.arbiter import Arbiter
 from shelldon.core.bus import BusServer
+from shelldon.core.state import DEFAULT_CHECKPOINT_PATH, PersistentState
 from shelldon.core.turn import TurnFence
 
 log = logging.getLogger("shelldon.core.runtime")
@@ -52,18 +53,43 @@ DEGRADE_TEXT = "…can't think right now…"
 #: Default turn timeout (AC3 "rather than hanging"). Tests inject a small value.
 DEFAULT_TURN_TIMEOUT = 30.0
 
+#: Default personality-state checkpoint cadence (Story 3.1). Periodic, NOT per change
+#: (NFR7) — tests inject a small interval. Epic 5's scheduler will subsume this.
+DEFAULT_CHECKPOINT_INTERVAL = 60.0
+
 
 class Core:
-    """The turn orchestrator: owns the bus, fence, arbiter, and an injected spawner."""
+    """The turn orchestrator: owns the bus, fence, arbiter, an injected spawner, and
+    the persistent personality-state (restored on construction, AD-7)."""
 
-    def __init__(self, socket_path, spawner, *, turn_timeout: float = DEFAULT_TURN_TIMEOUT):
+    def __init__(
+        self,
+        socket_path,
+        spawner,
+        *,
+        turn_timeout: float = DEFAULT_TURN_TIMEOUT,
+        checkpoint_path=None,
+        checkpoint_interval: float = DEFAULT_CHECKPOINT_INTERVAL,
+    ):
+        if checkpoint_interval <= 0:
+            raise ValueError(f"checkpoint_interval must be positive, got {checkpoint_interval!r}")
         self.bus = BusServer(socket_path=socket_path)
         self.fence = TurnFence()
         self.arbiter = Arbiter()
         self.spawner = spawner
         self.turn_timeout = turn_timeout
+        self.checkpoint_path = checkpoint_path if checkpoint_path is not None else DEFAULT_CHECKPOINT_PATH
+        self.checkpoint_interval = checkpoint_interval
+        #: Personality state lives in RAM for the process lifetime, restored from the
+        #: last checkpoint (defaults cleanly on first run — AC1).
+        self.state = PersistentState.load(self.checkpoint_path)
         self._seq = 0
         self._timeout_task: asyncio.Task | None = None
+        #: The periodic checkpoint flush — a long-lived SINGLETON task, so it lives in
+        #: its own slot (like `_timeout_task`), NOT in `_bg`. `_bg` holds transient
+        #: per-turn reap tasks that drain to empty; a permanent resident there would
+        #: break that "drains to 0" invariant (the 1.9 soak relies on it).
+        self._checkpoint_task: asyncio.Task | None = None
         self._bg: set[asyncio.Task] = set()
 
     async def run(self) -> None:
@@ -75,6 +101,7 @@ class Core:
         """
         await self.bus.start()
         await self.spawner.ready()
+        self._checkpoint_task = asyncio.create_task(self._checkpoint_loop())
         try:
             while True:
                 env = await self.bus.core_inbox.get()
@@ -190,6 +217,31 @@ class Core:
         self._seq += 1
         return self._seq
 
+    # --- personality-state periodic checkpoint (Story 3.1; NFR7) ---
+
+    async def _checkpoint_loop(self) -> None:
+        """Flush the personality state on a fixed interval, ONLY if dirty (periodic,
+        not per change). A single in-core interval task — the seam Story 3.2's reflex
+        tick and Epic 5's scheduler subsume later without changing checkpoint behavior.
+        Cancelled cleanly on teardown."""
+        try:
+            while True:
+                await asyncio.sleep(self.checkpoint_interval)
+                try:
+                    self._checkpoint_if_dirty()
+                except Exception as exc:
+                    # A transient disk error must NOT permanently kill periodic
+                    # checkpointing. Log and keep going — state stays dirty, so the
+                    # next interval retries the flush. (CancelledError is a
+                    # BaseException, so teardown still propagates past this guard.)
+                    log.warning("periodic checkpoint failed (%s); retrying next interval", exc)
+        except asyncio.CancelledError:
+            return
+
+    def _checkpoint_if_dirty(self) -> None:
+        if self.state.dirty:
+            self.state.checkpoint(self.checkpoint_path)
+
     # --- background task bookkeeping ---
 
     def _track(self, task: asyncio.Task) -> None:
@@ -200,6 +252,15 @@ class Core:
         if self._timeout_task is not None:
             self._timeout_task.cancel()
             self._timeout_task = None
+        if self._checkpoint_task is not None:
+            self._checkpoint_task.cancel()
+            self._checkpoint_task = None
         for task in list(self._bg):
             task.cancel()
         self._bg.clear()
+        # Best-effort durable flush on graceful shutdown (the checkpoint is atomic, so
+        # no partial-write risk). Never let a teardown-time write escalate an error.
+        try:
+            self._checkpoint_if_dirty()
+        except Exception as exc:  # pragma: no cover - defensive teardown guard
+            log.warning("checkpoint on shutdown failed (%s); state left at last good", exc)
