@@ -89,6 +89,23 @@ Cheap coverage gaps over already-shipped code, completed in parallel without sco
 - **No platform-specific Pi validation** — ARM/Raspberry Pi specific testing will be added in later stories when hardware integration begins.
 - **No verification after LLM SDK installation** — Guard will be verified when LLM SDKs are actually added as dependencies in Story 1.4 (broker).
 
+## Deferred from: code review of 2-3-degrade-to-reflex-only-when-the-whole-chain-fails (2026-06-17)
+
+> The 2.3 review's in-scope findings (private-attr asserts → `is_idle` properties; test_ac2 idle assertion; 2s→5s timeout slack; readability of the `build_harness` guard; the `reset()` docstring contradiction the de-placeholder introduced) were **fixed in this story**. The items below touch pre-existing broker tests from Stories 2.1/2.2 — out of 2.3's scope (tests-only + comment de-placeholder), so they're deferred rather than expanded into here.
+
+- **`conftest._no_broker_backoff` docstring overstates coverage** — claims `_RECONNECT_BACKOFF_S` is "exercised explicitly in test_broker_reconnect.py", but that file never references the constant; reconnect backoff *timing* is untested anywhere. Either add a timing assertion or correct the docstring. Pre-existing (2.2). Revisit when reconnect timing is hardened.
+- **`test_broker_reconnect` implicitly depends on `_no_broker_backoff`** — `test_reconnects_after_a_transient_connect_failure` only stays within its ~1s poll budget because the autouse fixture zeros `_RECONNECT_BACKOFF_S`. If that fixture is ever removed/rescoped, the test goes sporadically flaky. Make the dependency explicit (e.g. monkeypatch within the test) when reconnect tests are revisited. Pre-existing (2.2).
+- **`_Collector` duplicated byte-for-byte** across `test_broker_service.py` and `test_broker_service_branches.py` — extract to a shared fixture/`conftest.py` so a writer-interface change patches one place. Pre-existing (2.1/2.2) cleanup.
+- **`test_broker_chain_fallback` asserts `primary.calls == 2`** — hardcodes the per-provider retry count (1 attempt + 1 retry) rather than the AC contract; a legit retry-count change breaks it with a misleading "fallback didn't fire" failure. Assert on the fallback contract instead. Pre-existing (2.2).
+- **`build_harness` startup `_await` masks actor startup failures** — a broken import/port conflict makes an actor task raise immediately, but the registration `_await` consumes its full timeout and raises a generic "condition not met" instead of surfacing the real exception. Pre-existing (1.8); add task-exception inspection when test diagnostics are hardened (relates to the 1.8-deferred "`_await` poor diagnostics" item).
+
+## Deferred from: code review of 2-2-automatic-fallback-through-the-chain (2026-06-17)
+
+> Filed by the reviewer under "design notes for retrospective" — hypothetical / known tradeoffs, not fix-now. Recorded here per the review.
+
+- **Empty-chain guard only in `run_broker`, not `_serve_connection`** — `_serve_connection` accepts `list[LLMProvider]` with no guard; called directly with `[]` it would let `handle_job_chain` return `Result(ok=False, error="empty provider chain")` with no service-layer log. No caller bypasses `run_broker` (which raises on empty) + `build_chain` (raises on empty), so it's hypothetical. Revisit if a second caller of `_serve_connection` is added — an `assert chain` at entry would make the invariant explicit. Not added now (no defensive code for an impossible path).
+- **`name: str` on the `LLMProvider` Protocol is metadata coupling** — `name` is used only for audit logging in `handle_job_chain`, not a behavioral capability, yet the Protocol now rejects any structurally valid provider that lacks a label. Deliberate choice (Story 2.2 Task 2 / Dev Notes "Audit record"). Revisit if a third-party/test provider is added that doesn't naturally carry a name — a `(name, provider)` tuple/NamedTuple at the chain layer would be a cleaner seam than putting the label on the provider itself.
+
 ## Deferred from: code review of 2-1-provider-abstraction-and-an-ordered-chain (2026-06-17)
 
 - **`OpenAIProvider.complete()` — `message=None` → AttributeError** — OpenAI SDK contract says `message` is never None; defensive guard is theoretical. Revisit if an OpenAI-compat endpoint is found that violates this.

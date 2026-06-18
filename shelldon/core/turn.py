@@ -18,6 +18,12 @@ class TurnFence:
         self._closed: set[str] = set()
         self._closed_order: deque[str] = deque(maxlen=max_closed)
 
+    @property
+    def is_idle(self) -> bool:
+        """True when no turn is open (ready for the next turn) — lets callers/tests
+        assert on intent rather than the `current` field directly."""
+        return self.current is None
+
     def open(self, turn_id: str) -> None:
         """Open a turn. A different turn already open is superseded (closed)."""
         if self.current is not None and self.current != turn_id:
