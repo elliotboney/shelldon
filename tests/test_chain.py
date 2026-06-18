@@ -97,3 +97,25 @@ def test_ollama_base_with_v1_midpath_not_double_appended():
         env={"PROVIDER_CHAIN": "ollama", "OLLAMA_MODEL": "m", "OLLAMA_API_BASE": "http://host/v1/custom"}
     )
     assert "/v1/custom/v1" not in str(chain[0]._client.base_url)
+
+
+def test_built_providers_are_named_by_preset():
+    """Story 2.2 AC3: each provider carries its preset name for the audit record."""
+    chain = build_chain(env={**_FULL_ENV, "PROVIDER_CHAIN": "glm,ollama"})
+    assert [p.name for p in chain] == ["glm", "ollama"]
+
+
+def test_duplicate_presets_deduped_preserving_order():
+    """Story 2.2 Task 7: a duplicate preset wastes a fallback slot — drop it."""
+    chain = build_chain(env={**_FULL_ENV, "PROVIDER_CHAIN": "glm,ollama,glm"})
+    assert [p.name for p in chain] == ["glm", "ollama"]
+
+
+def test_blank_chain_entries_dropped_with_warning(caplog):
+    """Review #4: blank entries (stray/trailing comma) are dropped AND warned."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="shelldon.broker"):
+        chain = build_chain(env={**_FULL_ENV, "PROVIDER_CHAIN": "glm,,ollama"})
+    assert [p.name for p in chain] == ["glm", "ollama"]
+    assert any("blank" in r.getMessage() for r in caplog.records)

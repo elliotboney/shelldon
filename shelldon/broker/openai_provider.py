@@ -17,13 +17,14 @@ from shelldon.broker.provider import PermanentProviderError, TransientProviderEr
 class OpenAIProvider:
     """An `LLMProvider` backed by the `openai` SDK (base_url selects the endpoint)."""
 
-    def __init__(self, *, api_key, base_url=None, model, max_tokens=1024):
+    def __init__(self, *, api_key, base_url=None, model, max_tokens=1024, name="openai"):
         # Ollama ignores the key but the SDK still requires a non-empty one — the
         # chain passes a placeholder for Ollama.
         if not api_key:
             raise RuntimeError("OpenAIProvider requires an api_key (broker-resolved)")
         if not model:
             raise RuntimeError("OpenAIProvider requires a model")
+        self.name = name  # audit label (chain preset name); never a credential
         self._model = model
         self._max_tokens = max_tokens
         self._client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)

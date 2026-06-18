@@ -11,6 +11,8 @@ from shelldon.core.bus import MAX_FRAME_BYTES, read_frame, write_frame
 
 
 class _OK:
+    name = "test"
+
     async def complete(self, prompt):
         return "pong"
 
@@ -55,7 +57,7 @@ async def _reader_with_job(*, then_oversized=False):
 async def test_serve_processes_job_then_eof():
     reader = await _reader_with_job()
     out = _Collector()
-    await _serve_connection(reader, out, _OK())
+    await _serve_connection(reader, out, [_OK()])
 
     # One RESULT frame written back, turn_id echoed.
     rr = asyncio.StreamReader()
@@ -69,12 +71,12 @@ async def test_serve_processes_job_then_eof():
 async def test_serve_survives_write_failure():
     """Hub vanishes mid-reply: the loop ends cleanly instead of crashing (finding 4)."""
     reader = await _reader_with_job()
-    await _serve_connection(reader, _RaisingWriter(), _OK())  # must not raise
+    await _serve_connection(reader, _RaisingWriter(), [_OK()])  # must not raise
 
 
 async def test_serve_survives_framing_error():
     """An oversized frame ends the connection without killing the broker (finding 3)."""
     reader = await _reader_with_job(then_oversized=True)
     out = _Collector()
-    await _serve_connection(reader, out, _OK())  # must not raise
+    await _serve_connection(reader, out, [_OK()])  # must not raise
     assert len(out.buf) > 0  # the valid job before the bad frame was still answered

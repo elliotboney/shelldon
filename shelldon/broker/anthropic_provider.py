@@ -21,9 +21,10 @@ _DEFAULT_MODEL = "claude-sonnet-4-6"
 class AnthropicProvider:
     """An `LLMProvider` backed by the `anthropic` SDK (native Claude or Z.ai/GLM)."""
 
-    def __init__(self, *, api_key, base_url=None, model=None, max_tokens=1024):
+    def __init__(self, *, api_key, base_url=None, model=None, max_tokens=1024, name="anthropic"):
         if not api_key:
             raise RuntimeError("AnthropicProvider requires an api_key (broker-resolved)")
+        self.name = name  # audit label (chain preset name); never a credential
         self._model = model or _DEFAULT_MODEL
         self._max_tokens = max_tokens
         # base_url=None → the SDK's default (api.anthropic.com, native Claude); a
