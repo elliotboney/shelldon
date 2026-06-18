@@ -9,6 +9,7 @@ authors = [{ name = "Elliot Boney" }]
 dependencies = [
     "msgspec==0.21.1",               # versioned typed contracts + bus framing (AD-4/AD-10)
     "anthropic==0.109.2",            # broker-only: GLM-5.2 via Z.ai Anthropic-compatible endpoint (AD-2)
+    "openai==2.42.0",                # broker-only: OpenAI-compatible adapters — Ollama/OpenAI/OpenRouter/Groq/Cerebras/NVIDIA/Mistral/GitHub/Gemini (AD-2)
 ]
 
 [dependency-groups]
@@ -28,9 +29,12 @@ packages = ["shelldon"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Live/network tests are opt-in: a default `pytest` never hits the network (and never
+# breaks because a key happens to be in the ambient env). Run them with `pytest -m live`.
+addopts = "-m 'not live'"
 markers = [
     "soak: long-running endurance/soak proof (NFR2)",
-    "live: hits a real network provider; skipped unless its credential env var is set",
+    "live: hits a real network provider; opt-in only (run with -m live)",
 ]
 
 # AD-1: core/ must never import an LLM/provider library — enforced mechanically.

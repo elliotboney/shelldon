@@ -176,7 +176,7 @@ async def test_real_fork_rss_stays_flat(sock_path):
 
     tasks = [
         asyncio.create_task(core.run()),
-        asyncio.create_task(run_broker(sock_path, OkProvider())),
+        asyncio.create_task(run_broker(sock_path, [OkProvider()])),
         asyncio.create_task(run_display(sock_path, renderer)),
         asyncio.create_task(run_cli_transport(sock_path, inbound=source, outbound=sink)),
     ]
