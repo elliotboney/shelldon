@@ -26,8 +26,8 @@ from shelldon.contracts import (
     Completion,
     Envelope,
     Job,
-    MemoryOp,
     MsgKind,
+    ProposedOp,
     Result,
 )
 from shelldon.core.bus import connect, read_frame, write_frame
@@ -39,9 +39,10 @@ log = logging.getLogger("shelldon.worker")
 #: (the format may be co-adjusted there). A reply with no such block is a plain reply.
 _OPS_BLOCK_RE = re.compile(r"```ops[ \t]*\n(.*?)```", re.DOTALL)
 
-#: Decoder for the ops block payload — a closed list of the MemoryOp union. A malformed
-#: or unknown op fails the WHOLE block (the 3.1/3.3/4.2 whole-reject discipline).
-_OPS_DECODER = msgspec.json.Decoder(list[MemoryOp])
+#: Decoder for the ops block payload — a closed list of the ProposedOp union (memory-ops
+#: + the face op, Story 3.4). A malformed or unknown op fails the WHOLE block (the
+#: 3.1/3.3/4.2 whole-reject discipline).
+_OPS_DECODER = msgspec.json.Decoder(list[ProposedOp])
 
 #: Anti-wedge backstop: the worker waits at most this long for the broker's Completion,
 #: then emits a failure Result and exits — so a crashed/absent broker can never leave the
@@ -50,7 +51,7 @@ _OPS_DECODER = msgspec.json.Decoder(list[MemoryOp])
 _COMPLETION_TIMEOUT_S = 120.0
 
 
-def parse_reply(text: str) -> tuple[str, list[MemoryOp]]:
+def parse_reply(text: str) -> tuple[str, list[ProposedOp]]:
     """Split a raw completion into (user-facing payload, proposed_ops).
 
     No ops block → the whole text is the reply, no ops. EVERY well-formed ```ops block is

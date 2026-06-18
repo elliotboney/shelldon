@@ -4,7 +4,7 @@ baseline_commit: b036ec4ba6ce2709ca34bc619f5eb4c40c4ee27e
 
 # Story 4.5: Worker proposes ops over the Result (the write-back wire)
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
