@@ -22,6 +22,7 @@ later.
 
 import asyncio
 import logging
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from shelldon.contracts import (
@@ -35,6 +36,7 @@ from shelldon.contracts import (
 )
 from shelldon.core.arbiter import Arbiter
 from shelldon.core.bus import BusServer
+from shelldon.core.reflexes import compute_reflex_patch
 from shelldon.core.state import DEFAULT_CHECKPOINT_PATH, PersistentState
 from shelldon.core.turn import TurnFence
 
@@ -57,6 +59,10 @@ DEFAULT_TURN_TIMEOUT = 30.0
 #: (NFR7) — tests inject a small interval. Epic 5's scheduler will subsume this.
 DEFAULT_CHECKPOINT_INTERVAL = 60.0
 
+#: Default resident-reflex tick cadence (Story 3.2). A gentle in-core drift between
+#: turns (no LLM) — tests inject a small interval. Epic 5's scheduler subsumes it.
+DEFAULT_REFLEX_INTERVAL = 10.0
+
 
 class Core:
     """The turn orchestrator: owns the bus, fence, arbiter, an injected spawner, and
@@ -70,9 +76,12 @@ class Core:
         turn_timeout: float = DEFAULT_TURN_TIMEOUT,
         checkpoint_path=None,
         checkpoint_interval: float = DEFAULT_CHECKPOINT_INTERVAL,
+        reflex_interval: float = DEFAULT_REFLEX_INTERVAL,
     ):
         if checkpoint_interval <= 0:
             raise ValueError(f"checkpoint_interval must be positive, got {checkpoint_interval!r}")
+        if reflex_interval <= 0:
+            raise ValueError(f"reflex_interval must be positive, got {reflex_interval!r}")
         self.bus = BusServer(socket_path=socket_path)
         self.fence = TurnFence()
         self.arbiter = Arbiter()
@@ -80,16 +89,18 @@ class Core:
         self.turn_timeout = turn_timeout
         self.checkpoint_path = checkpoint_path if checkpoint_path is not None else DEFAULT_CHECKPOINT_PATH
         self.checkpoint_interval = checkpoint_interval
+        self.reflex_interval = reflex_interval
         #: Personality state lives in RAM for the process lifetime, restored from the
         #: last checkpoint (defaults cleanly on first run — AC1).
         self.state = PersistentState.load(self.checkpoint_path)
         self._seq = 0
         self._timeout_task: asyncio.Task | None = None
-        #: The periodic checkpoint flush — a long-lived SINGLETON task, so it lives in
-        #: its own slot (like `_timeout_task`), NOT in `_bg`. `_bg` holds transient
-        #: per-turn reap tasks that drain to empty; a permanent resident there would
-        #: break that "drains to 0" invariant (the 1.9 soak relies on it).
+        #: The periodic checkpoint flush AND the resident reflex tick are long-lived
+        #: SINGLETON tasks, so each lives in its own slot (like `_timeout_task`), NOT
+        #: in `_bg`. `_bg` holds transient per-turn reap tasks that drain to empty; a
+        #: permanent resident there would break that "drains to 0" invariant (1.9 soak).
         self._checkpoint_task: asyncio.Task | None = None
+        self._reflex_task: asyncio.Task | None = None
         self._bg: set[asyncio.Task] = set()
 
     async def run(self) -> None:
@@ -102,10 +113,12 @@ class Core:
         await self.bus.start()
         await self.spawner.ready()
         self._checkpoint_task = asyncio.create_task(self._checkpoint_loop())
+        self._reflex_task = asyncio.create_task(self._reflex_loop())
         try:
             while True:
                 env = await self.bus.core_inbox.get()
                 if env.kind is MsgKind.INBOUND_MSG:
+                    self._mark_interaction()
                     prompt = self.arbiter.submit(env.body.text)
                     if prompt is not None:
                         await self._start_turn(prompt)
@@ -242,6 +255,39 @@ class Core:
         if self.state.dirty:
             self.state.checkpoint(self.checkpoint_path)
 
+    # --- resident reflexes (Story 3.2; AD-5/AD-14, CAP-2) ---
+
+    async def _reflex_loop(self) -> None:
+        """Drift the personality-state on a fixed in-core tick — no LLM, no network
+        (it touches only `self.state`). Computes a sparse patch via the pure reflex
+        policy and applies it through the single-writer `apply_patch`, skipping a
+        no-op tick. A single in-core interval task — the seam Epic 5's scheduler
+        subsumes as a cost-tier 'reflex job' without changing behavior. Cancelled
+        cleanly on teardown."""
+        try:
+            while True:
+                await asyncio.sleep(self.reflex_interval)
+                try:
+                    self._reflex_tick()
+                except Exception as exc:
+                    # One bad tick must NOT permanently kill reflexes — log and keep
+                    # ticking (the pet stays alive). Same hardening as the checkpoint
+                    # loop. CancelledError is a BaseException, so teardown still exits.
+                    log.warning("reflex tick failed (%s); retrying next interval", exc)
+        except asyncio.CancelledError:
+            return
+
+    def _reflex_tick(self) -> None:
+        patch = compute_reflex_patch(self.state.state, datetime.now(UTC))
+        if patch:
+            self.state.apply_patch(patch)
+
+    def _mark_interaction(self) -> None:
+        """Record 'now' as the last interaction (the idle signal the reflex reads),
+        through the single-writer state API (AD-5). Called when an owner message
+        arrives — the only new state write on the turn path."""
+        self.state.apply_patch({"last_interaction": datetime.now(UTC).isoformat()})
+
     # --- background task bookkeeping ---
 
     def _track(self, task: asyncio.Task) -> None:
@@ -255,6 +301,9 @@ class Core:
         if self._checkpoint_task is not None:
             self._checkpoint_task.cancel()
             self._checkpoint_task = None
+        if self._reflex_task is not None:
+            self._reflex_task.cancel()
+            self._reflex_task = None
         for task in list(self._bg):
             task.cancel()
         self._bg.clear()

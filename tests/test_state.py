@@ -16,19 +16,9 @@ from pathlib import Path
 import msgspec
 import pytest
 
+from conftest import DummySpawner, await_true
 from shelldon.core.runtime import Core
 from shelldon.core.state import WRITABLE_PATHS, PersistentState, PersonalityState
-
-
-async def _await_true(predicate, timeout=2.0):
-    """Poll a state predicate to a bounded deadline (no fixed-sleep anchors)."""
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while loop.time() < deadline:
-        if predicate():
-            return
-        await asyncio.sleep(0.005)
-    raise AssertionError("condition not met within timeout")
 
 
 # --- AC1: load defaults on first run, restore from a checkpoint ---
@@ -202,24 +192,19 @@ def test_stray_temp_file_does_not_break_load(tmp_path):
 # --- AC2 / NFR7: the in-core periodic flush — fires only when dirty ---
 
 
-class _DummySpawner:
-    async def ready(self):  # pragma: no cover - never run here
-        pass
-
-
 def test_core_restores_state_on_construction(sock_path, tmp_path):
     target = tmp_path / "state.json"
     seed = PersistentState.load(target)
     seed.apply_patch({"energy": 0.25})
     seed.checkpoint(target)
 
-    core = Core(sock_path, _DummySpawner(), checkpoint_path=target)
+    core = Core(sock_path, DummySpawner(), checkpoint_path=target)
     assert core.state.state.energy == pytest.approx(0.25)
 
 
 def test_core_flush_writes_only_when_dirty(sock_path, tmp_path):
     target = tmp_path / "state.json"
-    core = Core(sock_path, _DummySpawner(), checkpoint_path=target)
+    core = Core(sock_path, DummySpawner(), checkpoint_path=target)
 
     # Not dirty -> the periodic flush is a no-op (no file written).
     core._checkpoint_if_dirty()
@@ -245,7 +230,7 @@ async def test_checkpoint_loop_survives_a_disk_error(sock_path, tmp_path, monkey
     """A transient disk error in one flush must NOT permanently kill periodic
     checkpointing — the loop logs and retries on the next tick (state stays dirty)."""
     target = tmp_path / "state.json"
-    core = Core(sock_path, _DummySpawner(), checkpoint_path=target, checkpoint_interval=0.01)
+    core = Core(sock_path, DummySpawner(), checkpoint_path=target, checkpoint_interval=0.01)
     core.state.apply_patch({"energy": 0.3})
 
     real = core.state.checkpoint
@@ -261,7 +246,7 @@ async def test_checkpoint_loop_survives_a_disk_error(sock_path, tmp_path, monkey
 
     task = asyncio.create_task(core._checkpoint_loop())
     try:
-        await _await_true(lambda: target.exists())  # written despite the first error
+        await await_true(lambda: target.exists())  # written despite the first error
         assert calls["n"] >= 2
     finally:
         task.cancel()
@@ -286,6 +271,6 @@ def test_load_unreadable_file_falls_back_to_defaults(tmp_path, monkeypatch):
 def test_nonpositive_checkpoint_interval_rejected(sock_path):
     """Zero/negative interval would busy-spin asyncio.sleep(0) and starve the loop."""
     with pytest.raises(ValueError):
-        Core(sock_path, _DummySpawner(), checkpoint_interval=0)
+        Core(sock_path, DummySpawner(), checkpoint_interval=0)
     with pytest.raises(ValueError):
-        Core(sock_path, _DummySpawner(), checkpoint_interval=-1.0)
+        Core(sock_path, DummySpawner(), checkpoint_interval=-1.0)
