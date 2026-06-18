@@ -46,11 +46,14 @@ A few decisions that shape everything:
 
 ## Status
 
-🟢 **Epic 1 complete — Epic 2 in progress.**
+🟢 **Epics 1–3 complete — Epic 4 (Memory & Continuity) in progress.**
 
-Epic 1 (Talking Pet) is done: 9 stories shipped, 89 tests passing, endurance soak proved flat memory over sustained turns. The full walking skeleton — message in → LLM reply out → face reacts — is working.
+18 stories shipped, 244 tests passing. The daily-driver pet is real: a chat turn runs message in → LLM reply out → expressive face reacts, with provider-chain fallback, resident reflexes between turns, and now durable memory.
 
-Epic 2 (Resilient Brain) is active: Story 2.1 (provider abstraction + ordered chain) is in progress, wiring GLM and the Anthropic-compatible adapter alongside a new OpenAI-compatible adapter for Ollama/OpenAI/OpenRouter.
+- **Epic 1 — Talking Pet** ✅ the full walking skeleton end-to-end; an endurance soak proved flat memory over sustained turns.
+- **Epic 2 — Resilient Brain** ✅ an ordered provider chain with automatic fallback, degrading gracefully to reflex-only when the whole chain fails.
+- **Epic 3 — A Pet That Feels Alive** ✅ persistent personality state, a resident reflex loop (blink/idle/mood drift), and a self-modifiable expressive-face registry.
+- **Epic 4 — Memory & Continuity** *(in progress)* — sqlite conversation history (WAL/FTS5) and the curated markdown memory tree have landed, plus the worker→core write-back wire that lets the pet propose what to remember while core stays the sole writer. Remaining: injecting memory into the prompt, OS-level vault isolation, and chat-driven face self-modification.
 
 | Artifact | Path |
 |---|---|
@@ -128,10 +131,10 @@ Free-tier quotas are **independent per provider**, so the smart move is to stack
 
 **Daily-driver line** — Epics 1–4 are the version that lives on the desk every day. Epics 5–7 are enrichment, added when wanted.
 
-- [x] **Epic 1 — Talking Pet** — walking skeleton: chat turn end-to-end, face reacts, endurance soak ✅ (9/9 stories, 89 tests)
-- [ ] **Epic 2 — Resilient Brain** — provider chain fallback, degrade-to-reflex on chain exhaustion ⭐ daily-driver *(in progress)*
-- [ ] **Epic 3 — A Pet That Feels Alive** — resident reflexes, mood drift, expressive face compositor ⭐ daily-driver
-- [ ] **Epic 4 — Memory & Continuity** — sqlite conversation history (FTS5) + curated markdown memory + owner directive ⭐ daily-driver
+- [x] **Epic 1 — Talking Pet** — walking skeleton: chat turn end-to-end, face reacts, endurance soak ✅ (9/9 stories)
+- [x] **Epic 2 — Resilient Brain** — provider chain fallback, degrade-to-reflex on chain exhaustion ✅ (3/3 stories) ⭐ daily-driver
+- [x] **Epic 3 — A Pet That Feels Alive** — resident reflexes, mood drift, self-modifiable expressive face ✅ (3/3 stories) ⭐ daily-driver
+- [ ] **Epic 4 — Memory & Continuity** — sqlite conversation history (FTS5) + curated markdown memory + owner directive ⭐ daily-driver *(in progress — history, curated memory, and the propose-ops write-back wire done; prompt injection + vault + face self-modify remain)*
 - [ ] **Epic 5 — Autonomous Life** — scheduler, proactive action, cost-tiered, battery-aware — enrichment
 - [ ] **Epic 6 — Dreaming & Learning** — capture learnings hot-path + dream-cycle consolidation — enrichment
 - [ ] **Epic 7 — Extensibility & Optional Embodiment** — generalized plugin model, XP, optional physical sensing — enrichment
