@@ -1,5 +1,6 @@
-"""AC1 integration: a Job sent over the bus reaches the registered broker, and its
-Result lands in core's inbox with the echoed turn_id. Fake provider, no network.
+"""AC1 integration: a Job sent over the bus reaches the registered broker, which
+returns a Completion routed back to the WORKER (Story 4.5: the broker no longer emits
+a Result to core — the worker does). Fake provider, no network.
 """
 
 import asyncio
@@ -7,8 +8,8 @@ import asyncio
 import pytest
 
 from shelldon.broker.service import run_broker
-from shelldon.contracts import Actor, Envelope, Job, MsgKind, Result
-from shelldon.core.bus import BusServer, connect, write_frame
+from shelldon.contracts import Actor, Completion, Envelope, Job, MsgKind
+from shelldon.core.bus import BusServer, connect, read_frame, write_frame
 
 
 class _OK:
@@ -21,7 +22,7 @@ class _OK:
         return self.text
 
 
-async def test_job_over_bus_yields_result_to_core(sock_path):
+async def test_job_over_bus_yields_completion_to_worker(sock_path):
     srv = BusServer(socket_path=sock_path)
     await srv.start()
     broker_task = asyncio.create_task(run_broker(sock_path, [_OK("pong")]))
@@ -35,12 +36,13 @@ async def test_job_over_bus_yields_result_to_core(sock_path):
         )
         await write_frame(w, job)
 
-        res_env = await asyncio.wait_for(srv.core_inbox.get(), timeout=1.0)
-        assert res_env.kind is MsgKind.RESULT
-        assert isinstance(res_env.body, Result)
-        assert res_env.body.ok and res_env.body.payload == "pong"
-        assert res_env.src is Actor.BROKER
-        assert res_env.turn_id == "turn-7"  # echoed for core's fencing (AD-12)
+        # The broker answers the WORKER with a Completion (NOT a Result to core).
+        comp = await asyncio.wait_for(read_frame(reader), timeout=1.0)
+        assert comp.kind is MsgKind.COMPLETION
+        assert isinstance(comp.body, Completion)
+        assert comp.body.ok and comp.body.payload == "pong"
+        assert comp.src is Actor.BROKER
+        assert comp.turn_id == "turn-7"  # echoed so the worker stamps the Result (AD-12)
         w.close()
         await w.wait_closed()
     finally:

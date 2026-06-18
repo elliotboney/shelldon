@@ -6,7 +6,7 @@ import asyncio
 import pytest
 
 from shelldon.broker.service import _serve_connection
-from shelldon.contracts import Actor, Envelope, Job, MsgKind, Result
+from shelldon.contracts import Actor, Completion, Envelope, Job, MsgKind
 from shelldon.core.bus import MAX_FRAME_BYTES, read_frame, write_frame
 
 
@@ -64,7 +64,8 @@ async def test_serve_processes_job_then_eof():
     rr.feed_data(bytes(out.buf))
     rr.feed_eof()
     res = await read_frame(rr)
-    assert res.kind is MsgKind.RESULT and isinstance(res.body, Result)
+    # The broker returns a Completion to the worker (Story 4.5), not a Result to core.
+    assert res.kind is MsgKind.COMPLETION and isinstance(res.body, Completion)
     assert res.body.ok and res.body.payload == "pong" and res.turn_id == "t1"
 
 

@@ -6,7 +6,7 @@ from shelldon.core.turn import TurnFence
 
 def _result_env(turn_id):
     return Envelope(
-        id="r", kind=MsgKind.RESULT, src=Actor.BROKER, dst=Actor.CORE,
+        id="r", kind=MsgKind.RESULT, src=Actor.WORKER, dst=Actor.CORE,
         body=Result(ok=True, payload="hi"), turn_id=turn_id,
     )
 

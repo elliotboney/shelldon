@@ -12,12 +12,15 @@ from shelldon.contracts import (
     ROUTING_TABLE,
     SCHEMA_VERSION,
     Actor,
+    Completion,
     Envelope,
     InboundMessage,
     Job,
+    LogEpisode,
     MsgKind,
     OutboundMessage,
     Region,
+    Remember,
     Result,
     StateSnapshot,
     decode,
@@ -78,6 +81,31 @@ def _envelopes():
             dst=Actor.DISPLAY,
             body=StateSnapshot(region=Region.FACE, seq=7, face="neutral"),
         ),
+        # Completion: broker -> worker, the raw provider text (Story 4.5)
+        Envelope(
+            id="env-7",
+            kind=MsgKind.COMPLETION,
+            src=Actor.BROKER,
+            dst=Actor.WORKER,
+            body=Completion(ok=True, payload="pong"),
+            turn_id="turn-7",
+        ),
+        # Result carrying proposed_ops: worker -> core (Story 4.5)
+        Envelope(
+            id="env-8",
+            kind=MsgKind.RESULT,
+            src=Actor.WORKER,
+            dst=Actor.CORE,
+            body=Result(
+                ok=True,
+                payload="noted",
+                proposed_ops=[
+                    Remember(collection="people", name="Alex", content="friend"),
+                    LogEpisode(content="a walk", tags=("outdoor",)),
+                ],
+            ),
+            turn_id="turn-8",
+        ),
     ]
 
 
@@ -87,6 +115,31 @@ def test_envelope_roundtrip(env):
     decoded = decode(encode(env))
     assert decoded == env
     assert type(decoded.body) is type(env.body)
+
+
+def test_result_proposed_ops_is_non_breaking_default():
+    """AD-13: `proposed_ops` is an additive optional field — a plain Result (no ops)
+    decodes with an empty list and the schema version is unchanged."""
+    plain = Result(ok=True, payload="just text")
+    assert plain.proposed_ops == []
+    env = Envelope(
+        id="r", kind=MsgKind.RESULT, src=Actor.WORKER, dst=Actor.CORE,
+        body=plain, turn_id="t",
+    )
+    decoded = decode(encode(env))
+    assert decoded.body.proposed_ops == []
+    assert decoded.v == SCHEMA_VERSION  # additive field → no version bump
+
+
+def test_proposed_ops_decode_to_concrete_op_types():
+    """The closed MemoryOp union round-trips by tag back to its concrete types."""
+    env = Envelope(
+        id="r", kind=MsgKind.RESULT, src=Actor.WORKER, dst=Actor.CORE,
+        body=Result(ok=True, proposed_ops=[Remember(collection="facts", name="n", content="c")]),
+        turn_id="t",
+    )
+    op = decode(encode(env)).body.proposed_ops[0]
+    assert type(op) is Remember and op.collection == "facts"
 
 
 def test_default_schema_version():

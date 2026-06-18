@@ -1,5 +1,5 @@
 # generated: 2026-06-16 10:47:47 CDT
-# last_updated: 2026-06-17
+# last_updated: 2026-06-17 (story 4.5 created)
 # project: shelldon
 # project_key: NOKEY
 # tracking_system: file-system
@@ -69,7 +69,7 @@ development_status:
   epic-4: in-progress
   4-1-conversation-history-store: done
   4-2-curated-markdown-memory-and-memory-ops: done
-  4-5-worker-proposes-ops-wire: backlog  # split from 4.2 (2026-06-17): the turn-topology reshape — worker receives the completion, parses -> Result.proposed_ops -> core (decision A); core routes to apply_memory_op (4.2) / apply_add_face (3.3). Build AFTER 4-2; unblocks 3-4.
+  4-5-worker-proposes-ops-wire: review  # split from 4.2 (2026-06-17): the turn-topology reshape — worker receives the completion, parses -> Result.proposed_ops -> core (decision A); core routes to apply_memory_op (4.2) / apply_add_face (3.3). Build AFTER 4-2; unblocks 3-4.
   3-4-self-modify-faces-via-chat: backlog  # deferred from Epic 3 (2026-06-17): rides the 4-5 wire (LLM proposes add_face over a Result, core applies via 3.3's apply_add_face). Build AFTER 4-5.
   4-3-vault-with-os-level-isolation: backlog
   4-4-memory-shapes-the-turn: backlog

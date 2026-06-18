@@ -1,8 +1,10 @@
-"""Broker bus-client loop (AD-2/AD-4): receive Jobs, answer with Results.
+"""Broker bus-client loop (AD-2/AD-4): receive Jobs, answer with Completions.
 
 Thin glue over `handle_job` — connects to the hub as BROKER, reads Job envelopes,
-and writes the resulting Result back (routed RESULT->CORE), echoing the Job's
-`turn_id` so core can fence later (AD-12). Full end-to-end turn wiring is Story 1.8.
+and writes the raw provider Completion back to the WORKER (routed COMPLETION->WORKER),
+echoing the Job's `turn_id`. The worker (not the broker) parses the reply into a
+Result with proposed_ops (Story 4.5) — the broker stays a pure egress boundary,
+doing no pet-domain parsing (AD-2).
 
 The read/write loop mirrors the hub's per-frame resilience (server.py): a bad
 message is skipped, a framing error or a vanished hub ends the connection cleanly
@@ -17,7 +19,7 @@ import msgspec
 
 from shelldon.broker.broker import handle_job_chain
 from shelldon.broker.provider import LLMProvider
-from shelldon.contracts import Actor, Envelope, Job, MsgKind, Result
+from shelldon.contracts import Actor, Completion, Envelope, Job, MsgKind, Result
 from shelldon.core.bus import connect, read_frame, write_frame
 
 log = logging.getLogger("shelldon.broker")
@@ -52,12 +54,16 @@ async def _serve_connection(reader, writer, chain: list[LLMProvider]) -> None:
             log.warning("broker ignoring non-Job envelope %s (%s)", env.id, env.kind)
             continue
         result: Result = await handle_job_chain(env.body, chain)
+        # Return the raw completion to the WORKER, not a Result to core (Story 4.5):
+        # the worker parses its own reply into proposed_ops and emits the Result. The
+        # broker stays a pure egress boundary — text/error only, no pet-domain parsing
+        # (AD-2). turn_id is echoed so the worker (and core's fence) can correlate.
         out = Envelope(
             id=uuid.uuid4().hex,
-            kind=MsgKind.RESULT,
+            kind=MsgKind.COMPLETION,
             src=Actor.BROKER,
-            dst=Actor.CORE,
-            body=result,
+            dst=Actor.WORKER,
+            body=Completion(ok=result.ok, payload=result.payload, error=result.error),
             turn_id=env.turn_id,
         )
         try:

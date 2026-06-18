@@ -64,6 +64,13 @@ Cheap coverage gaps over already-shipped code, completed in parallel without sco
 - **No `TurnFence` eviction boundary test** — closing exactly `max_closed + 1` distinct IDs is untested; manual inspection confirms correctness. Add coverage when TurnFence is extended.
 - **`gc.disable()` not re-enabled on `preload()` exception path** — intentional for COW fork pattern; test teardown re-enables for isolation. Revisit if process lifecycle changes.
 
+## Deferred from: code review of 4-5-worker-proposes-ops-wire (2026-06-17)
+
+- **`write_frame` for outbound Result (worker→core) has no timeout** — `run_worker` in `worker/worker.py` has a 120s timeout on `read_frame` for the Completion but no timeout on the subsequent `write_frame` to core. If the hub stalls, the worker blocks indefinitely past the 120s window. Pre-existing write-path issue; core timeout is the backstop. Address in resilience hardening.
+- **`parse_reply` `.strip()` on assembled payload destroys intentional leading/trailing whitespace** — After stripping the ops block, `payload = (text[:start] + text[end:]).strip()` silently removes leading/trailing whitespace. Low risk for current plain-text replies but may matter once Story 4.4 introduces formatted prompts. Revisit during 4.4 prompt-format definition.
+- **COMPLETION dropped at hub + 90s `worker_in_flight` freeze asymmetry** — If a worker times out (fires at 120s) but core already degraded (typically ~30s), the `worker_in_flight` slot stays locked for 90 extra seconds, blocking all new turns. The asymmetry is intentional (120s is generous to avoid false timeouts) but unguarded. Consider reducing `_COMPLETION_TIMEOUT_S` to align with core's turn timeout, or expose it as an injectable config, in a resilience story.
+- **ops block with no `\n` after opening fence silently unmatched — no warning logged** — `_OPS_BLOCK_RE` requires `\n` after the opening fence. A malformed fence with content immediately after the backticks (no newline) silently produces `(full_text, [])` with no log warning. Extremely unlikely from a well-prompted LLM; Story 4.4 owns the prompt format. Add a pre-match heuristic warning if needed.
+
 ## Deferred from: code review of 1-4-capability-broker-with-one-provider-and-basic-retry (2026-06-16)
 
 - **Potential credential leak via `str(sdk_exc)` in `Result.error`** — SDK error messages don't typically include the API key, but no runtime value test verifies this. Revisit if credential hygiene audit is done.

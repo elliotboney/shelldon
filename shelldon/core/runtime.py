@@ -38,6 +38,7 @@ from shelldon.core.arbiter import Arbiter
 from shelldon.core.bus import BusServer
 from shelldon.core.faces import DEFAULT_FACES_PATH, FaceRegistry
 from shelldon.core.history import DEFAULT_HISTORY_PATH, HistoryStore
+from shelldon.core.memory import DEFAULT_MEMORY_ROOT, CuratedMemory
 from shelldon.core.reflexes import compute_reflex_patch
 from shelldon.core.state import DEFAULT_CHECKPOINT_PATH, PersistentState
 from shelldon.core.turn import TurnFence
@@ -65,6 +66,11 @@ DEFAULT_CHECKPOINT_INTERVAL = 60.0
 #: turns (no LLM) — tests inject a small interval. Epic 5's scheduler subsumes it.
 DEFAULT_REFLEX_INTERVAL = 10.0
 
+#: Cap on the memory-ops one turn may propose (Story 4.5). A runaway/abusive reply
+#: can't flood the curated tree; the overflow is dropped with a warning (never silently
+#: truncated). Generous — a normal turn proposes a handful.
+MAX_PROPOSED_OPS = 16
+
 
 class Core:
     """The turn orchestrator: owns the bus, fence, arbiter, an injected spawner, and
@@ -81,6 +87,7 @@ class Core:
         reflex_interval: float = DEFAULT_REFLEX_INTERVAL,
         faces_path=None,
         history_path=None,
+        memory_root=None,
     ):
         if checkpoint_interval <= 0:
             raise ValueError(f"checkpoint_interval must be positive, got {checkpoint_interval!r}")
@@ -103,6 +110,10 @@ class Core:
         #: Conversation history — core is the sole writer (AD-6/AD-5); records each
         #: completed turn's (owner, pet) pair. Workers read it read-only (Story 4.4).
         self.history = HistoryStore.open(history_path if history_path is not None else DEFAULT_HISTORY_PATH)
+        #: The curated markdown memory tree — core is the sole writer (AD-5). The worker
+        #: proposes memory-ops on its Result (Story 4.5); core validates+applies them here
+        #: via the 4.2 apply path. Injectable root; tests redirect off real $HOME.
+        self.memory = CuratedMemory(memory_root if memory_root is not None else DEFAULT_MEMORY_ROOT)
         #: The owner prompt + turn_id of the in-flight turn (≤1, AD-9), stashed at
         #: turn start so a completed/degraded turn can be paired and recorded.
         self._current_prompt: str | None = None
@@ -183,6 +194,9 @@ class Core:
         if result.ok:
             await self._send_reply(result.payload)
             await self._push_face(FACE_REPLY)
+            # Apply the worker's proposed ops AFTER the reply is out (AC2): a bad/oversized
+            # proposal must never block or alter the user-facing reply.
+            self._apply_proposed_ops(result.proposed_ops)
             self._record_turn(result.payload)
         else:
             await self._degrade()
@@ -335,6 +349,29 @@ class Core:
         preserving). The single-writer apply path (AD-5); Story 3.4 wires the LLM
         proposal to call this. Raises ValueError on an invalid/duplicate face."""
         self.faces.add_face(name, **kwargs)
+
+    def apply_memory_op(self, op) -> None:
+        """Validate and apply one proposed memory-op to the curated tree (sole writer,
+        AD-5). Story 4.5's thin wire passthrough to the 4.2 apply path. Raises on an
+        invalid op (the caller guards — a bad op never crashes the turn)."""
+        self.memory.apply_memory_op(op)
+
+    def _apply_proposed_ops(self, ops: list) -> None:
+        """Apply the worker's proposed ops, guarded (AC2). The count is capped (overflow
+        dropped with a warning — never silently truncated); each op is applied in a
+        try/except so one invalid op is logged+skipped, never raised into the turn loop
+        and never affecting the already-delivered reply (best-effort, like _record_turn)."""
+        if len(ops) > MAX_PROPOSED_OPS:
+            log.warning(
+                "dropping %d proposed op(s) over the cap of %d", len(ops) - MAX_PROPOSED_OPS, MAX_PROPOSED_OPS
+            )
+            ops = ops[:MAX_PROPOSED_OPS]
+        for op in ops:
+            try:
+                # Story 3.4 inserts a branch here: an AddFace op → self.apply_add_face(...).
+                self.apply_memory_op(op)
+            except Exception as exc:
+                log.warning("rejected proposed op %s (%s)", type(op).__name__, exc)
 
     def _mark_interaction(self) -> None:
         """Record 'now' as the last interaction (the idle signal the reflex reads),
