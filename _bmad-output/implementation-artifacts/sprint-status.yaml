@@ -1,5 +1,5 @@
 # generated: 2026-06-16 10:47:47 CDT
-# last_updated: 2026-06-16 10:47:47 CDT
+# last_updated: 2026-06-17
 # project: shelldon
 # project_key: NOKEY
 # tracking_system: file-system
@@ -31,7 +31,7 @@
 # - Daily-driver line = Epics 1-4 + story 1-9 (soak); Epics 5-7 are enrichment
 
 generated: 2026-06-16 10:47:47 CDT
-last_updated: 2026-06-17 CDT  # story 4.1 implemented (review)
+last_updated: 2026-06-17 CDT  # 4.1 done; 4.2 created (split — apply half); 4.5 wire follow-up added (topology A); 3.4 rides 4.5
 project: shelldon
 project_key: NOKEY
 tracking_system: file-system
@@ -68,8 +68,9 @@ development_status:
   # --- Epic 4: Memory & Continuity ---
   epic-4: in-progress
   4-1-conversation-history-store: done
-  4-2-curated-markdown-memory-and-memory-ops: backlog
-  3-4-self-modify-faces-via-chat: backlog  # deferred from Epic 3 (2026-06-17): rides the AD-6 memory-op protocol designed in 4.2 — LLM proposes add_face over a Result, core applies via 3.3's apply_add_face. Build AFTER 4-2.
+  4-2-curated-markdown-memory-and-memory-ops: done
+  4-5-worker-proposes-ops-wire: backlog  # split from 4.2 (2026-06-17): the turn-topology reshape — worker receives the completion, parses -> Result.proposed_ops -> core (decision A); core routes to apply_memory_op (4.2) / apply_add_face (3.3). Build AFTER 4-2; unblocks 3-4.
+  3-4-self-modify-faces-via-chat: backlog  # deferred from Epic 3 (2026-06-17): rides the 4-5 wire (LLM proposes add_face over a Result, core applies via 3.3's apply_add_face). Build AFTER 4-5.
   4-3-vault-with-os-level-isolation: backlog
   4-4-memory-shapes-the-turn: backlog
   epic-4-retrospective: optional

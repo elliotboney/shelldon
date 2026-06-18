@@ -9,6 +9,7 @@ import pytest
 
 import shelldon.broker.broker as _broker
 import shelldon.broker.service as _service
+import shelldon.core.memory as _memory
 import shelldon.core.runtime as _runtime
 
 
@@ -25,6 +26,10 @@ def _isolate_state_checkpoint(tmp_path, monkeypatch):
     monkeypatch.setattr(_runtime, "DEFAULT_CHECKPOINT_PATH", tmp_path / "state.json")
     monkeypatch.setattr(_runtime, "DEFAULT_FACES_PATH", tmp_path / "faces.toml")
     monkeypatch.setattr(_runtime, "DEFAULT_HISTORY_PATH", tmp_path / "history.db")
+    # Story 4.2: a CuratedMemory built without an explicit root falls back to
+    # DEFAULT_MEMORY_ROOT (~/.shelldon/memory). Redirect it too (Epic 3 retro #3 —
+    # isolate $HOME in the same change), even though 4.2 doesn't auto-construct one yet.
+    monkeypatch.setattr(_memory, "DEFAULT_MEMORY_ROOT", tmp_path / "memory")
 
 
 @pytest.fixture(autouse=True)
