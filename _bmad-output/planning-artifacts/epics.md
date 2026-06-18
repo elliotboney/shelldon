@@ -737,3 +737,18 @@ So that, if I add the hardware, it reacts to presence and touch — while the ch
 **Given** the sensing plugins are absent
 **When** the pet runs
 **Then** the chat-bot pet functions fully (CAP-3 optionality)
+
+---
+
+## Deferred / Icebox
+
+Ideas committed-to in principle but not yet scheduled into an epic. Tracked in `sprint-status.yaml` under `icebox:`.
+
+### Self-coding tools (bot writes its own tools, human-reviewed)
+
+Carry v1 openclawgotchi's ability for the bot to **propose and write new/modified executable code for itself**, gated by **human review** — moving self-modification beyond *data* (faces/memory/persona) to *behavior*.
+
+- **Favored shape (A — PR/contributor):** the bot proposes a **tool + test**, the existing CI gate (`uv sync --locked → lint-imports → pytest`) validates it — the `import-linter` LLM-free-core contract auto-rejects any tool that pulls an LLM lib into `core/` — and a human merges; it ships on the next deploy. Reuses the per-story dev loop and the Story 4.5 "worker proposes ops on the `Result`" transport.
+- **Later option (B — live runtime gate):** bot stages a tool, human approves in the running pet, it goes live next turn via fork-reimport. Keeps v1's in-the-moment magic; needs a runtime sandbox + quarantine.
+- **Natural neighbor:** Epic 7 (extensibility) — self-coded tools are bot-authored plugins.
+- **Not locked:** A-vs-B decision is open; don't schedule until Epic 4 is done. Full design note: memory `shelldon-self-coding-tools`.

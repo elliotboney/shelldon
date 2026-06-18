@@ -11,6 +11,7 @@ import pytest
 
 from shelldon.contracts import (
     Actor,
+    AddFace,
     Envelope,
     LogEpisode,
     MsgKind,
@@ -160,6 +161,91 @@ async def test_core_caps_oversized_proposal(sock_path, tmp_path):
     await core._handle_result(_result_env("t3", ops))
     written = list((tmp_path / "memory" / "facts").iterdir())
     assert len(written) == MAX_PROPOSED_OPS
+    assert core.fence.is_idle
+
+
+# --- Story 3.4: the add_face op rides the same wire ---
+
+
+def test_parse_reply_extracts_add_face_op():
+    reply = (
+        "Adding that face!\n"
+        "```ops\n"
+        '[{"type":"add_face","name":"proud","valence":[0.4,1.0],'
+        '"arousal":[0.3,1.0],"energy":[0.5,1.0],"token":":>"}]\n'
+        "```"
+    )
+    payload, ops = parse_reply(reply)
+    assert payload == "Adding that face!"
+    assert len(ops) == 1 and type(ops[0]) is AddFace
+    assert ops[0].name == "proud" and ops[0].token == ":>"
+
+
+def test_parse_reply_malformed_add_face_rejects_whole_block():
+    """A bad range shape (3 elements) fails the closed schema → whole block rejected,
+    reply left intact (Story 4.5 discipline)."""
+    reply = '```ops\n[{"type":"add_face","name":"x","valence":[0,0,0],"arousal":[0,1],"energy":[0,1]}]\n```'
+    payload, ops = parse_reply(reply)
+    assert ops == [] and payload == reply
+
+
+async def test_core_applies_add_face_and_it_becomes_selectable(sock_path, tmp_path):
+    """A proposed AddFace is applied via apply_add_face (3.3) and selectable on the next
+    matching mood (AC2)."""
+    core = _core(sock_path, tmp_path)
+    _open_turn(core, "f1")
+    op = AddFace(name="smug", valence=(0.3, 1.0), arousal=(-0.2, 0.2), energy=(0.4, 1.0), token=">:)")
+    await core._handle_result(_result_env("f1", [op]))
+    assert "smug" in [f.name for f in core.faces.faces]
+    assert core.faces.select(0.5, 0.0, 0.7) == ">:)"  # selectable on a matching mood
+    assert core.fence.is_idle
+
+
+async def test_core_rejects_malformed_add_face_without_mutating(sock_path, tmp_path):
+    """An out-of-range AddFace is rejected by apply_add_face's validation → registry
+    unchanged, reply already delivered, turn survives."""
+    core = _core(sock_path, tmp_path)
+    _open_turn(core, "f2")
+    before = [f.name for f in core.faces.faces]
+    bad = AddFace(name="broken", valence=(0.0, 5.0), arousal=(0.0, 0.1), energy=(0.0, 0.1))  # valence hi > 1.0
+    await core._handle_result(_result_env("f2", [bad]))
+    assert [f.name for f in core.faces.faces] == before  # nothing added
+    assert core.fence.is_idle
+
+
+async def test_core_rejects_empty_name_add_face(sock_path, tmp_path):
+    """AC2: an empty-name AddFace is rejected by validation — registry unchanged."""
+    core = _core(sock_path, tmp_path)
+    _open_turn(core, "f4")
+    before = [f.name for f in core.faces.faces]
+    await core._handle_result(_result_env("f4", [AddFace(name="", valence=(0.0, 1.0), arousal=(0.0, 1.0), energy=(0.5, 1.0))]))
+    assert [f.name for f in core.faces.faces] == before
+    assert core.fence.is_idle
+
+
+async def test_core_rejects_duplicate_add_face_without_replace(sock_path, tmp_path):
+    """AC2: a duplicate name without replace=True is rejected — the existing face is not
+    mutated or duplicated."""
+    core = _core(sock_path, tmp_path)
+    _open_turn(core, "f5")
+    before = [f.name for f in core.faces.faces]
+    assert "content" in before  # a seeded default
+    dup = AddFace(name="content", valence=(0.0, 0.1), arousal=(0.0, 0.1), energy=(0.9, 1.0), replace=False)
+    await core._handle_result(_result_env("f5", [dup]))
+    assert [f.name for f in core.faces.faces] == before  # not duplicated, not reordered
+    assert core.fence.is_idle
+
+
+async def test_core_mixed_batch_routes_each_op_to_its_writer(sock_path, tmp_path):
+    """A batch with an AddFace AND a Remember proves both dispatch paths off the one
+    wire (AC3): the face goes to the registry, the memory-op to the curated tree."""
+    core = _core(sock_path, tmp_path)
+    _open_turn(core, "f3")
+    face = AddFace(name="curiouser", valence=(0.0, 1.0), arousal=(0.5, 1.0), energy=(0.5, 1.0))
+    mem = Remember(collection="people", name="Alex", content="owner friend")
+    await core._handle_result(_result_env("f3", [face, mem]))
+    assert "curiouser" in [f.name for f in core.faces.faces]
+    assert (tmp_path / "memory" / "people" / "alex.md").read_text() == "owner friend"
     assert core.fence.is_idle
 
 

@@ -27,6 +27,7 @@ from uuid import uuid4
 
 from shelldon.contracts import (
     Actor,
+    AddFace,
     Envelope,
     MsgKind,
     OutboundMessage,
@@ -368,8 +369,18 @@ class Core:
             ops = ops[:MAX_PROPOSED_OPS]
         for op in ops:
             try:
-                # Story 3.4 inserts a branch here: an AddFace op → self.apply_add_face(...).
-                self.apply_memory_op(op)
+                if isinstance(op, AddFace):
+                    # The face op (Story 3.4) goes to the registry writer, not the memory tree.
+                    self.apply_add_face(
+                        op.name,
+                        valence=op.valence,
+                        arousal=op.arousal,
+                        energy=op.energy,
+                        token=op.token,
+                        replace=op.replace,
+                    )
+                else:
+                    self.apply_memory_op(op)
             except Exception as exc:
                 log.warning("rejected proposed op %s (%s)", type(op).__name__, exc)
 

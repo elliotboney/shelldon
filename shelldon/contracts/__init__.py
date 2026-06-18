@@ -82,10 +82,32 @@ class LogEpisode(msgspec.Struct, frozen=True, tag="log_episode", forbid_unknown_
     tags: tuple[str, ...] = ()
 
 
-#: The closed memory-op union the worker carries on `Result.proposed_ops` (Story 4.5)
-#: and core dispatches on. `capture_learning` (AD-6) belongs to the learnings/dream
-#: work (Epic 6); the `add_face` op rides this same union in Story 3.4.
+#: The closed memory-op union — the curated-memory ops core applies via
+#: `CuratedMemory.apply_memory_op`. `capture_learning` (AD-6) belongs to the
+#: learnings/dream work (Epic 6).
 MemoryOp = Remember | RewriteAbout | LogEpisode
+
+
+class AddFace(msgspec.Struct, frozen=True, tag="add_face", forbid_unknown_fields=True):
+    """A proposed expression addition (Story 3.4): the worker proposes it on a `Result`
+    and core applies it via `apply_add_face` (Story 3.3's atomic, comment-preserving
+    `faces.toml` writer — the sole writer, AD-5). Mirrors `add_face`'s args exactly; the
+    closed face schema (non-empty name, in-range well-ordered selection tuples,
+    duplicate-unless-`replace`) is enforced there, so a malformed proposal is rejected
+    without mutating anything. NOT a memory-op — core dispatches it to the face path."""
+
+    name: str
+    valence: tuple[float, float]
+    arousal: tuple[float, float]
+    energy: tuple[float, float]
+    token: str = ""
+    replace: bool = False
+
+
+#: The closed set of ALL ops a worker may propose on `Result.proposed_ops` (Story 4.5):
+#: the curated-memory ops + the face op (Story 3.4). Core dispatches each to its single
+#: writer — `apply_memory_op` for memory-ops, `apply_add_face` for the face op.
+ProposedOp = MemoryOp | AddFace
 
 
 class Job(msgspec.Struct, frozen=True, tag="job", forbid_unknown_fields=True):
@@ -102,15 +124,16 @@ class Result(msgspec.Struct, frozen=True, tag="result", forbid_unknown_fields=Tr
     Result, never as an exception across the bus (Consistency Conventions).
 
     The worker emits this to core (Story 4.5): `payload` is the user-facing reply and
-    `proposed_ops` is the closed list of memory-ops the worker parsed from its reply —
-    core (sole writer, AD-5) validates+applies them. `proposed_ops` defaults to empty,
-    so a plain reply with no ops is a non-breaking decode (AD-13) — no version bump.
+    `proposed_ops` is the closed list of ops the worker parsed from its reply — memory-ops
+    (4.2) and the face op (3.4) — which core (sole writer, AD-5) validates+applies.
+    `proposed_ops` defaults to empty, so a plain reply with no ops is a non-breaking
+    decode (AD-13) — no version bump.
     """
 
     ok: bool
     payload: str = ""
     error: str | None = None
-    proposed_ops: list[MemoryOp] = msgspec.field(default_factory=list)
+    proposed_ops: list[ProposedOp] = msgspec.field(default_factory=list)
 
 
 class Completion(msgspec.Struct, frozen=True, tag="completion", forbid_unknown_fields=True):
@@ -258,6 +281,8 @@ __all__ = [
     "RewriteAbout",
     "LogEpisode",
     "MemoryOp",
+    "AddFace",
+    "ProposedOp",
     "Envelope",
     "ROUTING_TABLE",
     "encode",

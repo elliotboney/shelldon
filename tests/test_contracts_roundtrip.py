@@ -12,6 +12,7 @@ from shelldon.contracts import (
     ROUTING_TABLE,
     SCHEMA_VERSION,
     Actor,
+    AddFace,
     Completion,
     Envelope,
     InboundMessage,
@@ -106,6 +107,21 @@ def _envelopes():
             ),
             turn_id="turn-8",
         ),
+        # Result carrying a face op: worker -> core (Story 3.4 — add_face on the same wire)
+        Envelope(
+            id="env-9",
+            kind=MsgKind.RESULT,
+            src=Actor.WORKER,
+            dst=Actor.CORE,
+            body=Result(
+                ok=True,
+                payload="adding it",
+                proposed_ops=[
+                    AddFace(name="smug", valence=(0.3, 1.0), arousal=(-0.2, 0.2), energy=(0.4, 1.0), token=">:)"),
+                ],
+            ),
+            turn_id="turn-9",
+        ),
     ]
 
 
@@ -140,6 +156,22 @@ def test_proposed_ops_decode_to_concrete_op_types():
     )
     op = decode(encode(env)).body.proposed_ops[0]
     assert type(op) is Remember and op.collection == "facts"
+
+
+def test_add_face_op_round_trips_in_proposed_ops():
+    """Story 3.4: the face op rides the same closed proposed_ops union and decodes back
+    to AddFace by tag (no SCHEMA_VERSION bump for the widened union)."""
+    env = Envelope(
+        id="r", kind=MsgKind.RESULT, src=Actor.WORKER, dst=Actor.CORE,
+        body=Result(ok=True, proposed_ops=[
+            AddFace(name="proud", valence=(0.4, 1.0), arousal=(0.3, 1.0), energy=(0.5, 1.0)),
+        ]),
+        turn_id="t",
+    )
+    decoded = decode(encode(env))
+    op = decoded.body.proposed_ops[0]
+    assert type(op) is AddFace and op.name == "proud" and op.replace is False
+    assert decoded.v == SCHEMA_VERSION
 
 
 def test_default_schema_version():
