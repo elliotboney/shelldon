@@ -31,7 +31,7 @@
 # - Daily-driver line = Epics 1-4 + story 1-9 (soak); Epics 5-7 are enrichment
 
 generated: 2026-06-16 10:47:47 CDT
-last_updated: 2026-06-18 CDT  # Epic 4 done + retrospective complete (epic-4-retro-2026-06-18.md); Story 5.0 resilience-prep added; 5 chores iceboxed
+last_updated: 2026-06-18 CDT  # Story 5.0 review findings addressed (structural AC1 fix + 8 patches; 320 pass), awaiting approval
 project: shelldon
 project_key: NOKEY
 tracking_system: file-system
@@ -76,8 +76,8 @@ development_status:
   epic-4-retrospective: done  # 2026-06-18: epic-4-retro-2026-06-18.md — +111 tests (196→307), 0 deps, 0 incidents, CAP-6 proven; key insight: chores w/o a story slot don't happen (Epic 3 #1/#4/#5/#6/#7 all slipped) → fixed via Story 5.0 + icebox + dev-loop-checklist.md
 
   # --- Epic 5: Autonomous Life ---
-  epic-5: backlog
-  5-0-resilience-hardening-prep: backlog  # Epic 4 retro (2026-06-18): GATES 5.1. Absorbs the now-unowned resilience debt — 4.5 worker-completion timeout align/inject (_COMPLETION_TIMEOUT_S vs core degrade), outbound write_frame timeout (worker→core), 120/90/30s asymmetry + worker_in_flight freeze, Epic 2 #3 arbiter/fork resilience (os.fork OSError, waitpid timeout/SIGKILL, child FD closerange, Arbiter.try_begin lock). Its OWN story so it can't be skipped under feature pressure.
+  epic-5: in-progress  # 2026-06-18: Story 5.0 created (first story of epic)
+  5-0-resilience-hardening-prep: done  # dev complete 2026-06-18: coherent timeout chain W<R<T kills the ~90s wedge; ≤1-slot always releases; bounded reap+SIGKILL; fork/child/preload hardening. Review findings addressed (structural AC1 fix: reap awaited before arbiter release, no divergence window; +8 patches). +13 tests (test_resilience.py), suite 320 pass/3 skip, contracts KEPT. GATES 5.1. Absorbs the now-unowned resilience debt — 4.5 worker-completion timeout align/inject (_COMPLETION_TIMEOUT_S vs core degrade), outbound write_frame timeout (worker→core), 120/90/30s asymmetry + worker_in_flight freeze, Epic 2 #3 arbiter/fork resilience (os.fork OSError, waitpid timeout/SIGKILL, child FD closerange, Arbiter.try_begin lock). Its OWN story so it can't be skipped under feature pressure.
   5-1-core-scheduler-with-named-multi-cadence-jobs: backlog
   5-2-cost-tier-gating-and-credit-budget: backlog
   5-3-battery-aware-backoff: backlog
