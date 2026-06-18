@@ -15,8 +15,8 @@ import shelldon.broker.broker as broker_mod
 from shelldon.broker.broker import handle_job, handle_job_chain
 from shelldon.broker.provider import PermanentProviderError, TransientProviderError
 from shelldon.broker.service import run_broker
-from shelldon.contracts import Actor, Envelope, Job, MsgKind, Result
-from shelldon.core.bus import BusServer, connect, write_frame
+from shelldon.contracts import Actor, Completion, Envelope, Job, MsgKind
+from shelldon.core.bus import BusServer, connect, read_frame, write_frame
 
 
 class _Provider:
@@ -126,7 +126,8 @@ async def test_transient_retry_backs_off_before_retrying(monkeypatch):
 
 async def test_fallback_completes_a_turn_end_to_end_over_the_bus(sock_path):
     """AC2: a forced primary failure → the turn still completes via the fallback,
-    proven through run_broker/_serve_connection over a real UDS bus."""
+    proven through run_broker/_serve_connection over a real UDS bus. The broker returns
+    the answer as a Completion to the worker (Story 4.5)."""
     srv = BusServer(socket_path=sock_path)
     await srv.start()
     primary = _Provider("glm", exc=TransientProviderError("injected 500"))
@@ -141,10 +142,10 @@ async def test_fallback_completes_a_turn_end_to_end_over_the_bus(sock_path):
         )
         await write_frame(w, job)
 
-        res_env = await asyncio.wait_for(srv.core_inbox.get(), timeout=2.0)
-        assert isinstance(res_env.body, Result)
-        assert res_env.body.ok and res_env.body.payload == "from-fallback"
-        assert res_env.turn_id == "turn-2-2"  # echoed for core's fencing (AD-12)
+        comp_env = await asyncio.wait_for(read_frame(reader), timeout=2.0)
+        assert comp_env.kind is MsgKind.COMPLETION and isinstance(comp_env.body, Completion)
+        assert comp_env.body.ok and comp_env.body.payload == "from-fallback"
+        assert comp_env.turn_id == "turn-2-2"  # echoed so the worker stamps the Result (AD-12)
         assert primary.calls == 2 and secondary.calls == 1  # primary tried+retried, then fell through
         w.close()
         await w.wait_closed()

@@ -32,6 +32,7 @@ class MsgKind(StrEnum):
 
     JOB = "job"
     RESULT = "result"
+    COMPLETION = "completion"
     INBOUND_MSG = "inbound-message"
     OUTBOUND_MSG = "outbound-message"
     STATE_SNAPSHOT = "state-snapshot"
@@ -47,6 +48,46 @@ class Region(StrEnum):
     FACE = "face"
 
 
+#: --- Memory-ops (AD-6): the closed, fixed-arg vocabulary core validates+applies ---
+#: The three curated-memory ops, as frozen tagged structs with closed arg schemas —
+#: "fixed arg schemas in contracts/, no free-text deltas" (AD-6). They are the shared
+#: vocabulary core and the worker both speak: the worker proposes them on a `Result`
+#: (Story 4.5) and core validates+applies them (sole writer, AD-5). `forbid_unknown_fields`
+#: makes a typo'd field a decode error; the tags make a typo'd op (`remembr`) a decode error.
+
+
+class Remember(msgspec.Struct, frozen=True, tag="remember", forbid_unknown_fields=True):
+    """Record a fact or a person the owner mentioned, under the closed `collection`.
+
+    `name` becomes a filename (core slugifies + path-guards it); `content` is the
+    curated markdown body. `collection` is a closed Literal — a value outside the set
+    is rejected by core on apply (msgspec only enforces it on decode, not on direct
+    construction, so core re-validates)."""
+
+    collection: Literal["facts", "people"]
+    name: str
+    content: str
+
+
+class RewriteAbout(msgspec.Struct, frozen=True, tag="rewrite_about", forbid_unknown_fields=True):
+    """Replace the bot-owned `about.md` with a freshly curated doc (AC2)."""
+
+    content: str
+
+
+class LogEpisode(msgspec.Struct, frozen=True, tag="log_episode", forbid_unknown_fields=True):
+    """Append a dated episode note to the curated log. `tags` is optional and closed."""
+
+    content: str
+    tags: tuple[str, ...] = ()
+
+
+#: The closed memory-op union the worker carries on `Result.proposed_ops` (Story 4.5)
+#: and core dispatches on. `capture_learning` (AD-6) belongs to the learnings/dream
+#: work (Epic 6); the `add_face` op rides this same union in Story 3.4.
+MemoryOp = Remember | RewriteAbout | LogEpisode
+
+
 class Job(msgspec.Struct, frozen=True, tag="job", forbid_unknown_fields=True):
     """A request body. Minimal contract shell — broker/worker stories (1.4/1.5)
     define the real payload. Carries NO credentials: the broker injects creds
@@ -59,6 +100,24 @@ class Job(msgspec.Struct, frozen=True, tag="job", forbid_unknown_fields=True):
 class Result(msgspec.Struct, frozen=True, tag="result", forbid_unknown_fields=True):
     """An outcome body, including the error variant — failures surface as a
     Result, never as an exception across the bus (Consistency Conventions).
+
+    The worker emits this to core (Story 4.5): `payload` is the user-facing reply and
+    `proposed_ops` is the closed list of memory-ops the worker parsed from its reply —
+    core (sole writer, AD-5) validates+applies them. `proposed_ops` defaults to empty,
+    so a plain reply with no ops is a non-breaking decode (AD-13) — no version bump.
+    """
+
+    ok: bool
+    payload: str = ""
+    error: str | None = None
+    proposed_ops: list[MemoryOp] = msgspec.field(default_factory=list)
+
+
+class Completion(msgspec.Struct, frozen=True, tag="completion", forbid_unknown_fields=True):
+    """The broker's reply to the worker (Story 4.5): the raw provider text or an error,
+    nothing more. The broker stays a pure egress/safety boundary (AD-2) — it does NOT
+    parse pet-domain ops; the worker turns this into a `Result` (parsing `proposed_ops`).
+    Same ok/payload/error shape as `Result` minus the ops (which are the worker's job).
     """
 
     ok: bool
@@ -106,52 +165,12 @@ class StateSnapshot(msgspec.Struct, frozen=True, tag="state-snapshot", forbid_un
     face: str
 
 
-#: --- Memory-ops (AD-6): the closed, fixed-arg vocabulary core validates+applies ---
-#: The three curated-memory ops, as frozen tagged structs with closed arg schemas —
-#: "fixed arg schemas in contracts/, no free-text deltas" (AD-6). They are the shared
-#: vocabulary core and the future worker both speak. Defined here now so both sides
-#: agree on one type; 4.2 does NOT yet attach `MemoryOp` to `Result`/`Envelope` — that
-#: is the worker-proposes wire follow-up (Story 4.5). `forbid_unknown_fields` makes a
-#: typo'd field a decode error; the tags make a typo'd op (`remembr`) a decode error.
-
-
-class Remember(msgspec.Struct, frozen=True, tag="remember", forbid_unknown_fields=True):
-    """Record a fact or a person the owner mentioned, under the closed `collection`.
-
-    `name` becomes a filename (core slugifies + path-guards it); `content` is the
-    curated markdown body. `collection` is a closed Literal — a value outside the set
-    is rejected by core on apply (msgspec only enforces it on decode, not on direct
-    construction, so core re-validates)."""
-
-    collection: Literal["facts", "people"]
-    name: str
-    content: str
-
-
-class RewriteAbout(msgspec.Struct, frozen=True, tag="rewrite_about", forbid_unknown_fields=True):
-    """Replace the bot-owned `about.md` with a freshly curated doc (AC2)."""
-
-    content: str
-
-
-class LogEpisode(msgspec.Struct, frozen=True, tag="log_episode", forbid_unknown_fields=True):
-    """Append a dated episode note to the curated log. `tags` is optional and closed."""
-
-    content: str
-    tags: tuple[str, ...] = ()
-
-
-#: The closed memory-op union the wire will carry as a tagged body (Story 4.5) and
-#: core dispatches on today. `capture_learning` (AD-6) belongs to the learnings/dream
-#: work (Epic 6), not here.
-MemoryOp = Remember | RewriteAbout | LogEpisode
-
-
 #: Body type -> the header `kind` it must travel under (single source of truth
 #: for the kind<->body agreement enforced in Envelope.__post_init__).
 _KIND_FOR_BODY = {
     Job: MsgKind.JOB,
     Result: MsgKind.RESULT,
+    Completion: MsgKind.COMPLETION,
     InboundMessage: MsgKind.INBOUND_MSG,
     OutboundMessage: MsgKind.OUTBOUND_MSG,
     StateSnapshot: MsgKind.STATE_SNAPSHOT,
@@ -176,7 +195,7 @@ class Envelope(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     kind: MsgKind
     src: Actor
     dst: Actor | None
-    body: Job | Result | InboundMessage | OutboundMessage | StateSnapshot
+    body: Job | Result | Completion | InboundMessage | OutboundMessage | StateSnapshot
     v: int = SCHEMA_VERSION
     turn_id: str | None = None
 
@@ -195,6 +214,7 @@ class Envelope(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
 ROUTING_TABLE: dict[MsgKind, Actor] = {
     MsgKind.JOB: Actor.BROKER,
     MsgKind.RESULT: Actor.CORE,
+    MsgKind.COMPLETION: Actor.WORKER,
     MsgKind.INBOUND_MSG: Actor.CORE,
     MsgKind.OUTBOUND_MSG: Actor.CHAT_TRANSPORT,
     MsgKind.STATE_SNAPSHOT: Actor.DISPLAY,
@@ -230,6 +250,7 @@ __all__ = [
     "Region",
     "Job",
     "Result",
+    "Completion",
     "InboundMessage",
     "OutboundMessage",
     "StateSnapshot",
