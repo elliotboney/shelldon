@@ -379,6 +379,30 @@ async def test_tick_under_low_skips_all_turns_including_essential_reflex_still_r
     assert dispatched == []          # LOW skips ALL turns, including the essential one
 
 
+async def test_tick_with_a_raising_power_reader_defaults_to_lively():
+    """The power read happens BEFORE the per-job loop, so a reader that raises (a future
+    PiSugar2 plugin path) would escape the per-job guard and kill the resident scheduler
+    task. tick() must default to LIVELY and keep running every job."""
+    ran, dispatched = [], []
+
+    def _boom_power():
+        raise RuntimeError("pisugar socket died")
+
+    async def reflex_run():
+        ran.append("reflex")
+
+    async def dispatch(job):
+        dispatched.append(job.name)
+
+    sched = Scheduler(now=lambda: _at(12, 0), dispatch_turn=dispatch, power=_boom_power)
+    sched.register(Job("reflex", Interval(10.0), CostTier.REFLEX, reflex_run))
+    sched.register(Job("ping", Interval(10.0), CostTier.TURN, prompt="hi"))
+    await sched.tick()  # must not raise
+
+    assert ran == ["reflex"]        # reflex still ran (LIVELY default — no stretch/skip)
+    assert dispatched == ["ping"]   # turn still dispatched (nothing skipped)
+
+
 async def test_tick_when_plugged_in_dispatches_every_turn():
     """LIVELY (the default plugged-in stub): nothing skipped — regression with pre-5.3."""
     dispatched = []

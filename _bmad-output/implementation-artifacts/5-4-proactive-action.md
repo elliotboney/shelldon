@@ -4,7 +4,7 @@ baseline_commit: 8a5610370620f6fae946b33c6a2fc7179829d266
 
 # Story 5.4: Proactive action
 
-Status: review
+Status: done
 
 <!-- Final feature story of Epic 5. Builds on 5.1 (scheduler + Idle cadence), 5.2 (turn-dispatch budget/cooldown gate), 5.3 (battery gate). The capstone: the pet acts with no owner input. -->
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
@@ -77,6 +77,14 @@ so that it feels like a companion with initiative, not just a responder.
 - [x] **Task 6 — Soak + full-suite + contracts**
   - [x] Soak (`-m soak`) green/unchanged: the proactive job is now registered in every `Core`, but the soak **parks the scheduler** (`scheduler_interval` far out) so it never ticks in the measurement window — confirm `_seq`/`_bg`/heap unaffected and the background-emitter rule still holds (the proactive job is a resident turn job; it must be parked, like reflex/checkpoint). If any soak construction relies on "no turn job registered," update its expectation in **this same change** (the 5.1 background-emitter discipline).
   - [x] Full `pytest` green incl. soak; both import-linter contracts **KEPT** (`core/proactive.py` LLM-free); apply `dev-loop-checklist.md`.
+
+### Review Findings
+
+- [x] [Review][Patch] Tz-naive ISO string passes `fromisoformat` but causes TypeError in `Idle.is_due` — `datetime.fromisoformat("2026-06-18T12:00:00")` (no UTC offset) returns a tz-naive datetime; subtracting from tz-aware `now` raises `TypeError` which the scheduler tick guard swallows — silencing ALL due jobs for that tick. **FIXED**: `_last_interaction_dt` now returns None (warned) for a tz-naive parse, before it can reach `Idle.is_due`; +tz-naive case in `test_last_interaction_dt_parses_defensively`. [`shelldon/core/runtime.py:_last_interaction_dt`]
+- [x] [Review][Patch] `_power()` unguarded in `Scheduler.tick` — if the power reader raises (future plugin path), the exception escapes the per-job `try/except` and kills the permanent scheduler task. **FIXED**: the power read is wrapped → defaults to `BackoffLevel.LIVELY` (warned) on failure; +`test_tick_with_a_raising_power_reader_defaults_to_lively` (reflex + turn still run). [`shelldon/core/scheduler.py:tick`]
+- [x] [Review][Patch] Whitespace-only `prompt_builder` return bypasses the falsy guard — `"   "` is truthy in Python, so `return built or None` passes a whitespace-only string to the worker. **FIXED**: `_resolve_job_prompt` now `.strip()`s the built prompt → blank skips; +`test_dispatch_whitespace_only_builder_is_skipped`. [`shelldon/core/runtime.py:_resolve_job_prompt`]
+- [x] [Review][Defer] TURN job with neither `prompt` nor `prompt_builder` not rejected at construction — silently skips every tick with a WARNING log; graceful skip is the designed behavior per spec (AD-14 guard); fail-fast at registration is a future improvement. [`shelldon/core/scheduler.py:Job.__init__`] — deferred, design choice
+- [x] [Review][Defer] `power` param lacks type annotation on `Core.__init__` and `Scheduler.__init__` — passing a `PowerState` value (not a callable) fails deep in `tick` with a confusing `TypeError`; annotation is `Callable[[], PowerState] | None`. Matches existing unannotated-param style in the codebase. — deferred, style/convention
 
 ## Dev Notes
 
@@ -189,3 +197,4 @@ claude-opus-4-8[1m] (Amelia / bmad-dev-story) — `core/proactive.py` + its pure
 | Date | Change |
 |------|--------|
 | 2026-06-18 | Story 5.4 implemented: proactive action (CAP-4) — the Epic 5 capstone. New `core/proactive.py` (`build_proactive_prompt`, LLM-free, open-ended "share a thought" framing). `Job` gains `prompt_builder` + `history_owner_text` seams. Proactive turn = an Idle-cadence TURN job registered in `Core.__init__`, prompt built at dispatch from live mood (reuses `faces.select`), history recorded with a synthetic owner-side marker. Idle signal wired into `scheduler.tick` (closes the 5.3 gap). Rides the 5.2 cooldown/budget + 5.3 battery gates UNCHANGED — both ACs enforced by the reused path. CAP-4 proven: a turn initiates with no owner input. `worker/prompt.py`/`app.py` untouched. Built with a parallel subagent (pure module) + main agent (coupled wiring), file-ownership split. +13 tests; suite 409 pass / soak 2 pass; contracts KEPT. Owner decisions locked: Idle trigger, mood→prompt (not gate), thought-framing, marker recording, idle threshold injectable default 1 hr. |
+| 2026-06-18 | Code-review follow-ups (3 Patches) resolved — all tick-resilience edge cases: tz-naive `last_interaction` now rejected before it can TypeError in `Idle.is_due` and silence the whole tick; the `Scheduler.tick` power read is guarded (→ LIVELY on failure) so a future plugin reader can't kill the scheduler task; a whitespace-only `prompt_builder` return is stripped → skips instead of reaching the worker. +2 tests. Suite 411 pass / soak 2 pass; contracts KEPT. 2 Defer items accepted (fail-fast on prompt-less TURN job at construction; `power` param type annotation). |

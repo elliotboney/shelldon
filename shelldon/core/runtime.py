@@ -470,10 +470,18 @@ class Core:
         if raw is None:
             return None
         try:
-            return datetime.fromisoformat(raw)
+            dt = datetime.fromisoformat(raw)
         except (ValueError, TypeError) as exc:
             log.warning("unusable last_interaction %r (%s); no idle trigger this tick", raw, exc)
             return None
+        if dt.tzinfo is None:
+            # A tz-naive stamp parses fine but can't be subtracted from the tz-aware `now`
+            # in Idle.is_due (TypeError) — and that subtraction runs in due() BEFORE the
+            # per-job guard, so it would silence the WHOLE tick. Reject it (mirrors the
+            # reflexes._idle_seconds guard, which catches the same case at subtraction time).
+            log.warning("tz-naive last_interaction %r; no idle trigger this tick", raw)
+            return None
+        return dt
 
     def _build_proactive_prompt(self) -> str:
         """Build the proactive turn's prompt from live personality state (Story 5.4) — the
@@ -545,9 +553,13 @@ class Core:
             except Exception as exc:
                 log.warning("turn job %r prompt builder failed (%s); skipping", job.name, exc)
                 return None
+            # `.strip()` so a whitespace-only return (truthy in Python) skips like an empty one
+            # — a blank prompt must never reach the worker.
+            built = (built or "").strip()
             if not built:
                 log.warning("turn job %r prompt builder returned nothing; skipping", job.name)
-            return built or None
+                return None
+            return built
         if job.prompt is None:
             log.warning("turn job %r has no prompt; skipping (a turn job must carry one)", job.name)
         return job.prompt

@@ -240,6 +240,21 @@ async def test_dispatch_builder_that_raises_is_skipped_no_wedge(sock_path, tmp_p
 # --- Story 5.4: the proactive job is registered + fires with NO owner input (CAP-4) ---
 
 
+async def test_dispatch_whitespace_only_builder_is_skipped(sock_path, tmp_path):
+    """A builder returning whitespace-only text is truthy in Python — but a blank prompt must
+    skip (no spawn, no spend), not reach the worker."""
+    spawner = _RecordingSpawner()
+    core = Core(sock_path, spawner, checkpoint_path=tmp_path / "state.json")
+    job = Job("proactive", Interval(10.0), CostTier.TURN, prompt_builder=lambda: "   \n  ")
+    try:
+        await core._dispatch_turn_job(job)
+        assert spawner.spawns == []
+        assert core.state.state.budget.turns_used == 0
+        assert core.arbiter.worker_in_flight is False
+    finally:
+        await _teardown(core)
+
+
 async def test_proactive_job_is_registered_in_core(sock_path, tmp_path):
     core = Core(sock_path, _RecordingSpawner(), checkpoint_path=tmp_path / "state.json")
     assert any(j.name == "proactive" for j in core.scheduler.jobs)
@@ -288,6 +303,11 @@ def test_last_interaction_dt_parses_defensively(sock_path, tmp_path):
     assert core._last_interaction_dt() is None
     core.state._state.last_interaction = "not-a-timestamp"
     assert core._last_interaction_dt() is None  # never raises
+    # A tz-NAIVE ISO stamp parses fine but can't be subtracted from a tz-aware now downstream
+    # (TypeError in Idle.is_due, computed before the per-job guard → silences the whole tick).
+    # Reject it here, like reflexes._idle_seconds.
+    core.state._state.last_interaction = "2026-06-18T12:00:00"  # no UTC offset
+    assert core._last_interaction_dt() is None
 
 
 async def test_budget_survives_a_restart(sock_path, tmp_path):

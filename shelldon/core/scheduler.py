@@ -25,7 +25,7 @@ import logging
 from datetime import datetime, time
 from typing import Awaitable, Callable
 
-from shelldon.core.power import BackoffPolicy, PowerState
+from shelldon.core.power import BackoffLevel, BackoffPolicy, PowerState
 
 log = logging.getLogger("shelldon.core.scheduler")
 
@@ -226,8 +226,14 @@ class Scheduler:
         # Read power ONCE per tick and derive the backoff level (Story 5.3). The reader is
         # non-blocking (a cached value); the level fixes both the cadence stretch (below, via
         # due()) and the turn-skip. Battery is an OUTER gate over the 5.2 budget gate: a
-        # skipped turn never reaches the dispatch hook's cooldown/budget check.
-        level = self._backoff.level(self._power())
+        # skipped turn never reaches the dispatch hook's cooldown/budget check. Guard the read
+        # (a future PiSugar2 plugin reader could raise): it runs BEFORE the per-job loop, so an
+        # escaping error would kill the resident scheduler task — default to LIVELY instead.
+        try:
+            level = self._backoff.level(self._power())
+        except Exception as exc:
+            log.warning("power read failed (%s); defaulting to LIVELY this tick", exc)
+            level = BackoffLevel.LIVELY
         scale = self._backoff.cadence_scale(level)
         for job in self.due(now, last_interaction, scale=scale):
             self._last_run[job.name] = now  # mark before running: a failure/skip waits the period, never busy-loops
