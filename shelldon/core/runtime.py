@@ -41,7 +41,10 @@ from shelldon.core.faces import DEFAULT_FACES_PATH, FaceRegistry
 from shelldon.core.history import DEFAULT_HISTORY_PATH, HistoryStore
 from shelldon.core.memory import DEFAULT_MEMORY_ROOT, CuratedMemory
 from shelldon.core.reflexes import compute_reflex_patch
-from shelldon.core.scheduler import CostTier, Interval, Job, Scheduler
+from shelldon.core.budget import BudgetGate, Decision
+from shelldon.core.power import BackoffPolicy, PowerState
+from shelldon.core.proactive import build_proactive_prompt
+from shelldon.core.scheduler import CostTier, Idle, Interval, Job, Scheduler
 from shelldon.core.state import DEFAULT_CHECKPOINT_PATH, PersistentState
 from shelldon.core.turn import TurnFence
 
@@ -81,6 +84,36 @@ DEFAULT_REFLEX_INTERVAL = 10.0
 #: scheduler far out of its measurement window (the background-emitter rule).
 DEFAULT_SCHEDULER_INTERVAL = 1.0
 
+#: Default daily cap on scheduler-initiated turns (Story 5.2; owner decision). The pet's
+#: self-driven LLM activity can't exceed this many turns/day — the credit guardrail (AD-9).
+#: Injectable; reflex jobs (no LLM) are never counted.
+DEFAULT_DAILY_TURN_BUDGET = 12
+
+#: Default minimum interval (seconds) between scheduler-initiated turns (Story 5.2; owner
+#: decision = 30 min). Stops a proactive stampede; orthogonal to the daily budget.
+DEFAULT_TURN_COOLDOWN = 1800.0
+
+#: Battery-aware backoff defaults (Story 5.3; owner decision). On battery the scheduler
+#: stretches all Interval/Idle job cadences by EASED_SCALE (charge OK) or LOW_SCALE (charge
+#: < LOW_CHARGE_THRESHOLD) and skips non-essential (EASED) / all (LOW) turn jobs. All
+#: injectable; validated by BackoffPolicy. The real PiSugar2 read is Epic 7 (plugin-host);
+#: the default power reader is the plugged-in stub (LIVELY → behaves exactly as 5.2).
+DEFAULT_EASED_SCALE = 3.0
+DEFAULT_LOW_SCALE = 6.0
+DEFAULT_LOW_CHARGE_THRESHOLD = 0.20
+
+#: Default owner-idle threshold (seconds) before the pet speaks up on its own (Story 5.4;
+#: owner decision = 1 hr, injectable/configurable). The proactive job is an Idle-cadence
+#: turn job — it fires once per idle stretch, then stays quiet until the owner interacts
+#: again. The 5.2 cooldown (30 min) + daily budget (12) still bound its frequency, and the
+#: 5.3 battery backoff stretches this threshold on battery.
+DEFAULT_PROACTIVE_IDLE_INTERVAL = 3600.0
+
+#: Recorded as the owner-side of a proactive turn's history row (Story 5.4) — the pet spoke
+#: with no real owner message, so the directive is NOT stored as if the owner typed it; this
+#: marker preserves continuity (the next turn knows it reached out) without that pollution.
+PROACTIVE_OWNER_MARKER = "(shelldon spoke up on its own)"
+
 #: Cap on the memory-ops one turn may propose (Story 4.5). A runaway/abusive reply
 #: can't flood the curated tree; the overflow is dropped with a warning (never silently
 #: truncated). Generous — a normal turn proposes a handful.
@@ -101,6 +134,13 @@ class Core:
         checkpoint_interval: float = DEFAULT_CHECKPOINT_INTERVAL,
         reflex_interval: float = DEFAULT_REFLEX_INTERVAL,
         scheduler_interval: float = DEFAULT_SCHEDULER_INTERVAL,
+        daily_turn_budget: int = DEFAULT_DAILY_TURN_BUDGET,
+        turn_cooldown: float = DEFAULT_TURN_COOLDOWN,
+        eased_scale: float = DEFAULT_EASED_SCALE,
+        low_scale: float = DEFAULT_LOW_SCALE,
+        low_charge_threshold: float = DEFAULT_LOW_CHARGE_THRESHOLD,
+        proactive_idle_interval: float = DEFAULT_PROACTIVE_IDLE_INTERVAL,
+        power=None,
         faces_path=None,
         history_path=None,
         memory_root=None,
@@ -111,6 +151,8 @@ class Core:
             raise ValueError(f"reflex_interval must be positive, got {reflex_interval!r}")
         if scheduler_interval <= 0:
             raise ValueError(f"scheduler_interval must be positive, got {scheduler_interval!r}")
+        if proactive_idle_interval <= 0:
+            raise ValueError(f"proactive_idle_interval must be positive, got {proactive_idle_interval!r}")
         self.bus = BusServer(socket_path=socket_path)
         self.fence = TurnFence()
         self.arbiter = Arbiter()
@@ -120,6 +162,7 @@ class Core:
         self.checkpoint_interval = checkpoint_interval
         self.reflex_interval = reflex_interval
         self.scheduler_interval = scheduler_interval
+        self.proactive_idle_interval = proactive_idle_interval
         #: Personality state lives in RAM for the process lifetime, restored from the
         #: last checkpoint (defaults cleanly on first run — AC1).
         self.state = PersistentState.load(self.checkpoint_path)
@@ -153,19 +196,53 @@ class Core:
         #: "drains to 0" invariant (1.9 soak — see test_endurance_soak).
         self._scheduler_task: asyncio.Task | None = None
         self._bg: set[asyncio.Task] = set()
+        #: The scheduler-turn spend gate (Story 5.2, AD-9) — a daily turn-count budget +
+        #: a cooldown. Constructing it validates the config (delegated, like Interval()).
+        self._budget = BudgetGate(daily_turn_budget=daily_turn_budget, turn_cooldown=turn_cooldown)
+        #: Battery-aware backoff (Story 5.3, AD-14) — the policy that stretches cadences +
+        #: skips non-essential turn jobs on battery. Constructing it validates the config.
+        self._backoff = BackoffPolicy(
+            eased_scale=eased_scale, low_scale=low_scale, low_charge_threshold=low_charge_threshold
+        )
+        #: The injected power reader the scheduler samples each tick (Story 5.3). Default =
+        #: the plugged-in stub (LIVELY), so an un-instrumented deployment behaves exactly as
+        #: 5.2. The real PiSugar2 read is a plugin-host plugin (Epic 7, AD-8) that will push
+        #: cached PowerState updates into core; this seam swaps the stub for that cached read
+        #: with zero policy change. The reader MUST be non-blocking (no socket I/O in a tick).
+        self._power = power if power is not None else (lambda: PowerState(on_battery=False, charge=None))
         #: The in-core scheduler (Story 5.1, AD-14) — "heartbeat is now just one job."
         #: The Epic 3 reflex drift and the periodic checkpoint flush are wired here as
         #: reflex-tier jobs (they moved off their standalone loops; behavior unchanged).
         #: Built-ins are registered explicitly at composition (a general plugin API is
-        #: Epic 7). Turn-tier dispatch (cooldown + credit budget + the arbiter gate) is
-        #: Story 5.2: the scheduler's `dispatch_turn` seam is left unwired here, and no
-        #: turn job is registered, so nothing forks on a cadence (AD-14).
-        self.scheduler = Scheduler(now=lambda: datetime.now(UTC))
+        #: Epic 7). Turn-tier jobs route to `_dispatch_turn_job` — the arbiter-gated +
+        #: cooldown + daily-budget seam (Story 5.2). No turn job is registered in 5.1/5.2
+        #: (the first proactive job is Story 5.4); the gate is live and tested for it.
+        self.scheduler = Scheduler(
+            now=lambda: datetime.now(UTC),
+            dispatch_turn=self._dispatch_turn_job,
+            power=self._power,
+            backoff=self._backoff,
+        )
         self.scheduler.register(
             Job("reflex", Interval(self.reflex_interval), CostTier.REFLEX, self._run_reflex_job)
         )
         self.scheduler.register(
             Job("checkpoint", Interval(self.checkpoint_interval), CostTier.REFLEX, self._run_checkpoint_job)
+        )
+        #: The proactive musing (Story 5.4, CAP-4) — the first self-initiated turn job. An
+        #: Idle cadence fires it once per idle stretch after `proactive_idle_interval`s of
+        #: owner silence; its prompt is BUILT at dispatch from live mood (no static text),
+        #: and it records a synthetic owner-side marker (no real owner message). It rides the
+        #: 5.2 cooldown/budget gate + the 5.3 battery gate unchanged (non-essential → eased
+        #: off first on battery). The scheduler's idle signal is fed in `_scheduler_loop`.
+        self.scheduler.register(
+            Job(
+                "proactive",
+                Idle(self.proactive_idle_interval),
+                CostTier.TURN,
+                prompt_builder=self._build_proactive_prompt,
+                history_owner_text=PROACTIVE_OWNER_MARKER,
+            )
         )
 
     async def run(self) -> None:
@@ -193,11 +270,18 @@ class Core:
         finally:
             self._cleanup()
 
-    async def _start_turn(self, prompt: str) -> None:
+    async def _start_turn(self, prompt: str, *, record_owner_text: str | None = None) -> None:
         """Open a fenced turn, push the 'thinking' face, spawn the worker, schedule
-        its reap (fire-and-forget — the Result returns over the bus), arm the timeout."""
+        its reap (fire-and-forget — the Result returns over the bus), arm the timeout.
+
+        `record_owner_text` is what to record as the owner side in history (Story 5.4): for
+        a proactive turn it's a synthetic marker, so the worker runs `prompt` but history
+        doesn't store the self-directive as an owner message. None ⇒ record `prompt` (the
+        owner-turn behavior — unchanged for every existing caller)."""
         turn_id = uuid4().hex
-        self._current_prompt = prompt  # stash to pair with the reply for history (4.1)
+        # Stash the history owner-side (the marker for a proactive turn, else the prompt)
+        # to pair with the reply for history (4.1); the worker still gets `prompt` below.
+        self._current_prompt = record_owner_text if record_owner_text is not None else prompt
         self._current_turn_id = turn_id
         self.fence.open(turn_id)
         try:
@@ -364,10 +448,10 @@ class Core:
             while True:
                 await asyncio.sleep(self.scheduler_interval)
                 try:
-                    # No idle-tier job is registered in 5.1, so `last_interaction` is
-                    # unused here; Story 5.4's idle greeting job will pass it (the signal
-                    # already lives in state.last_interaction).
-                    await self.scheduler.tick()
+                    # Feed the idle signal so the proactive Idle job (Story 5.4) can fire:
+                    # parsed from state.last_interaction, fail-soft (None when no/unusable
+                    # signal -> the Idle cadence simply doesn't fire this tick).
+                    await self.scheduler.tick(last_interaction=self._last_interaction_dt())
                 except Exception as exc:
                     # Scheduler.tick guards each JOB; this guards the tick scaffolding
                     # itself (the clock read + due-set computation) so one bad tick can
@@ -377,12 +461,96 @@ class Core:
         except asyncio.CancelledError:
             return
 
+    def _last_interaction_dt(self) -> datetime | None:
+        """Parse `state.last_interaction` (ISO-8601 UTC) into a tz-aware datetime for the
+        scheduler's idle cadence, or None when there is no usable signal. Mirrors
+        `reflexes._idle_seconds`' defensive parse: a None / unparseable / tz-naive value
+        degrades to None (warned), never raises — so the Idle job just doesn't fire."""
+        raw = self.state.state.last_interaction
+        if raw is None:
+            return None
+        try:
+            return datetime.fromisoformat(raw)
+        except (ValueError, TypeError) as exc:
+            log.warning("unusable last_interaction %r (%s); no idle trigger this tick", raw, exc)
+            return None
+
+    def _build_proactive_prompt(self) -> str:
+        """Build the proactive turn's prompt from live personality state (Story 5.4) — the
+        Idle job's `prompt_builder`, resolved at dispatch. The feeling word reuses the face
+        vocabulary (`faces.select`) as the single mood-label source, so the pet's musing is
+        tinted by how it currently feels. Pure-ish: reads state, no await, never blocks the
+        admit critical section."""
+        m = self.state.state
+        feeling = self.faces.select(m.mood.valence, m.mood.arousal, m.energy)
+        return build_proactive_prompt(feeling)
+
     async def _run_checkpoint_job(self) -> None:
         """The periodic checkpoint flush (Story 3.1, NFR7) as a reflex-tier job — the
         seam the 3.1 comment said Epic 5's scheduler subsumes. Flushes only if dirty
         (periodic, not per change). The scheduler guards it: a transient disk error
         logs and retries next tick (state stays dirty)."""
         self._checkpoint_if_dirty()
+
+    async def _dispatch_turn_job(self, job: Job) -> None:
+        """The arbiter-gated dispatch seam (Story 5.2) for a due TURN-tier job (AD-9/AD-14).
+
+        A scheduler turn is admitted ONLY when the slot is free AND the cooldown has
+        elapsed AND the daily turn budget allows the job's cost; otherwise it is DEFERRED
+        (re-proposed next cadence) or SKIPPED. On admission it records the spend through
+        the single-writer `apply_patch` (AD-5), reserves the arbiter slot, and starts the
+        turn via the normal lifecycle — AD-14: the scheduler never forks directly, and the
+        turn rides the same 5.0-hardened path (release-safety: `submit` here is always
+        balanced by `complete` on the Result/timeout, or `reset` on a spawn failure).
+
+        A scheduler turn is NEVER coalesced into the owner's catch-up slot — only owner
+        messages coalesce. If a turn is in flight, the job defers. (Concurrency note: the
+        scheduler runs as a sibling task to the `run()` consumer, but the admit sequence
+        below — is_idle check → apply_patch → submit — has NO `await`, so it is atomic
+        w.r.t. the consumer; the arbiter's no-lock single-critical-section invariant holds.)"""
+        text = self._resolve_job_prompt(job)
+        if not text:
+            return  # promptless / builder failed / empty -> skip (logged in the resolver)
+        if not self.arbiter.is_idle:
+            log.info("turn job %r deferred: a turn is already in flight", job.name)
+            return
+        now = datetime.now(UTC)
+        decision = self._budget.evaluate(self.state.state.budget, now, cost=job.cost)
+        if decision is Decision.DEFER:
+            log.info("turn job %r deferred: within the turn cooldown", job.name)
+            return
+        if decision is Decision.SKIP:
+            log.info("turn job %r skipped: daily turn budget (%d) exhausted", job.name, self._budget.daily_turn_budget)
+            return
+        # ADMIT. Reserve the arbiter slot first; the slot is free (checked above, no await
+        # since), so submit returns the prompt. Guard the return defensively: a None would
+        # mean the no-await invariant broke — don't spend budget or start a bogus turn.
+        prompt = self.arbiter.submit(text)
+        if prompt is None:  # unreachable while is_idle holds in this await-free section
+            log.error("turn job %r: arbiter slot unexpectedly busy at admit; not spending budget", job.name)
+            return
+        # Record the spend BEFORE the spawn (a fork that then fails still counts —
+        # conservative for credit protection), then start through the normal lifecycle. A
+        # proactive turn (Story 5.4) records its synthetic owner-side marker, not the prompt.
+        self.state.apply_patch(self._budget.admission_patch(self.state.state.budget, now, cost=job.cost))
+        await self._start_turn(prompt, record_owner_text=job.history_owner_text)
+
+    def _resolve_job_prompt(self, job: Job) -> str | None:
+        """The turn job's prompt: built live from state (Story 5.4 `prompt_builder`) or the
+        static `prompt`. A builder that raises is guarded -> None (skip, never wedge — the
+        promptless-skip guarantee). An empty/None resolved prompt also skips."""
+        if job.prompt_builder is not None:
+            try:
+                built = job.prompt_builder()
+            except Exception as exc:
+                log.warning("turn job %r prompt builder failed (%s); skipping", job.name, exc)
+                return None
+            if not built:
+                log.warning("turn job %r prompt builder returned nothing; skipping", job.name)
+            return built or None
+        if job.prompt is None:
+            log.warning("turn job %r has no prompt; skipping (a turn job must carry one)", job.name)
+        return job.prompt
 
     def _checkpoint_if_dirty(self) -> None:
         if self.state.dirty:
