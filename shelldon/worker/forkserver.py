@@ -12,8 +12,29 @@ import gc
 import importlib
 import logging
 import os
+import signal
 
 log = logging.getLogger("shelldon.forkserver")
+
+#: Bounded-reap deadline (Story 5.0): if a forked child hasn't exited within this long,
+#: the reaper escalates to SIGKILL and reclaims it — so an unkillable/wedged child can
+#: never spin the reaper forever or hold the ≤1 slot past the turn. Part of the
+#: coherent-timeout chain W < R < T (worker self-report 25s < reap SIGKILL 28s < core
+#: degrade 30s); R stays below core's turn timeout so the slot frees before/at core's
+#: degrade. Module-level so tests inject a small value.
+_REAP_TIMEOUT_S = 28.0
+_REAP_POLL_S = 0.01
+
+#: After SIGKILL, reclaim the zombie by polling (NOT a blocking waitpid) for this long, so
+#: a child stuck in uninterruptible (D-state) kernel sleep can't freeze the asyncio loop.
+#: If it still hasn't gone, give up and let the OS reaper collect the zombie (Story 5.0).
+_REAP_KILL_GRACE_S = 2.0
+
+#: Upper bound for closing inherited FDs in the fork child. `SC_OPEN_MAX` can be ~1e6 (or
+#: the hard rlimit) — closing that many one-by-one would be a per-turn stall on a kernel
+#: without close_range(2). The child only inherits a handful of low FDs, so a modest cap
+#: covers them all with bounded work (Story 5.0).
+_MAX_INHERITED_FD = 4096
 
 
 class WorkerBusyError(Exception):
@@ -74,27 +95,74 @@ async def _os_fork_spawn(socket_path: str, turn_id: str, prompt: str,
     """
     from shelldon.worker.worker import run_worker
 
-    pid = os.fork()
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        # The kernel refused the fork (ENOMEM / EAGAIN). Don't let a raw errno escape —
+        # raise with context so spawn_turn → core's spawn-failure handler releases the
+        # guards and the turn fails cleanly instead of crashing the loop (Story 5.0).
+        raise RuntimeError(f"os.fork() failed for turn {turn_id}: {exc}") from exc
     if pid == 0:  # child
+        code = 0
         try:
+            # Fork-without-exec hygiene: close FDs inherited from the parent (the bus
+            # listener, peer sockets, etc.) BEFORE doing anything — the worker opens its
+            # own fresh connection. Keep std streams (0,1,2) so failures stay visible.
+            # Cap the range (SC_OPEN_MAX can be ~1e6) — only low FDs are ever inherited.
+            os.closerange(3, min(os.sysconf("SC_OPEN_MAX"), _MAX_INHERITED_FD))
             _maybe_drop_privileges(worker_uid, worker_gid, drop=drop)
             asyncio.run(run_worker(socket_path, turn_id, prompt,
                                    memory_root=memory_root, history_path=history_path))
+        except BaseException:
+            # A failed drop/turn must NOT vanish as exit 0 — exit non-zero so the reaper
+            # (and a human reading exit status) can SEE the child failed (Story 5.0).
+            code = 1
         finally:
-            os._exit(0)  # reclaim RAM; never run parent teardown in the child
+            os._exit(code)  # reclaim RAM; never run parent teardown in the child
     return pid
 
 
-async def _os_waitpid_reap(handle) -> None:
-    """Reap the worker without threads (thread-free keeps future forks safe)."""
+async def _os_waitpid_reap(handle, *, waitpid=os.waitpid, kill=os.kill,
+                           timeout=_REAP_TIMEOUT_S, poll=_REAP_POLL_S) -> None:
+    """Reap the worker without threads (thread-free keeps future forks safe).
+
+    Bounded (Story 5.0): if the child hasn't exited within `timeout`, escalate to SIGKILL
+    and reclaim it with a blocking waitpid — an unkillable/wedged child can never spin
+    this loop forever or hold the ≤1 slot. A child that exited abnormally (signalled or
+    non-zero) is logged so the failure is visible. The os calls are injected for tests."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
     while True:
         try:
-            pid, _ = os.waitpid(handle, os.WNOHANG)
+            pid, status = waitpid(handle, os.WNOHANG)
         except ChildProcessError:
             return  # already reaped (e.g. by a SIGCHLD handler) — benign
         if pid != 0:
+            if os.WIFSIGNALED(status) or (os.WIFEXITED(status) and os.waitstatus_to_exitcode(status)):
+                log.warning("worker %s exited abnormally (status=%s)", handle, status)
             return
-        await asyncio.sleep(0.01)
+        if loop.time() >= deadline:
+            log.warning("worker %s did not exit in %.1fs; escalating to SIGKILL", handle, timeout)
+            try:
+                kill(handle, signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass  # already gone between the poll and the kill — benign
+            # Reclaim the zombie by POLLING, not a blocking waitpid: a child wedged in
+            # uninterruptible (D-state) kernel sleep wouldn't reap even on SIGKILL, and a
+            # blocking waitpid here would freeze the whole asyncio loop. Poll briefly,
+            # then give up — the OS reaper collects a leftover zombie eventually.
+            kill_deadline = loop.time() + _REAP_KILL_GRACE_S
+            while loop.time() < kill_deadline:
+                try:
+                    pid, _ = waitpid(handle, os.WNOHANG)
+                except ChildProcessError:
+                    return  # reclaimed
+                if pid != 0:
+                    return  # reclaimed
+                await asyncio.sleep(poll)
+            log.warning("worker %s did not reap after SIGKILL; leaving the zombie to the OS", handle)
+            return
+        await asyncio.sleep(poll)
 
 
 class ForkServer:
@@ -143,11 +211,20 @@ class ForkServer:
         """
         if self._manage_gc:
             gc.disable()
-        for mod in self._preload_modules:
-            importlib.import_module(mod)
-        if self._manage_gc:
-            gc.collect()
-            gc.freeze()
+        try:
+            for mod in self._preload_modules:
+                importlib.import_module(mod)
+            if self._manage_gc:
+                gc.collect()
+                gc.freeze()
+        except BaseException:
+            # ANY failure in the gc-managed warm-up (a bad import, or gc.collect/freeze
+            # itself) must NOT leave the parent with GC permanently disabled — re-enable
+            # before propagating so the parent stays healthy (Story 5.0). On SUCCESS, GC
+            # stays disabled by design (COW: gc.freeze keeps shared pages clean, AD-3).
+            if self._manage_gc:
+                gc.enable()
+            raise
         self._ready.set()
 
     async def ready(self) -> None:

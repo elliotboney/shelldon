@@ -47,9 +47,27 @@ _OPS_DECODER = msgspec.json.Decoder(list[ProposedOp])
 
 #: Anti-wedge backstop: the worker waits at most this long for the broker's Completion,
 #: then emits a failure Result and exits — so a crashed/absent broker can never leave the
-#: worker blocked forever (which would never reap → stick the ≤1 bound, AD-9). Generous
-#: (the broker bounds its own provider calls); module-level so tests inject a small value.
-_COMPLETION_TIMEOUT_S = 120.0
+#: worker blocked forever (which would never reap → stick the ≤1 bound, AD-9).
+#:
+#: Coherent-timeout invariant (Story 5.0): this MUST stay below core's
+#: `DEFAULT_TURN_TIMEOUT` (runtime.py) and the fork-server's `_REAP_TIMEOUT_S` — the
+#: ordering is W < R < T (worker self-report < reap SIGKILL < core degrade). Inverting it
+#: (the old 120s vs core's 30s) is what let a silent broker hold the fork ~90s past core's
+#: degrade and freeze every new turn. With W < T the worker self-reports a failure Result
+#: BEFORE core abandons the turn, so the slot frees in lockstep. Module-level so tests
+#: inject a small value. See `tests/test_resilience.py::test_timeout_chain_is_coherent`.
+_COMPLETION_TIMEOUT_S = 25.0
+
+#: The worker's outbound `Result → core` write is bounded too: if core (or the hub) stalls
+#: and stops reading, the worker must not block forever on the write past its window — it
+#: logs and exits (the core turn-timeout is then the backstop). Story 5.0.
+#:
+#: Kept SHORT (and strictly < `_COMPLETION_TIMEOUT_S`): a healthy core reads the Result
+#: instantly, so a write that takes more than a few seconds means core is gone. A long
+#: write window (e.g. matching the 25s completion timeout) would let a broker reply that
+#: landed near t=25 stall the write until the reaper's SIGKILL (R=28) cut it off mid-write,
+#: silently dropping a valid reply.
+_RESULT_WRITE_TIMEOUT_S = 5.0
 
 
 def parse_reply(text: str) -> tuple[str, list[ProposedOp]]:
@@ -133,17 +151,25 @@ async def run_worker(
             ),
         )
         result = await _result_from_broker(reader, turn_id)
-        await write_frame(
-            writer,
-            Envelope(
-                id=uuid4().hex,
-                kind=MsgKind.RESULT,
-                src=Actor.WORKER,
-                dst=Actor.CORE,
-                body=result,
-                turn_id=turn_id,
-            ),
-        )
+        try:
+            await asyncio.wait_for(
+                write_frame(
+                    writer,
+                    Envelope(
+                        id=uuid4().hex,
+                        kind=MsgKind.RESULT,
+                        src=Actor.WORKER,
+                        dst=Actor.CORE,
+                        body=result,
+                        turn_id=turn_id,
+                    ),
+                ),
+                timeout=_RESULT_WRITE_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            # Core/hub stopped reading — don't block forever on the write. Exit; core's
+            # turn timeout reclaims the slot (Story 5.0).
+            log.warning("worker: core did not read the Result in %.1fs; exiting", _RESULT_WRITE_TIMEOUT_S)
     finally:
         writer.close()
         try:

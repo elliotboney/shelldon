@@ -151,3 +151,6 @@ All five items are pre-existing issues in `faces.py` or `worker/worker.py` — n
 - **`child.join(timeout=5.0)` silently returns with child still alive** [`shelldon/app.py`] — Zombie/runaway child processes after shutdown timeout. Revisit before Pi deployment hardening.
 - **`forkserver.preload()` raises after `ensure_vault` with no cleanup path** [`shelldon/app.py`] — Startup failure propagates; partially initialized state is GC'd. Acceptable for now; revisit with supervision/restart logic.
 - **`ensure_vault` chmod no-ops if vault dir is owned by a different user** [`shelldon/core/vault.py`] — Service always creates and owns `vault/`; edge case only in unusual multi-instance deployments. Revisit if multi-instance deployment is ever planned.
+
+## Deferred from: code review of 5-0-resilience-hardening-prep (2026-06-18)
+- **`test_fork_oserror_becomes_runtime_error` patches `os.fork` globally** [`tests/test_resilience.py:233`] — works correctly now; fragile only if import style in forkserver.py changes from `os.fork()` to `from os import fork`. Revisit if that import style changes.

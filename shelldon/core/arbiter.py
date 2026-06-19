@@ -9,6 +9,14 @@ whole-chain exhaustion is live (Story 2.3); cooldown, credit/battery budget are 
 
 Pure policy — no I/O, no asyncio. The core runtime (single-consumer loop) calls
 it, so access is already serial; no lock is needed for that design.
+
+Release-safety invariant (Story 5.0 AC4): every admission has a guaranteed release.
+`submit` reserves the slot; the runtime then EITHER reaches `complete` (normal turn end
++ catch-up, guaranteed to run even if delivery raises — see runtime `_handle_result`)
+OR `reset` (the turn it admitted never actually started — a spawn failure). There is no
+path that reserves the slot without one of those releasing it, so the ≤1 slot can never
+wedge. This holds WITHOUT a lock precisely because the single core loop is the only
+caller; introduce a lock only if a genuine concurrent caller is ever added.
 """
 
 

@@ -57,6 +57,13 @@ FACE_DEGRADED = "cant-think"
 DEGRADE_TEXT = "…can't think right now…"
 
 #: Default turn timeout (AC3 "rather than hanging"). Tests inject a small value.
+#:
+#: Coherent-timeout invariant (Story 5.0): this is the BINDING reap horizon (T) and is the
+#: LARGEST of the chain W < R < T — the worker self-reports a failure Result (W,
+#: `_COMPLETION_TIMEOUT_S`) and the fork-server SIGKILL-reclaims a wedged child (R,
+#: `_REAP_TIMEOUT_S`) BEFORE core abandons the turn here. That keeps the arbiter slot and
+#: the fork-server guard releasing in lockstep — no ~90s freeze from a worker holding the
+#: fork past core's degrade. See `tests/test_resilience.py::test_timeout_chain_is_coherent`.
 DEFAULT_TURN_TIMEOUT = 30.0
 
 #: Default personality-state checkpoint cadence (Story 3.1). Periodic, NOT per change
@@ -125,6 +132,10 @@ class Core:
         self._last_face: str | None = None
         self._seq = 0
         self._timeout_task: asyncio.Task | None = None
+        #: The in-flight worker's reap task (Story 5.0). Held (not just fire-and-forget)
+        #: so a turn end can AWAIT it before releasing the arbiter slot — the fork-server
+        #: guard and the arbiter slot then free in lockstep, with no divergence window.
+        self._reap_task: asyncio.Task | None = None
         #: The periodic checkpoint flush AND the resident reflex tick are long-lived
         #: SINGLETON tasks, so each lives in its own slot (like `_timeout_task`), NOT
         #: in `_bg`. `_bg` holds transient per-turn reap tasks that drain to empty; a
@@ -166,22 +177,29 @@ class Core:
         self._current_prompt = prompt  # stash to pair with the reply for history (4.1)
         self._current_turn_id = turn_id
         self.fence.open(turn_id)
-        await self._push_face(FACE_THINKING)
+        try:
+            await self._push_face(FACE_THINKING)
+        except Exception as exc:
+            # A cosmetic face push must never abort the turn or tear down the core loop —
+            # this runs on the always-reached catch-up path too (Story 5.0), so an
+            # unguarded bus failure here would propagate out of run() and kill core.
+            log.warning("turn %s face push failed (%s); continuing the turn", turn_id, exc)
         try:
             await self.spawner.spawn_turn(turn_id, prompt)
         except Exception as exc:
-            # The turn never actually started. Two real paths land here: an OS-level
-            # spawn failure, and the timeout+catch-up race where the prior worker's
-            # reap hasn't released ForkServer.worker_in_flight yet, so spawn_turn
-            # raises WorkerBusyError. Release BOTH guards — otherwise the fence stays
-            # open and the arbiter slot stays reserved forever, silently coalescing
-            # every later message into a pending slot that never flushes. The dropped
-            # catch-up prompt is accepted degraded behavior (redelivery is Epic 2).
+            # The turn never actually started — a real spawn failure (e.g. os.fork()
+            # ENOMEM/EAGAIN, surfaced as a RuntimeError). Release BOTH guards, otherwise
+            # the fence stays open and the arbiter slot stays reserved forever, silently
+            # coalescing every later message into a pending slot that never flushes. The
+            # dropped catch-up prompt is accepted degraded behavior (redelivery is Epic 2).
+            # (The old WorkerBusyError catch-up race is now closed: turn-end awaits the
+            # reap before releasing the arbiter — see _await_reap.)
             log.warning("spawn_turn failed for %s (%s); releasing turn guards", turn_id, exc)
             self.fence.close(turn_id)
             self.arbiter.reset()
             return
-        self._track(asyncio.create_task(self.spawner.reap_current()))
+        self._reap_task = asyncio.create_task(self.spawner.reap_current())
+        self._track(self._reap_task)
         self._arm_timeout(turn_id)
 
     async def _handle_result(self, env: Envelope) -> None:
@@ -192,16 +210,25 @@ class Core:
         self._disarm_timeout()  # synchronous, before any await — can't race the timeout
         self.fence.close(env.turn_id)
         result: Result = env.body
+        try:
+            # Only the bus delivery is guarded here — a transport failure must not skip the
+            # slot release below (Story 5.0 AC1). The narrow scope keeps the broad except
+            # from masking a bug in the self-guarded ops/record helpers that follow.
+            if result.ok:
+                await self._send_reply(result.payload)
+                await self._push_face(FACE_REPLY)
+            else:
+                await self._degrade()
+        except Exception as exc:
+            log.warning("turn %s delivery failed (%s); releasing the slot anyway", env.turn_id, exc)
         if result.ok:
-            await self._send_reply(result.payload)
-            await self._push_face(FACE_REPLY)
-            # Apply the worker's proposed ops AFTER the reply is out (AC2): a bad/oversized
-            # proposal must never block or alter the user-facing reply.
+            # Apply ops + record AFTER the reply (AC2), OUTSIDE the delivery try: both are
+            # self-guarded (never raise), and the pet should still record + apply what it
+            # learned even if the reply failed to reach the owner.
             self._apply_proposed_ops(result.proposed_ops)
             self._record_turn(result.payload)
-        else:
-            await self._degrade()
-        folded = self.arbiter.complete()
+        await self._await_reap()  # release the fork-server guard BEFORE the arbiter slot (AC1)
+        folded = self.arbiter.complete()  # ALWAYS runs — guaranteed slot release
         if folded is not None:
             await self._start_turn(folded)
 
@@ -227,10 +254,31 @@ class Core:
             return  # already closed/superseded by the Result path
         self.fence.close(turn_id)
         self._timeout_task = None
-        await self._degrade()
-        folded = self.arbiter.complete()
+        try:
+            await self._degrade()
+        except Exception as exc:
+            # Same guarantee as _handle_result: even if the degrade reply fails to send,
+            # the slot MUST release so the next turn can proceed (Story 5.0 AC1).
+            log.warning("turn %s degrade-on-timeout failed (%s); releasing the slot anyway", turn_id, exc)
+        await self._await_reap()  # reclaim the wedged worker BEFORE freeing the arbiter (AC1)
+        folded = self.arbiter.complete()  # ALWAYS runs — guaranteed slot release
         if folded is not None:
             await self._start_turn(folded)
+
+    async def _await_reap(self) -> None:
+        """Await the in-flight worker's reap so the fork-server guard is released BEFORE the
+        arbiter slot frees (Story 5.0 AC1) — the two ≤1 guards then release in lockstep, so
+        a catch-up turn can never hit a freed arbiter while the fork is still held
+        (WorkerBusyError). The reap is bounded (SIGKILL at `_REAP_TIMEOUT_S`), so this can't
+        block the loop indefinitely; a worker that emitted a Result exits at once, so the
+        common case returns immediately."""
+        task = self._reap_task
+        self._reap_task = None
+        if task is not None:
+            try:
+                await task
+            except Exception as exc:  # reap_current self-guards + releases in a finally
+                log.warning("reap await failed (%s); the guard is released by reap's finally", exc)
 
     # --- emit helpers (core ORIGINATES traffic via bus.deliver) ---
 
@@ -409,6 +457,7 @@ class Core:
         for task in list(self._bg):
             task.cancel()
         self._bg.clear()
+        self._reap_task = None  # the reap task lived in _bg (cancelled above)
         # Best-effort durable flush on graceful shutdown (the checkpoint is atomic, so
         # no partial-write risk). Never let a teardown-time write escalate an error.
         try:
