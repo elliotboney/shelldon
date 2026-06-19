@@ -36,6 +36,7 @@ class MsgKind(StrEnum):
     INBOUND_MSG = "inbound-message"
     OUTBOUND_MSG = "outbound-message"
     STATE_SNAPSHOT = "state-snapshot"
+    EVENT = "event"
 
 
 class Region(StrEnum):
@@ -245,6 +246,16 @@ class StateSnapshot(msgspec.Struct, frozen=True, tag="state-snapshot", forbid_un
     face: str
 
 
+class Event(msgspec.Struct, frozen=True, tag="event", forbid_unknown_fields=True):
+    """A broadcast pet-lifecycle event (AD-11 routing mode 2, Story 7.2). Core publishes
+    it with `dst=None` (the reserved broadcast header); the hub delivers it to the
+    plugin-host, which fans it out to the plugins that subscribed to this `event` kind
+    (the manifest-built registry from Story 7.1). `event` is the closed `EventKind`; a
+    richer per-event payload is an additive field added when a consumer needs it."""
+
+    event: EventKind
+
+
 #: Body type -> the header `kind` it must travel under (single source of truth
 #: for the kind<->body agreement enforced in Envelope.__post_init__).
 _KIND_FOR_BODY = {
@@ -254,6 +265,7 @@ _KIND_FOR_BODY = {
     InboundMessage: MsgKind.INBOUND_MSG,
     OutboundMessage: MsgKind.OUTBOUND_MSG,
     StateSnapshot: MsgKind.STATE_SNAPSHOT,
+    Event: MsgKind.EVENT,
 }
 
 
@@ -275,7 +287,7 @@ class Envelope(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     kind: MsgKind
     src: Actor
     dst: Actor | None
-    body: Job | Result | Completion | InboundMessage | OutboundMessage | StateSnapshot
+    body: Job | Result | Completion | InboundMessage | OutboundMessage | StateSnapshot | Event
     v: int = SCHEMA_VERSION
     turn_id: str | None = None
 
@@ -335,6 +347,7 @@ __all__ = [
     "InboundMessage",
     "OutboundMessage",
     "StateSnapshot",
+    "Event",
     "Remember",
     "RewriteAbout",
     "LogEpisode",

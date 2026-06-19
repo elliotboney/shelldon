@@ -11,6 +11,8 @@ import pytest
 from shelldon.contracts import (
     Actor,
     Envelope,
+    Event,
+    EventKind,
     Job,
     MsgKind,
     OutboundMessage,
@@ -99,5 +101,45 @@ async def test_deliver_snapshot_reaches_display(sock_path):
 
         got = await asyncio.wait_for(read_frame(d_reader), timeout=1.0)
         assert got == env
+    finally:
+        await srv.stop()
+
+
+async def test_broadcast_event_routed_to_plugin_host(sock_path):
+    """Story 7.2 (AD-11 mode 2): an EVENT envelope (dst=None) core emits via `deliver`
+    takes the hub's broadcast branch and reaches the registered PLUGIN_HOST."""
+    srv = await _server(sock_path)
+    try:
+        ph_reader, _ph_writer = await connect(srv.socket_path, Actor.PLUGIN_HOST)
+        await asyncio.sleep(0.05)
+
+        env = Envelope(
+            id="ev1",
+            kind=MsgKind.EVENT,
+            src=Actor.CORE,
+            dst=None,  # broadcast
+            body=Event(event=EventKind.MESSAGE_ANSWERED),
+        )
+        await srv.deliver(env)
+
+        got = await asyncio.wait_for(read_frame(ph_reader), timeout=1.0)
+        assert got == env
+    finally:
+        await srv.stop()
+
+
+async def test_broadcast_event_dropped_when_no_plugin_host(sock_path):
+    """No plugin-host connected: the event is dropped-with-log, never raising on the
+    emitter (mirrors the existing 'no connection for dest' behavior)."""
+    srv = await _server(sock_path)
+    try:
+        env = Envelope(
+            id="ev2",
+            kind=MsgKind.EVENT,
+            src=Actor.CORE,
+            dst=None,
+            body=Event(event=EventKind.DAY_ALIVE),
+        )
+        await srv.deliver(env)  # must not raise
     finally:
         await srv.stop()

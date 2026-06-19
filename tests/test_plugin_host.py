@@ -13,10 +13,11 @@ import types
 
 import pytest
 
-from shelldon.contracts import Actor, EventKind, Region
-from shelldon.core.bus import BusServer
+from shelldon.contracts import Actor, Envelope, Event, EventKind, MsgKind, Region
+from shelldon.core.bus import BusServer, write_frame
 from shelldon.plugins.host import (
     PluginLoadError,
+    _fan_out,
     discover_plugins,
     run_plugin_host,
     validate_claims,
@@ -30,6 +31,27 @@ def _plugin(name, *, regions=(), resources=(), subscribes=()):
             name=name, regions=regions, resources=resources, subscribes=subscribes
         )
     )
+
+
+class _Recorder(BasePlugin):
+    """A fake plugin that records the event kinds its on_event receives (Story 7.2)."""
+
+    def __init__(self, name, subscribes):
+        super().__init__(PluginManifest(name=name, subscribes=subscribes))
+        self.got: list[EventKind] = []
+
+    async def on_event(self, event: Event) -> None:
+        self.got.append(event.event)
+
+
+async def _poll(predicate, timeout=1.0):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition not met within timeout")
 
 
 # --- AC3: conflict rejection at load --------------------------------------------
@@ -176,18 +198,33 @@ def test_discovery_skips_a_module_that_fails_to_import(tmp_path, caplog):
             del sys.modules[mod]
 
 
-async def test_baseplugin_logs_on_a_framing_error(caplog):
-    # Review patch: BasePlugin.run must not exit SILENTLY on a framing ValueError —
-    # the operator needs a signal for why a plugin loop ended.
-    reader = asyncio.StreamReader()
-    reader.feed_data((9_000_000).to_bytes(4, "big"))  # prefix > MAX_FRAME_BYTES (8 MiB)
-    plugin = BasePlugin(PluginManifest(name="noisy"))
-    with caplog.at_level("WARNING", logger="shelldon.plugins.manifest"):
-        await asyncio.wait_for(plugin.run(reader, None), timeout=1.0)
-    assert any("framing" in r.message.lower() for r in caplog.records)
+# --- AC1: fan-out via the manifest registry (host-side) -------------------------
+
+async def test_fan_out_delivers_only_to_subscribers():
+    a = _Recorder("a", (EventKind.MESSAGE_ANSWERED,))
+    b = _Recorder("b", (EventKind.DAY_ALIVE,))
+    loaded = validate_claims([a, b])
+    await _fan_out(Event(event=EventKind.MESSAGE_ANSWERED), loaded)
+    assert a.got == [EventKind.MESSAGE_ANSWERED]  # subscriber got it
+    assert b.got == []  # non-subscriber did NOT
 
 
-# --- AC4: the bus-client lifecycle ----------------------------------------------
+async def test_fan_out_isolates_a_raising_plugin(caplog):
+    # AD-8: a crashed plugin kills only itself — the other subscriber still fires.
+    class _Boom(BasePlugin):
+        async def on_event(self, event):
+            raise RuntimeError("boom in on_event")
+
+    boom = _Boom(PluginManifest(name="boom", subscribes=(EventKind.MESSAGE_ANSWERED,)))
+    rec = _Recorder("rec", (EventKind.MESSAGE_ANSWERED,))
+    loaded = validate_claims([boom, rec])  # boom first, so it raises before rec runs
+    with caplog.at_level("WARNING", logger="shelldon.plugins.host"):
+        await _fan_out(Event(event=EventKind.MESSAGE_ANSWERED), loaded)
+    assert rec.got == [EventKind.MESSAGE_ANSWERED]  # not aborted by boom's exception
+    assert any("boom" in r.message.lower() for r in caplog.records)
+
+
+# --- AC1/AC3: the host owns the read loop + dispatches received events -----------
 
 async def _host_registered(srv, timeout=1.0):
     loop = asyncio.get_running_loop()
@@ -198,6 +235,62 @@ async def _host_registered(srv, timeout=1.0):
         await asyncio.sleep(0.01)
     raise AssertionError("plugin-host never registered as PLUGIN_HOST")
 
+
+def _event_env(kind: EventKind) -> Envelope:
+    return Envelope(id=kind.value, kind=MsgKind.EVENT, src=Actor.CORE, dst=None, body=Event(event=kind))
+
+
+async def test_host_dispatches_a_received_event_to_subscribers(sock_path):
+    rec = _Recorder("rec", (EventKind.MESSAGE_ANSWERED,))
+    srv = BusServer(socket_path=sock_path)
+    await srv.start()
+    host_task = asyncio.create_task(run_plugin_host(sock_path, plugins=[rec]))
+    try:
+        await _host_registered(srv)
+        # Write an Event straight to the host's connection (the hub branch is AC3).
+        await write_frame(srv._registry[Actor.PLUGIN_HOST], _event_env(EventKind.MESSAGE_ANSWERED))
+        await _poll(lambda: rec.got == [EventKind.MESSAGE_ANSWERED])
+        await srv.stop()
+        await asyncio.wait_for(host_task, timeout=1.0)
+        assert host_task.done() and host_task.exception() is None
+    finally:
+        if not host_task.done():
+            host_task.cancel()
+            await asyncio.gather(host_task, return_exceptions=True)
+
+
+async def test_host_skips_an_invalid_frame_and_keeps_dispatching(sock_path):
+    # Per-frame resilience (transport/display pattern): one bad frame is skipped,
+    # the valid Event right after it still reaches the subscriber.
+    rec = _Recorder("rec", (EventKind.MESSAGE_ANSWERED,))
+    srv = BusServer(socket_path=sock_path)
+    await srv.start()
+    host_task = asyncio.create_task(run_plugin_host(sock_path, plugins=[rec]))
+    try:
+        await _host_registered(srv)
+        w = srv._registry[Actor.PLUGIN_HOST]
+        # A framed-but-invalid envelope (unsupported schema version -> ValidationError).
+        from shelldon.contracts import SCHEMA_VERSION, encode
+
+        bad = encode(
+            Envelope(
+                id="bad", kind=MsgKind.EVENT, src=Actor.CORE, dst=None,
+                body=Event(event=EventKind.DAY_ALIVE), v=SCHEMA_VERSION + 999,
+            )
+        )
+        w.write(len(bad).to_bytes(4, "big") + bad)
+        await w.drain()
+        await write_frame(w, _event_env(EventKind.MESSAGE_ANSWERED))
+        await _poll(lambda: rec.got == [EventKind.MESSAGE_ANSWERED])
+        await srv.stop()
+        await asyncio.wait_for(host_task, timeout=1.0)
+    finally:
+        if not host_task.done():
+            host_task.cancel()
+            await asyncio.gather(host_task, return_exceptions=True)
+
+
+# --- AC4: the bus-client lifecycle ----------------------------------------------
 
 async def test_host_connects_and_tears_down_on_hub_disconnect(sock_path):
     import shelldon.plugins as pkg  # empty set in 7.1

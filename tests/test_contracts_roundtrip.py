@@ -270,9 +270,14 @@ def test_unknown_wire_fields_rejected():
 
 
 def test_every_kind_has_a_route():
-    """AD-11 point-to-point: every MsgKind must resolve to a destination — a kind
-    added without a routing entry would be unroutable on the bus."""
+    """AD-11 point-to-point: every point-to-point MsgKind must resolve to a single
+    destination — a kind added without a routing entry would be unroutable on the bus.
+    EVENT is the exception: it is AD-11 routing mode 2 (broadcast, Story 7.2), fanned
+    out by a dedicated hub path, so it deliberately has no single-destination row."""
     for kind in MsgKind:
+        if kind is MsgKind.EVENT:
+            assert kind not in ROUTING_TABLE  # broadcast, not point-to-point
+            continue
         assert kind in ROUTING_TABLE, f"MsgKind.{kind.name} has no ROUTING_TABLE entry"
         assert isinstance(ROUTING_TABLE[kind], Actor)
 
