@@ -44,7 +44,14 @@ SYSTEM_INSTRUCTION = (
     "reply — a JSON array of ops. Omit it if there is nothing worth remembering. Example:\n"
     "```ops\n"
     '[{"type":"remember","collection":"facts","name":"favorite-db","content":"BigQuery"}]\n'
-    "```"
+    "```\n"
+    # Story 6.1: capture_learning is a cheap private jot (sqlite, not curated memory) — the
+    # model MAY emit it for a recurring observation worth consolidating later, optionally with
+    # a pattern_key so repeats dedup. Real-model uptake is unverifiable here (no live LLM); the
+    # parse->route->write->dedup mechanism is what 6.1 tests.
+    "You MAY also privately jot a recurring observation worth remembering later with a "
+    '`capture_learning` op (give a short `pattern_key` to dedup repeats), e.g. '
+    '{"type":"capture_learning","observation":"owner codes late at night","pattern_key":"night-owl"}.'
 )
 
 #: Bare word tokens for a SAFE FTS5 query — raw owner text (quotes, parens, `*`, or

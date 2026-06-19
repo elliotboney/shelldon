@@ -12,6 +12,7 @@ import pytest
 from shelldon.contracts import (
     Actor,
     AddFace,
+    CaptureLearning,
     Envelope,
     LogEpisode,
     MsgKind,
@@ -247,6 +248,73 @@ async def test_core_mixed_batch_routes_each_op_to_its_writer(sock_path, tmp_path
     assert "curiouser" in [f.name for f in core.faces.faces]
     assert (tmp_path / "memory" / "people" / "alex.md").read_text() == "owner friend"
     assert core.fence.is_idle
+
+
+# --- Story 6.1: capture_learning rides the same wire, routes to sqlite (not markdown) ---
+
+
+def test_parse_reply_decodes_capture_learning_no_worker_change():
+    """Adding CaptureLearning to the ProposedOp union makes the worker's list[ProposedOp]
+    decoder accept it — proves the union add works with NO worker.py change."""
+    reply = (
+        "Noted.\n"
+        "```ops\n"
+        '[{"type":"capture_learning","observation":"owner codes late","pattern_key":"night-owl"}]\n'
+        "```"
+    )
+    payload, ops = parse_reply(reply)
+    assert payload == "Noted."
+    assert len(ops) == 1 and type(ops[0]) is CaptureLearning
+    assert ops[0].observation == "owner codes late" and ops[0].pattern_key == "night-owl"
+
+
+def test_capture_learning_pattern_key_optional():
+    payload, ops = parse_reply('```ops\n[{"type":"capture_learning","observation":"a stray thought"}]\n```')
+    assert type(ops[0]) is CaptureLearning and ops[0].pattern_key is None
+
+
+async def test_core_routes_capture_learning_to_sqlite_not_markdown(sock_path, tmp_path):
+    """A CaptureLearning op writes a learnings row and NEVER touches the markdown tree (AC1)."""
+    core = _core(sock_path, tmp_path)
+    _open_turn(core, "L1")
+    op = CaptureLearning(observation="owner prefers BigQuery", pattern_key="prefers-bigquery")
+    await core._handle_result(_result_env("L1", [op]))
+
+    rows = core.history._conn.execute("SELECT observation, status FROM learnings").fetchall()
+    assert len(rows) == 1 and rows[0]["status"] == "pending"
+    assert rows[0]["observation"] == "owner prefers BigQuery"
+    assert not (tmp_path / "memory" / "facts").exists()   # markdown tree untouched
+    assert not (tmp_path / "memory" / "about.md").exists()
+    assert core.fence.is_idle
+    core.history.close()
+
+
+async def test_core_capture_learning_failure_is_skipped_turn_survives(sock_path, tmp_path):
+    """A capture that blows up at the writer is logged+skipped — never crashes the turn."""
+    core = _core(sock_path, tmp_path)
+    _open_turn(core, "L2")
+
+    def boom(*a, **k):
+        raise RuntimeError("learnings write failed")
+
+    core.history.capture_learning = boom
+    await core._handle_result(_result_env("L2", [CaptureLearning(observation="x", pattern_key="k")]))
+    assert core.fence.is_idle  # turn survived the bad op
+    core.history.close()
+
+
+async def test_core_mixed_batch_routes_capture_and_memory_op(sock_path, tmp_path):
+    """A batch with a CaptureLearning AND a Remember proves both reach their own writer:
+    the learning to sqlite, the memory-op to the markdown tree."""
+    core = _core(sock_path, tmp_path)
+    _open_turn(core, "L3")
+    learn = CaptureLearning(observation="owner likes terse replies", pattern_key="terse")
+    mem = Remember(collection="facts", name="db", content="BigQuery")
+    await core._handle_result(_result_env("L3", [learn, mem]))
+    assert core.history._conn.execute("SELECT COUNT(*) FROM learnings").fetchone()[0] == 1
+    assert (tmp_path / "memory" / "facts" / "db.md").read_text() == "BigQuery"
+    assert core.fence.is_idle
+    core.history.close()
 
 
 async def test_core_failure_result_skips_ops(sock_path, tmp_path):

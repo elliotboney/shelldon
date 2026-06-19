@@ -83,9 +83,22 @@ class LogEpisode(msgspec.Struct, frozen=True, tag="log_episode", forbid_unknown_
 
 
 #: The closed memory-op union — the curated-memory ops core applies via
-#: `CuratedMemory.apply_memory_op`. `capture_learning` (AD-6) belongs to the
-#: learnings/dream work (Epic 6).
+#: `CuratedMemory.apply_memory_op`. `capture_learning` (AD-6) is a SEPARATE op — it
+#: writes sqlite, not the markdown tree — so it is NOT in this union.
 MemoryOp = Remember | RewriteAbout | LogEpisode
+
+
+class CaptureLearning(msgspec.Struct, frozen=True, tag="capture_learning", forbid_unknown_fields=True):
+    """A hot-path self-observation the worker jots for later consolidation (AD-6, Story 6.1).
+
+    Unlike the curated-memory ops (which `core` writes to the markdown tree), this is written
+    to the **sqlite `learnings` table** — raw, queryable, deduped by `pattern_key`, with no
+    extra LLM call. Core routes it to the history writer, NOT `apply_memory_op`. The 6.2 dream
+    cycle is what later classifies these `pending` learnings and promotes the durable ones into
+    curated markdown. NOT a `MemoryOp` (markdown); a distinct sqlite op."""
+
+    observation: str
+    pattern_key: str | None = None
 
 
 class AddFace(msgspec.Struct, frozen=True, tag="add_face", forbid_unknown_fields=True):
@@ -105,9 +118,10 @@ class AddFace(msgspec.Struct, frozen=True, tag="add_face", forbid_unknown_fields
 
 
 #: The closed set of ALL ops a worker may propose on `Result.proposed_ops` (Story 4.5):
-#: the curated-memory ops + the face op (Story 3.4). Core dispatches each to its single
-#: writer — `apply_memory_op` for memory-ops, `apply_add_face` for the face op.
-ProposedOp = MemoryOp | AddFace
+#: the curated-memory ops + the face op (Story 3.4) + the learnings capture op (Story 6.1).
+#: Core dispatches each to its single writer — `apply_memory_op` for memory-ops,
+#: `apply_add_face` for the face op, `history.capture_learning` for the learnings op.
+ProposedOp = MemoryOp | AddFace | CaptureLearning
 
 
 class Job(msgspec.Struct, frozen=True, tag="job", forbid_unknown_fields=True):
@@ -281,6 +295,7 @@ __all__ = [
     "RewriteAbout",
     "LogEpisode",
     "MemoryOp",
+    "CaptureLearning",
     "AddFace",
     "ProposedOp",
     "Envelope",
