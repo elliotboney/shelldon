@@ -18,7 +18,7 @@ import pytest
 
 from conftest import DummySpawner, await_true
 from shelldon.core.runtime import Core
-from shelldon.core.state import WRITABLE_PATHS, PersistentState, PersonalityState
+from shelldon.core.state import WRITABLE_PATHS, PersistentState, PersonalityState, TurnBudget
 
 
 # --- AC1: load defaults on first run, restore from a checkpoint ---
@@ -85,7 +85,10 @@ def test_unknown_top_level_path_rejected(tmp_path):
 
 
 def test_closed_set_is_the_documented_paths():
-    assert WRITABLE_PATHS == {"mood.valence", "mood.arousal", "energy", "last_interaction"}
+    assert WRITABLE_PATHS == {
+        "mood.valence", "mood.arousal", "energy", "last_interaction",
+        "budget.date", "budget.turns_used", "budget.last_turn_at",
+    }
 
 
 def test_patch_does_not_write_to_disk(tmp_path):
@@ -278,3 +281,47 @@ def test_nonpositive_checkpoint_interval_rejected(sock_path):
         Core(sock_path, DummySpawner(), checkpoint_interval=0)
     with pytest.raises(ValueError):
         Core(sock_path, DummySpawner(), checkpoint_interval=-1.0)
+
+
+# --- Story 5.2: the persisted turn-budget ledger (AD-7/AD-5) ---
+
+
+def test_budget_ledger_defaults_clean(tmp_path):
+    """First run -> an empty budget ledger (never spent), no crash."""
+    ps = PersistentState.load(tmp_path / "state.json")
+    assert ps.state.budget == TurnBudget()
+    assert ps.state.budget.date == ""
+    assert ps.state.budget.turns_used == 0
+    assert ps.state.budget.last_turn_at is None
+
+
+def test_budget_ledger_checkpoints_and_restores(tmp_path):
+    """The ledger survives a checkpoint/restore — the whole point of persisting it is
+    that a restart can't reset the daily cap (AD-7)."""
+    target = tmp_path / "state.json"
+    ps = PersistentState.load(target)
+    ps.apply_patch({"budget.date": "2026-06-18", "budget.turns_used": 7,
+                    "budget.last_turn_at": "2026-06-18T12:00:00+00:00"})
+    ps.checkpoint(target)
+
+    restored = PersistentState.load(target)
+    assert restored.state.budget.date == "2026-06-18"
+    assert restored.state.budget.turns_used == 7
+    assert restored.state.budget.last_turn_at == "2026-06-18T12:00:00+00:00"
+
+
+def test_pre_budget_checkpoint_loads_to_defaults(tmp_path):
+    """A pre-5.2 checkpoint (no `budget` field) must decode cleanly to the default
+    ledger — the 3.1 corrupt/legacy-tolerant restore contract still holds."""
+    target = tmp_path / "state.json"
+    target.write_bytes(b'{"mood":{"valence":0.2,"arousal":0.1},"energy":0.6,"last_interaction":null}')
+    ps = PersistentState.load(target)
+    assert ps.state.energy == pytest.approx(0.6)      # legacy fields still load
+    assert ps.state.budget == TurnBudget()            # missing budget -> default
+
+
+def test_budget_paths_are_writable_others_rejected(tmp_path):
+    ps = PersistentState.load(tmp_path / "state.json")
+    assert {"budget.date", "budget.turns_used", "budget.last_turn_at"}.issubset(WRITABLE_PATHS)
+    with pytest.raises(KeyError):
+        ps.apply_patch({"budget.nonsense": 1})  # outside the closed set -> rejected

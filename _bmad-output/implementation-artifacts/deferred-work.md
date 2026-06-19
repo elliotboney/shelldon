@@ -155,6 +155,22 @@ All five items are pre-existing issues in `faces.py` or `worker/worker.py` — n
 ## Deferred from: code review of 5-0-resilience-hardening-prep (2026-06-18)
 - **`test_fork_oserror_becomes_runtime_error` patches `os.fork` globally** [`tests/test_resilience.py:233`] — works correctly now; fragile only if import style in forkserver.py changes from `os.fork()` to `from os import fork`. Revisit if that import style changes.
 
+## Deferred from: code review of 5-2-cost-tier-gating-and-credit-budget (2026-06-18)
+
+- **`Daily` cadence uses UTC-day; budget uses local-day** [`shelldon/core/scheduler.py:104`] — Pre-existing from Story 5.1. `Daily.is_due` compares `.date()` on tz-aware UTC datetimes (UTC calendar day) while `BudgetGate._local_date` uses `now.astimezone().date()` (owner local day). For UTC-offset owners these predicates can diverge: a daily job could fire twice in one owner-local day (UTC day flip before local day does) or the budget reset day could disagree with the cadence's fire day. Low impact until a real daily turn job is registered in 5.4+.
+- **DEFER vs SKIP paths not distinguished by log assertion in integration tests** [`tests/test_turn_dispatch.py`] — Both `test_defers_within_the_cooldown` and `test_skips_when_daily_budget_exhausted` end with identical assertions (`spawns == []`, slot/budget unchanged); the paths are separated only by setup, not by asserting distinct log output. Minor test expressiveness gap; not a functional bug.
+
+## Deferred from: code review of 5-3-battery-aware-backoff (2026-06-18)
+
+- **Budget rollover clock-skew** [`shelldon/core/budget.py:77-100`] — `evaluate` and `admission_patch` take `now` at different call sites; a midnight-crossing admission could double-count or miss. Extremely rare for a solo pet.
+- **Silent permanent SKIP when `job.cost > daily_turn_budget`** [`shelldon/core/budget.py:82`] — a misconfigured job (cost > cap) silently SKIPs every tick with no warning. Add a diagnostic log in 5.4 when the first real turn job is registered.
+- **`Idle.is_due` exact-timestamp re-fire** [`shelldon/core/scheduler.py:93`] — pre-existing from 5.1; `last_run <= last_interaction` re-fires on exact timestamp collision; cosmically rare.
+- **`PowerState.charge` accepts negative values** [`shelldon/core/power.py:23-31`] — faulty hardware reader returning negative charge forces LOW permanently. Validate at the Epic 7 plugin-host boundary.
+- **Missing test: `eased_scale=1.0` accepted** [`shelldon/core/power.py:46`] — guard is `not (x >= 1.0)`, so 1.0 passes; add a test if the guard is ever tightened to `> 1.0`.
+- **`turns_used > daily_turn_budget` after config decrease → SKIP until rollover** [`shelldon/core/budget.py:77`] — lowering the cap between restarts blocks all turn jobs until midnight. Low operational risk; document in config notes.
+- **`apply_patch` after `arbiter.submit()` with no explicit rollback** [`shelldon/core/runtime.py:465-471`] — if `apply_patch` raises unexpectedly the arbiter slot leaks until the 30s turn timeout clears it. budget.* paths cannot raise in setattr; theoretical only.
+- **Hardcoded date `2026-06-18` in `test_cadence_stretch_is_demonstrable_on_battery`** [`tests/test_battery_backoff.py:125`] — style gap; no functional impact. Could use the `_at()` helper from `test_scheduler.py`.
+
 ## Deferred from: code review of 5-1-core-scheduler-with-named-multi-cadence-jobs (2026-06-18)
 - **`Idle` cadence never fires until 5.4 wires `last_interaction`** [`runtime.py:366-369`] — `_scheduler_loop` hardcodes `last_interaction=None`; any Idle job registered before 5.4 updates the call silently never fires. Story 5.4 must parse `state.state.last_interaction` to a `datetime` and pass it to `scheduler.tick()`.
 - **`Cadence` base class uses `NotImplementedError` not `abc.ABC`** [`scheduler.py:44`] — a subclass that forgets `is_due()` only fails at runtime. Change to `abc.ABC` + `@abstractmethod` when adding future cadence types.

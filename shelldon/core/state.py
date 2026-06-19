@@ -38,6 +38,17 @@ class Mood(msgspec.Struct):
     arousal: float = 0.0  # activated(+) ↔ calm(-)
 
 
+class TurnBudget(msgspec.Struct):
+    """The daily scheduler-turn spend ledger (Story 5.2). MUTABLE. Persisted with the
+    rest of the state so a restart can't reset the daily cap and overspend (AD-7) — the
+    whole point of the credit guardrail. `date` is the owner-LOCAL ISO date the count
+    belongs to; the budget policy resets `turns_used` when the local day rolls over."""
+
+    date: str = ""  # local "YYYY-MM-DD" the count is for; "" = never spent
+    turns_used: int = 0  # scheduler turns admitted on `date`, weighted by Job.cost
+    last_turn_at: str | None = None  # ISO-8601 UTC of the last admitted scheduler turn (cooldown stamp)
+
+
 class PersonalityState(msgspec.Struct):
     """The pet's inner state. MUTABLE RAM state — unlike the `frozen` wire contracts
     in `contracts/`, this is mutated in place by core, so it is NOT a bus message and
@@ -46,11 +57,15 @@ class PersonalityState(msgspec.Struct):
     mood: Mood = msgspec.field(default_factory=Mood)
     energy: float = 0.5  # 0.0 (depleted) .. 1.0 (full); mid by default
     last_interaction: str | None = None  # ISO-8601 UTC; None until the first interaction
+    budget: TurnBudget = msgspec.field(default_factory=TurnBudget)  # Story 5.2 spend ledger
 
 
 #: The closed set of writable dotted paths (AD-5 "fixed dotted paths"). A patch key
 #: outside this set is rejected — mirrors the `Region` enum's typo-rejection.
-WRITABLE_PATHS = frozenset({"mood.valence", "mood.arousal", "energy", "last_interaction"})
+WRITABLE_PATHS = frozenset({
+    "mood.valence", "mood.arousal", "energy", "last_interaction",
+    "budget.date", "budget.turns_used", "budget.last_turn_at",
+})
 
 _decoder = msgspec.json.Decoder(PersonalityState)
 
