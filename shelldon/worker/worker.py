@@ -31,6 +31,7 @@ from shelldon.contracts import (
     Result,
 )
 from shelldon.core.bus import connect, read_frame, write_frame
+from shelldon.worker.prompt import build_prompt
 
 log = logging.getLogger("shelldon.worker")
 
@@ -97,9 +98,27 @@ async def _result_from_broker(reader, turn_id: str) -> Result:
     return Result(ok=True, payload=payload, proposed_ops=ops)
 
 
-async def run_worker(socket_path: str, turn_id: str, prompt: str) -> None:
-    """Connect as WORKER, send one Job, await the broker's Completion, parse it into a
-    Result, send `Result→core`, then exit (the child dies, its RAM reclaimed)."""
+async def run_worker(
+    socket_path: str,
+    turn_id: str,
+    prompt: str,
+    *,
+    memory_root=None,
+    history_path=None,
+    assemble=None,
+) -> None:
+    """Connect as WORKER, ASSEMBLE the prompt from memory (Story 4.4), send one Job,
+    await the broker's Completion, parse it into a Result, send `Result→core`, then exit.
+
+    `prompt` is the current owner message; `assemble` turns it into the Job payload by
+    reading DIRECTIVE/about/history read-only and composing them in the AD-6 order
+    (default: `build_prompt`, bound to `memory_root`/`history_path`). The seam lets
+    turn-lifecycle tests inject an identity assembler so they stay about fencing/
+    coalescing, not prompt content."""
+    if assemble is None:
+        def assemble(message):
+            return build_prompt(message, memory_root=memory_root, history_path=history_path)
+    job_payload = assemble(prompt)
     reader, writer = await connect(socket_path, Actor.WORKER)
     try:
         await write_frame(
@@ -109,7 +128,7 @@ async def run_worker(socket_path: str, turn_id: str, prompt: str) -> None:
                 kind=MsgKind.JOB,
                 src=Actor.WORKER,
                 dst=Actor.BROKER,
-                body=Job(payload=prompt),
+                body=Job(payload=job_payload),
                 turn_id=turn_id,
             ),
         )

@@ -7,10 +7,12 @@ from pathlib import Path
 
 import pytest
 
+import shelldon.app as _app
 import shelldon.broker.broker as _broker
 import shelldon.broker.service as _service
 import shelldon.core.memory as _memory
 import shelldon.core.runtime as _runtime
+import shelldon.worker.prompt as _prompt
 
 
 @pytest.fixture(autouse=True)
@@ -32,6 +34,16 @@ def _isolate_state_checkpoint(tmp_path, monkeypatch):
     # isolate $HOME in the same change).
     monkeypatch.setattr(_memory, "DEFAULT_MEMORY_ROOT", tmp_path / "memory")
     monkeypatch.setattr(_runtime, "DEFAULT_MEMORY_ROOT", tmp_path / "memory")
+    # Story 4.3: app.run_app() falls back to DEFAULT_MEMORY_ROOT and creates vault/
+    # there — redirect the name app.py bound at import so no test locks a real
+    # ~/.shelldon/memory/vault (Epic 3 retro #3 — isolate $HOME in the same change).
+    monkeypatch.setattr(_app, "DEFAULT_MEMORY_ROOT", tmp_path / "memory")
+    # Story 4.4: worker/prompt.py imports its OWN DEFAULT_MEMORY_ROOT/DEFAULT_HISTORY_PATH
+    # bindings, used when an in-process worker assembles with roots=None. Redirect them to
+    # the SAME tmp paths core writes, or the worker reads the real ~/.shelldon (isolation
+    # breach + tests reading the wrong store).
+    monkeypatch.setattr(_prompt, "DEFAULT_MEMORY_ROOT", tmp_path / "memory")
+    monkeypatch.setattr(_prompt, "DEFAULT_HISTORY_PATH", tmp_path / "history.db")
 
 
 @pytest.fixture(autouse=True)

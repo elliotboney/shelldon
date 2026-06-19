@@ -18,7 +18,7 @@ async def test_worker_round_trips_job_completion_result(sock_path):
         b_reader, b_writer = await connect(sock_path, Actor.BROKER)
         await asyncio.sleep(0.05)
 
-        worker = asyncio.create_task(run_worker(sock_path, "turn-9", "ping"))
+        worker = asyncio.create_task(run_worker(sock_path, "turn-9", "ping", assemble=lambda m: m))
 
         # The broker receives the Job from the worker...
         job = await asyncio.wait_for(read_frame(b_reader), timeout=1.0)
@@ -65,7 +65,7 @@ async def test_worker_emits_failure_result_when_broker_silent(sock_path, monkeyp
         b_reader, _b_writer = await connect(sock_path, Actor.BROKER)
         await asyncio.sleep(0.05)
 
-        worker = asyncio.create_task(run_worker(sock_path, "turn-x", "ping"))
+        worker = asyncio.create_task(run_worker(sock_path, "turn-x", "ping", assemble=lambda m: m))
         await asyncio.wait_for(read_frame(b_reader), timeout=1.0)  # broker sees the Job, never answers
 
         res = await asyncio.wait_for(srv.core_inbox.get(), timeout=1.0)
