@@ -185,6 +185,32 @@ class HistoryStore:
                 (key, obs, ts, ts),
             )
 
+    def pending_learnings(self, limit: int = 50) -> list[sqlite3.Row]:
+        """The `pending` learnings the dream cycle (Story 6.2) reviews — impact-first
+        (`recurrence_count` desc), bounded. A CORE read (the dream's prompt is built in core),
+        so no read-only-worker handle is needed."""
+        cur = self._conn.execute(
+            "SELECT id, pattern_key, observation, recurrence_count, first_seen, last_seen "
+            "FROM learnings WHERE status = 'pending' "
+            "ORDER BY recurrence_count DESC, id ASC LIMIT ?",
+            (limit,),
+        )
+        return cur.fetchall()
+
+    def resolve_learning(self, id: int, status: str) -> None:
+        """Transition a still-`pending` learning to `promoted` or `pruned` (Story 6.2) — a
+        SOFT status change in one commit, never a DELETE (a re-recurring pruned learning resets
+        to pending via the 6.1 UPSERT). Only a row that is currently `pending` is moved; an
+        absent/already-resolved `id` is a 0-row no-op (logged, never raised). The `status` CHECK
+        constraint rejects an out-of-set value at the DB."""
+        with self._conn:
+            cur = self._conn.execute(
+                "UPDATE learnings SET status = ? WHERE id = ? AND status = 'pending'",
+                (status, id),
+            )
+        if cur.rowcount == 0:
+            log.info("resolve_learning: no pending learning with id=%r (already resolved or absent)", id)
+
     def recent(self, n: int = 20) -> list[sqlite3.Row]:
         return _recent(self._conn, n)
 

@@ -16,6 +16,8 @@ from shelldon.contracts import (
     CaptureLearning,
     Completion,
     Envelope,
+    ResolveLearning,
+    RewriteSummary,
     InboundMessage,
     Job,
     LogEpisode,
@@ -190,6 +192,28 @@ def test_capture_learning_op_round_trips_in_proposed_ops():
     assert type(op) is CaptureLearning and op.observation == "owner codes late"
     assert op.pattern_key == "night-owl"
     assert decoded.v == SCHEMA_VERSION
+
+
+def test_dream_ops_round_trip_in_proposed_ops():
+    """Story 6.2: the dream's resolve_learning (sqlite) + rewrite_summary (markdown) ride the
+    same closed proposed_ops union and decode back by tag (no SCHEMA_VERSION bump — AD-13)."""
+    env = Envelope(
+        id="r", kind=MsgKind.RESULT, src=Actor.WORKER, dst=Actor.CORE,
+        body=Result(ok=True, proposed_ops=[
+            ResolveLearning(id=7, status="promoted"),
+            RewriteSummary(content="a running summary"),
+        ]),
+        turn_id="t",
+    )
+    ops = decode(encode(env)).body.proposed_ops
+    assert type(ops[0]) is ResolveLearning and ops[0].id == 7 and ops[0].status == "promoted"
+    assert type(ops[1]) is RewriteSummary and ops[1].content == "a running summary"
+
+
+def test_resolve_learning_rejects_bad_status():
+    """status is a closed Literal — an out-of-set value is a decode error (whole-reject)."""
+    with pytest.raises(msgspec.ValidationError):
+        msgspec.json.decode(b'{"type":"resolve_learning","id":1,"status":"bogus"}', type=ResolveLearning)
 
 
 def test_default_schema_version():

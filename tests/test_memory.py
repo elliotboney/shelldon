@@ -12,12 +12,40 @@ import os
 import msgspec
 import pytest
 
-from shelldon.contracts import LogEpisode, MemoryOp, Remember, RewriteAbout
+from shelldon.contracts import LogEpisode, MemoryOp, Remember, RewriteAbout, RewriteSummary
 from shelldon.core.memory import CuratedMemory
 
 
 def _mem(tmp_path):
     return CuratedMemory(tmp_path / "memory")
+
+
+# --- Story 6.2: the running summary (rewrite_summary -> summary.md) ---
+
+
+def test_rewrite_summary_writes_summary_md(tmp_path):
+    mem = _mem(tmp_path)
+    mem.apply_memory_op(RewriteSummary(content="owner is migrating to BigQuery; mood upbeat"))
+    assert (tmp_path / "memory" / "summary.md").read_text() == "owner is migrating to BigQuery; mood upbeat"
+    assert mem.read_summary() == "owner is migrating to BigQuery; mood upbeat"
+
+
+def test_rewrite_summary_rejects_empty_content(tmp_path):
+    mem = _mem(tmp_path)
+    with pytest.raises(ValueError):
+        mem.apply_memory_op(RewriteSummary(content="   \n"))
+    assert not (tmp_path / "memory" / "summary.md").exists()  # nothing written on reject
+
+
+def test_read_summary_none_before_written(tmp_path):
+    assert _mem(tmp_path).read_summary() is None
+
+
+def test_rewrite_summary_overwrites(tmp_path):
+    mem = _mem(tmp_path)
+    mem.apply_memory_op(RewriteSummary(content="first"))
+    mem.apply_memory_op(RewriteSummary(content="second"))
+    assert mem.read_summary() == "second"  # running summary is replace, not append
 
 
 # --- Task 1: the closed memory-op vocabulary (AC1) ---
@@ -127,6 +155,7 @@ def test_no_memory_op_writes_directive(tmp_path):
     mem.apply_memory_op(Remember(collection="people", name="Alex", content="friend"))
     mem.apply_memory_op(Remember(collection="facts", name="coffee", content="black"))
     mem.apply_memory_op(LogEpisode(content="a thing happened"))
+    mem.apply_memory_op(RewriteSummary(content="a running summary"))  # Story 6.2 op too
     assert not (root / "DIRECTIVE.md").exists()
 
 

@@ -31,7 +31,7 @@
 # - Daily-driver line = Epics 1-4 + story 1-9 (soak); Epics 5-7 are enrichment
 
 generated: 2026-06-16 10:47:47 CDT
-last_updated: 2026-06-19 CDT  # Story 6.1 done (review TOCTOU fix applied)
+last_updated: 2026-06-19 CDT  # Story 6.2 done (review fixes applied) — all Epic 6 features complete
 project: shelldon
 project_key: NOKEY
 tracking_system: file-system
@@ -87,7 +87,7 @@ development_status:
   # --- Epic 6: Dreaming & Learning ---
   epic-6: in-progress  # 2026-06-18: Story 6.1 created (first story of epic)
   6-1-capture-learnings-on-the-hot-path: done  # created 2026-06-18 + done 2026-06-19: hot-path learning capture (AD-6/AD-15). New CaptureLearning op in contracts/ joins ProposedOp (NOT MemoryOp — it's sqlite, not markdown); new `learnings` table in the existing history.db (pattern_key dedup, recurrence_count, status pending/promoted/pruned, first/last_seen); core routes it via _apply_proposed_ops → history.capture_learning (insert-or-increment, reset to pending on recurrence), NO extra LLM call. Reuses the 4.5 propose→apply wire (worker decodes the union variant for free, no worker.py change). Thin/additive (3.4-shaped). Dream cycle that consumes pending learnings = 6.2. Defaults baked: dedup by pattern_key only (None always inserts), status resets to pending on recurrence, light SYSTEM_INSTRUCTION mention, empty observation skipped + blank pattern_key→None. +14 tests, suite 425 pass/soak 2 pass, contracts KEPT. No worker.py change (union decodes variant for free); no SCHEMA_VERSION bump (additive). Review: 1 decision (TOCTOU dedup → owner chose fix-now: atomic UPSERT + UNIQUE partial index, net-simpler, closes the race before 6.2's second writer), 5 defers accepted, 8 dismissed. +15 tests, suite 426 pass.
-  6-2-dream-cycle-classify-promote-prune: backlog
+  6-2-dream-cycle-classify-promote-prune: done  # created + done 2026-06-19: the dream cycle (AD-15, CAP-11) — final Epic 6 feature. A proactive-turn VARIANT: an Idle(6h) turn job (reuse 5.4 prompt_builder + history_owner_text seam) with cost=3, rides 5.2/5.3 gates UNCHANGED. _build_dream_prompt reads pending learnings (core read) + bakes them by id; LLM proposes remember/rewrite_about (promote→markdown) + new resolve_learning(id, promoted|pruned) (sqlite soft transition) + new rewrite_summary→memory/summary.md (4.4 injects it). CAP-11 = promoted fact reaches a later prompt. No new turn-lifecycle (rides _handle_result + the 5.4 marker). Owner decisions locked: Idle 6h/cost 3; vault routing DEFERRED (no surfacing yet); summary INCLUDED minimal. New ops: ResolveLearning→ProposedOp, RewriteSummary→MemoryOp (no SCHEMA bump). +20 tests, suite 446 pass/soak 2 pass, contracts KEPT. DISCOVERED GAP: 4.4 prompt assembly injects about.md/summary.md/history but NOT facts/ — CAP-11 proven via rewrite_about/summary; facts/ surfacing is a follow-on (4.4 extension). Review: 6 patches fixed (dream directive→rewrite_about, empty-skip→log.debug, +tick cadence test, +RewriteSummary directive-safety, 2 comment fixes) + 1 defer pulled in (newline flatten), 6 defers accepted. +2 tests, suite 448 pass.
   epic-6-retrospective: optional
 
   # --- Epic 7: Extensibility & Optional Embodiment ---

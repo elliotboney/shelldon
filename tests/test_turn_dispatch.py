@@ -310,6 +310,77 @@ def test_last_interaction_dt_parses_defensively(sock_path, tmp_path):
     assert core._last_interaction_dt() is None
 
 
+# --- Story 6.2: the dream job dispatches only when learnings are pending, at cost 3 ---
+
+
+def _dream_job(core):
+    return next(j for j in core.scheduler.jobs if j.name == "dream")
+
+
+async def test_dream_job_registered_with_cost_3(sock_path, tmp_path):
+    core = Core(sock_path, _RecordingSpawner(), checkpoint_path=tmp_path / "state.json")
+    dream = _dream_job(core)
+    assert dream.cost == 3 and dream.essential is False
+
+
+async def test_dream_dispatches_when_learnings_pending_spends_three(sock_path, tmp_path):
+    spawner = _RecordingSpawner()
+    core = Core(sock_path, spawner, checkpoint_path=tmp_path / "state.json")
+    core.history.capture_learning("owner codes late", "night-owl", datetime.now(UTC))
+    try:
+        await core._dispatch_turn_job(_dream_job(core))
+        assert len(spawner.spawns) == 1                       # the dream turn started
+        assert "Pending learnings" in spawner.spawns[0][1]    # the built directive carries them
+        assert core.state.state.budget.turns_used == 3        # a dream weighs 3 (cost)
+    finally:
+        await _teardown(core)
+
+
+async def test_dream_fires_via_scheduler_tick_on_its_idle_cadence(sock_path, tmp_path):
+    """End-to-end through the REAL scheduler tick (not _dispatch_turn_job directly): with the
+    dream's Idle cadence due and a learning pending, a tick initiates the dream — proving the
+    job registration + cadence + dispatch wire. Proactive interval pushed out so only the dream
+    is due."""
+    spawner = _RecordingSpawner()
+    core = Core(
+        sock_path, spawner, checkpoint_path=tmp_path / "state.json",
+        dream_idle_interval=1.0, proactive_idle_interval=1e9,  # only the dream is due
+    )
+    core.history.capture_learning("owner codes late", "night-owl", datetime.now(UTC))
+    long_ago = datetime.now(UTC) - timedelta(seconds=1000)
+    try:
+        await core.scheduler.tick(last_interaction=long_ago)
+        assert len(spawner.spawns) == 1
+        assert "Pending learnings" in spawner.spawns[0][1]   # the dream turn, built from pending
+        assert core.state.state.budget.turns_used == 3       # dream cost
+    finally:
+        await _teardown(core)
+
+
+def test_dream_prompt_flattens_newlines_in_observations(sock_path, tmp_path):
+    """A multi-line observation must stay ONE baked line so the id<->text association in the
+    directive isn't scrambled (Epic 5 input-edge sub-list)."""
+    core = Core(sock_path, _RecordingSpawner(), checkpoint_path=tmp_path / "state.json")
+    core.history.capture_learning("line one\nline two\n  line three", "multi", datetime.now(UTC))
+    directive = core._build_dream_prompt()
+    learning_line = next(ln for ln in directive.splitlines() if ln.startswith("- [id="))
+    assert "\n" not in learning_line and "line one line two line three" in learning_line
+    core.history.close()
+
+
+async def test_dream_skipped_when_no_pending_learnings(sock_path, tmp_path):
+    """No pending learnings → _build_dream_prompt returns "" → the empty-prompt skip fires
+    (no spawn, no spend) — the dream only costs budget when there's something to consolidate."""
+    spawner = _RecordingSpawner()
+    core = Core(sock_path, spawner, checkpoint_path=tmp_path / "state.json")
+    try:
+        await core._dispatch_turn_job(_dream_job(core))
+        assert spawner.spawns == []
+        assert core.state.state.budget.turns_used == 0
+    finally:
+        await _teardown(core)
+
+
 async def test_budget_survives_a_restart(sock_path, tmp_path):
     target = tmp_path / "state.json"
     spawner1 = _RecordingSpawner()

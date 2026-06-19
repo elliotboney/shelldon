@@ -243,6 +243,64 @@ def test_readonly_reader_has_no_learnings_write(tmp_path):
     r.close()
 
 
+# --- Story 6.2: the dream reads pending + resolves (promote/prune) ---
+
+
+def _lid(s, key):
+    """The learnings row id for a pattern_key (test helper)."""
+    return s._conn.execute("SELECT id FROM learnings WHERE pattern_key = ?", (key,)).fetchone()["id"]
+
+
+def test_pending_learnings_returns_only_pending_impact_first(tmp_path):
+    s = HistoryStore.open(tmp_path / "h.db")
+    s.capture_learning("rare", "k-rare", NOW)
+    for _ in range(3):
+        s.capture_learning("common", "k-common", NOW)  # recurrence_count -> 3
+    s.capture_learning("promoted-already", "k-done", NOW)
+    s.resolve_learning(_lid(s, "k-done"), "promoted")
+
+    rows = s.pending_learnings()
+    names = [r["observation"] for r in rows]
+    assert names == ["common", "rare"]  # impact-first (3 before 1); the resolved one excluded
+    s.close()
+
+
+def test_resolve_learning_transitions_a_pending_row(tmp_path):
+    s = HistoryStore.open(tmp_path / "h.db")
+    s.capture_learning("keep me", "k", NOW)
+    lid = _lid(s, "k")
+    s.resolve_learning(lid, "promoted")
+    row = s._conn.execute("SELECT status FROM learnings WHERE id = ?", (lid,)).fetchone()
+    assert row["status"] == "promoted"
+    assert s.pending_learnings() == []  # no longer pending
+    s.close()
+
+
+def test_resolve_learning_absent_or_resolved_id_is_a_noop(tmp_path):
+    s = HistoryStore.open(tmp_path / "h.db")
+    s.capture_learning("o", "k", NOW)
+    lid = _lid(s, "k")
+    s.resolve_learning(999, "pruned")       # absent id -> no-op, no raise
+    s.resolve_learning(lid, "promoted")
+    s.resolve_learning(lid, "pruned")        # already resolved -> no-op (stays promoted)
+    assert s._conn.execute("SELECT status FROM learnings WHERE id = ?", (lid,)).fetchone()["status"] == "promoted"
+    s.close()
+
+
+def test_pruned_learning_resets_to_pending_when_recaptured(tmp_path):
+    """6.2 prune is soft (status only); a re-recurring pruned learning resets to pending (6.1
+    UPSERT) and re-enters the dream queue with a higher recurrence_count."""
+    s = HistoryStore.open(tmp_path / "h.db")
+    s.capture_learning("recurs", "k", NOW)
+    lid = _lid(s, "k")
+    s.resolve_learning(lid, "pruned")
+    assert s.pending_learnings() == []
+    s.capture_learning("recurs", "k", LATER)  # re-captured
+    pending = s.pending_learnings()
+    assert len(pending) == 1 and pending[0]["recurrence_count"] == 2
+    s.close()
+
+
 # --- AC1 (core integration): a completed turn is recorded ---
 
 

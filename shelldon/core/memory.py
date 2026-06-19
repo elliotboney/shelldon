@@ -26,7 +26,7 @@ import tempfile
 import unicodedata
 from pathlib import Path
 
-from shelldon.contracts import LogEpisode, MemoryOp, Remember, RewriteAbout
+from shelldon.contracts import LogEpisode, MemoryOp, Remember, RewriteAbout, RewriteSummary
 
 log = logging.getLogger("shelldon.core.memory")
 
@@ -100,6 +100,8 @@ class CuratedMemory:
             self._apply_remember(op)
         elif isinstance(op, LogEpisode):
             self._apply_log_episode(op)
+        elif isinstance(op, RewriteSummary):
+            self._apply_rewrite_summary(op)
         else:
             raise ValueError(f"unknown memory-op {type(op).__name__!r} (not a closed MemoryOp)")
 
@@ -107,6 +109,13 @@ class CuratedMemory:
         if not op.content.strip():
             raise ValueError("rewrite_about: content must be non-empty")
         _atomic_write_text(self._root / "about.md", op.content)
+
+    def _apply_rewrite_summary(self, op: RewriteSummary) -> None:
+        """Overwrite the bot-owned running summary `summary.md` (Story 6.2) — the dream's
+        bounded conversation summary the 4.4 assembly injects into later turns."""
+        if not op.content.strip():
+            raise ValueError("rewrite_summary: content must be non-empty")
+        _atomic_write_text(self._root / "summary.md", op.content)
 
     def _apply_remember(self, op: Remember) -> None:
         if op.collection not in _COLLECTIONS:
@@ -139,6 +148,12 @@ class CuratedMemory:
         """The bot-owned `about.md` content, or `None` if it has never been written.
         The read accessor Story 4.4 will inject into prompts (4.2 only exposes it)."""
         path = self._root / "about.md"
+        return path.read_text() if path.is_file() else None
+
+    def read_summary(self) -> str | None:
+        """The bot-owned running summary `summary.md`, or `None` if never written (Story 6.2).
+        The 4.4 prompt assembly injects it so later turns carry bounded context."""
+        path = self._root / "summary.md"
         return path.read_text() if path.is_file() else None
 
     def read_directive(self) -> str | None:

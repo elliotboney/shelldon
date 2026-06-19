@@ -51,7 +51,14 @@ SYSTEM_INSTRUCTION = (
     # parse->route->write->dedup mechanism is what 6.1 tests.
     "You MAY also privately jot a recurring observation worth remembering later with a "
     '`capture_learning` op (give a short `pattern_key` to dedup repeats), e.g. '
-    '{"type":"capture_learning","observation":"owner codes late at night","pattern_key":"night-owl"}.'
+    '{"type":"capture_learning","observation":"owner codes late at night","pattern_key":"night-owl"}.\n'
+    # Story 6.2: when DREAMING you review your pending learnings (each shown with an id) and
+    # decide their fate — promote the durable ones into memory (remember/rewrite_about) and
+    # mark them resolved, prune the rest, and keep a short running summary. Op formats below;
+    # real-model uptake is unverifiable here (no live LLM) — the apply mechanism is tested.
+    "When reflecting, you MAY resolve a reviewed learning with "
+    '{"type":"resolve_learning","id":3,"status":"promoted"} (or "pruned"), and rewrite your '
+    'running conversation summary with {"type":"rewrite_summary","content":"…"}.'
 )
 
 #: Bare word tokens for a SAFE FTS5 query — raw owner text (quotes, parens, `*`, or
@@ -74,13 +81,16 @@ def assemble_prompt(
     *,
     directive=None,
     about=None,
+    summary=None,
     recent=(),
     recall=(),
     system=SYSTEM_INSTRUCTION,
 ) -> str:
     """PURE compose in the binding AD-6 order. `recent`/`recall` are iterables of
     `(role, content)`. A None/empty section is OMITTED entirely (no empty headers);
-    the current `owner_message` is always last."""
+    the current `owner_message` is always last. `summary` (Story 6.2) is the dream's running
+    conversation summary — broad bounded context placed after `about` and before the raw
+    recent window."""
     parts: list[str] = []
     if system:
         parts.append(system)
@@ -88,6 +98,8 @@ def assemble_prompt(
         parts.append(f"# Owner directive (authoritative)\n{directive.strip()}")
     if about and about.strip():
         parts.append(f"# About you\n{about.strip()}")
+    if summary and summary.strip():
+        parts.append(f"# Conversation so far\n{summary.strip()}")
     recent_lines = [f"{role}: {content}" for role, content in recent]
     if recent_lines:
         parts.append("# Recent conversation\n" + "\n".join(recent_lines))
@@ -113,14 +125,16 @@ def gather_context(
     memory_root = DEFAULT_MEMORY_ROOT if memory_root is None else memory_root
     history_path = DEFAULT_HISTORY_PATH if history_path is None else history_path
 
-    directive = about = None
+    directive = about = summary = None
     try:
         mem = CuratedMemory(memory_root)
         directive = mem.read_directive()
         about = mem.read_about()
+        summary = mem.read_summary()  # Story 6.2: the dream's running summary (may be None)
     except (OSError, UnicodeError) as exc:
-        # UnicodeError (a corrupt non-UTF-8 about.md/DIRECTIVE.md) is a ValueError, NOT
-        # an OSError — catch it too so a decode error degrades, never raises (AC3).
+        # UnicodeError (a corrupt non-UTF-8 about.md/DIRECTIVE.md/summary.md) subclasses
+        # ValueError, not OSError — so it must be listed explicitly here, or a decode error
+        # would escape this handler and raise instead of degrading (AC3).
         log.warning("memory read failed during assembly (%s); degrading", exc)
 
     recent_rows: list = []
@@ -152,6 +166,7 @@ def gather_context(
     return {
         "directive": directive,
         "about": about,
+        "summary": summary,
         "recent": [(row["role"], row["content"]) for row in recent_rows],
         "recall": [(row["role"], row["content"]) for row in recall_rows],
     }

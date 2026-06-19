@@ -30,6 +30,7 @@ from shelldon.contracts import (
     AddFace,
     CaptureLearning,
     Envelope,
+    ResolveLearning,
     MsgKind,
     OutboundMessage,
     Region,
@@ -115,6 +116,19 @@ DEFAULT_PROACTIVE_IDLE_INTERVAL = 3600.0
 #: marker preserves continuity (the next turn knows it reached out) without that pollution.
 PROACTIVE_OWNER_MARKER = "(shelldon spoke up on its own)"
 
+#: Default owner-idle threshold (seconds) before the dream cycle runs (Story 6.2; owner
+#: decision = ~6 hr). The dream is an Idle-cadence turn job like the proactive one, but
+#: heavier (`cost=3`) and only when there are pending learnings to consolidate. Injectable.
+DEFAULT_DREAM_IDLE_INTERVAL = 21600.0
+
+#: Budget weight of one dream turn (Story 6.2 / 5.2 decision 3 — "a dream counts as several
+#: pings"). A dream spends 3 of the daily turn budget (default 12).
+DREAM_COST = 3
+
+#: Recorded as the owner-side of a dream turn's history row (Story 6.2) — the dream is
+#: self-initiated (no owner message), so its directive is not stored as if the owner typed it.
+DREAM_OWNER_MARKER = "(shelldon dreamed)"
+
 #: Cap on the memory-ops one turn may propose (Story 4.5). A runaway/abusive reply
 #: can't flood the curated tree; the overflow is dropped with a warning (never silently
 #: truncated). Generous — a normal turn proposes a handful.
@@ -141,6 +155,7 @@ class Core:
         low_scale: float = DEFAULT_LOW_SCALE,
         low_charge_threshold: float = DEFAULT_LOW_CHARGE_THRESHOLD,
         proactive_idle_interval: float = DEFAULT_PROACTIVE_IDLE_INTERVAL,
+        dream_idle_interval: float = DEFAULT_DREAM_IDLE_INTERVAL,
         power=None,
         faces_path=None,
         history_path=None,
@@ -154,6 +169,8 @@ class Core:
             raise ValueError(f"scheduler_interval must be positive, got {scheduler_interval!r}")
         if proactive_idle_interval <= 0:
             raise ValueError(f"proactive_idle_interval must be positive, got {proactive_idle_interval!r}")
+        if dream_idle_interval <= 0:
+            raise ValueError(f"dream_idle_interval must be positive, got {dream_idle_interval!r}")
         self.bus = BusServer(socket_path=socket_path)
         self.fence = TurnFence()
         self.arbiter = Arbiter()
@@ -164,6 +181,7 @@ class Core:
         self.reflex_interval = reflex_interval
         self.scheduler_interval = scheduler_interval
         self.proactive_idle_interval = proactive_idle_interval
+        self.dream_idle_interval = dream_idle_interval
         #: Personality state lives in RAM for the process lifetime, restored from the
         #: last checkpoint (defaults cleanly on first run — AC1).
         self.state = PersistentState.load(self.checkpoint_path)
@@ -243,6 +261,26 @@ class Core:
                 CostTier.TURN,
                 prompt_builder=self._build_proactive_prompt,
                 history_owner_text=PROACTIVE_OWNER_MARKER,
+            )
+        )
+        #: The dream cycle (Story 6.2, AD-15/CAP-11) — a proactive-turn VARIANT: an Idle turn
+        #: job (longer 6h cadence), heavier `cost=3`, that reviews the pending learnings 6.1
+        #: captured and proposes promotions/prunes + a running summary. Its prompt is BUILT at
+        #: dispatch from the pending learnings (empty → the 5.4 skip path fires, no dream when
+        #: nothing's pending). Two Idle turn jobs now coexist (proactive 1h, dream 6h): each
+        #: fires once per idle stretch on its own period; a cold start while already >6h idle
+        #: could make both due in one tick → the arbiter admits one and defers the other. The
+        #: deferred job's `last_run` still advances this tick, so it does NOT retry in the same
+        #: stretch — it waits for a fresh owner interaction + another idle stretch. Acceptable
+        #: (a rare cold-start case); no cross-job coordination.
+        self.scheduler.register(
+            Job(
+                "dream",
+                Idle(self.dream_idle_interval),
+                CostTier.TURN,
+                prompt_builder=self._build_dream_prompt,
+                history_owner_text=DREAM_OWNER_MARKER,
+                cost=DREAM_COST,
             )
         )
 
@@ -494,6 +532,36 @@ class Core:
         feeling = self.faces.select(m.mood.valence, m.mood.arousal, m.energy)
         return build_proactive_prompt(feeling)
 
+    def _build_dream_prompt(self) -> str:
+        """Build the dream turn's directive from the pending learnings (Story 6.2) — the dream
+        Job's `prompt_builder`, resolved at dispatch. Reads the pending learnings (core owns the
+        store) and bakes them, each tagged by `id`, into a directive telling the LLM to keep the
+        durable/recurring ones and let the rest go, plus refresh a short running summary. Returns
+        "" when nothing is pending → the dispatch skips (no dream, no spend — the 5.4 empty-prompt
+        guard). Pure-ish: a sqlite read, no await (atomic in the admit section)."""
+        pending = self.history.pending_learnings()
+        if not pending:
+            return ""  # nothing to consolidate -> skip the dream (no spend)
+        # Flatten newlines in an observation so each learning stays ONE baked line (a multi-line
+        # observation would otherwise scramble the id<->text association in the directive).
+        lines = "\n".join(
+            f"- [id={row['id']}] {' '.join(row['observation'].split())} (seen {row['recurrence_count']}×)"
+            for row in pending
+        )
+        # Promotion targets `rewrite_about` only — it is the doc the 4.4 assembly injects into
+        # later turns, so a promoted learning actually shapes future replies (CAP-11). `facts/`
+        # is durable but NOT yet surfaced; reinstate it here when 4.4 injects `facts/`.
+        return (
+            "(Dream-time reflection: no owner message to reply to. Below are things you've "
+            "noticed and jotted down. Decide which are durable enough to keep: for each one "
+            "worth remembering, fold it into who you are and what you know with a `rewrite_about` "
+            'op AND mark it resolved with `resolve_learning` status "promoted"; for the rest, mark '
+            'them `resolve_learning` status "pruned". Then refresh a short running summary of '
+            "recent conversation with `rewrite_summary` so your memory stays compact. Finally, "
+            "reply with a brief note that you tidied up.)\n\n"
+            f"# Pending learnings\n{lines}"
+        )
+
     async def _run_checkpoint_job(self) -> None:
         """The periodic checkpoint flush (Story 3.1, NFR7) as a reflex-tier job — the
         seam the 3.1 comment said Epic 5's scheduler subsumes. Flushes only if dirty
@@ -558,7 +626,11 @@ class Core:
             # — a blank prompt must never reach the worker.
             built = (built or "").strip()
             if not built:
-                log.warning("turn job %r prompt builder returned nothing; skipping", job.name)
+                # An empty builder return is an INTENTIONAL skip signal (the dream builder
+                # returns "" when no learnings are pending — the common 6h case), NOT a misconfig.
+                # debug-level so a normal skip doesn't spam prod every cadence. (A static
+                # promptless turn job below stays warning — that IS a misconfiguration.)
+                log.debug("turn job %r prompt builder returned nothing; skipping this cadence", job.name)
                 return None
             return built
         if job.prompt is None:
@@ -636,6 +708,10 @@ class Core:
                     # The learnings op (Story 6.1) goes to the sqlite learnings table, NOT the
                     # markdown tree — raw capture, deduped by pattern_key, no extra LLM call.
                     self.history.capture_learning(op.observation, op.pattern_key, datetime.now(UTC))
+                elif isinstance(op, ResolveLearning):
+                    # The dream's learning-resolution (Story 6.2) — a soft sqlite status
+                    # transition (promoted/pruned); a stale/unknown id is a safe no-op.
+                    self.history.resolve_learning(op.id, op.status)
                 else:
                     self.apply_memory_op(op)
             except Exception as exc:
