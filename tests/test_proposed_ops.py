@@ -17,7 +17,9 @@ from shelldon.contracts import (
     LogEpisode,
     MsgKind,
     Remember,
+    ResolveLearning,
     RewriteAbout,
+    RewriteSummary,
     Result,
 )
 from shelldon.core.runtime import MAX_PROPOSED_OPS, Core
@@ -315,6 +317,94 @@ async def test_core_mixed_batch_routes_capture_and_memory_op(sock_path, tmp_path
     assert (tmp_path / "memory" / "facts" / "db.md").read_text() == "BigQuery"
     assert core.fence.is_idle
     core.history.close()
+
+
+# --- Story 6.2: the dream's ops route + CAP-11 (a promoted learning reaches a later prompt) ---
+
+
+def test_parse_reply_decodes_dream_ops_no_worker_change():
+    """resolve_learning + rewrite_summary ride the union decoder — no worker.py change."""
+    reply = (
+        "Tidied up. 💤\n"
+        "```ops\n"
+        '[{"type":"resolve_learning","id":4,"status":"pruned"},'
+        '{"type":"rewrite_summary","content":"owner shipped Epic 6"}]\n'
+        "```"
+    )
+    payload, ops = parse_reply(reply)
+    assert payload == "Tidied up. 💤"
+    assert [type(o) for o in ops] == [ResolveLearning, RewriteSummary]
+    assert ops[0].id == 4 and ops[0].status == "pruned"
+
+
+async def test_dream_result_routes_each_op_to_its_writer(sock_path, tmp_path):
+    """A synthetic dream Result: a promotion (remember -> facts/) + resolve_learning(promoted)
+    + resolve_learning(pruned) + rewrite_summary -> each reaches its own writer."""
+    core = _core(sock_path, tmp_path)
+    # seed two pending learnings
+    core.history.capture_learning("owner loves BigQuery", "loves-bq", _now())
+    core.history.capture_learning("a stray idea", "stray", _now())
+    keep_id = _lid(core, "loves-bq")
+    drop_id = _lid(core, "stray")
+
+    _open_turn(core, "D1")
+    ops = [
+        Remember(collection="facts", name="bigquery", content="owner loves BigQuery"),
+        ResolveLearning(id=keep_id, status="promoted"),
+        ResolveLearning(id=drop_id, status="pruned"),
+        RewriteSummary(content="owner is a BigQuery power user"),
+    ]
+    await core._handle_result(_result_env("D1", ops))
+
+    assert (tmp_path / "memory" / "facts" / "bigquery.md").read_text() == "owner loves BigQuery"
+    assert (tmp_path / "memory" / "summary.md").read_text() == "owner is a BigQuery power user"
+    statuses = dict(core.history._conn.execute("SELECT pattern_key, status FROM learnings").fetchall())
+    assert statuses == {"loves-bq": "promoted", "stray": "pruned"}
+    assert core.history.pending_learnings() == []  # both resolved
+    assert core.fence.is_idle
+    core.history.close()
+
+
+async def test_dream_invalid_resolve_id_skipped_turn_survives(sock_path, tmp_path):
+    core = _core(sock_path, tmp_path)
+    _open_turn(core, "D2")
+    await core._handle_result(_result_env("D2", [ResolveLearning(id=999, status="pruned")]))
+    assert core.fence.is_idle  # stale id was a safe no-op
+    core.history.close()
+
+
+async def test_cap11_promoted_learning_reaches_a_later_prompt(sock_path, tmp_path):
+    """CAP-11 (AC2): a learning the dream promotes into a SURFACED doc (about.md, injected by
+    4.4) reaches a later turn's assembled prompt — proven via the real build_prompt over the
+    same store. (facts/ is durable but not yet injected by 4.4 — surfacing it is a noted
+    follow-on; the dream uses rewrite_about/summary for things that should shape replies.)"""
+    from shelldon.worker.prompt import build_prompt
+
+    core = _core(sock_path, tmp_path)
+    core.history.capture_learning("owner's dog is named Pixel", "dog-name", _now())
+    lid = _lid(core, "dog-name")
+    _open_turn(core, "D3")
+    # the dream promotes it into about.md (a surfaced doc) + marks the learning promoted
+    await core._handle_result(_result_env("D3", [
+        RewriteAbout(content="I am shelldon. I know the owner's dog is named Pixel."),
+        ResolveLearning(id=lid, status="promoted"),
+    ]))
+    core.history.close()
+
+    # a later turn assembles its prompt from the SAME memory root -> the promoted fact appears
+    prompt = build_prompt("what's my dog called?", memory_root=tmp_path / "memory", history_path=tmp_path / "nohist.db")
+    assert "Pixel" in prompt  # the promoted learning shapes the later turn's context
+
+
+def _now():
+    from datetime import UTC, datetime
+    return datetime(2026, 6, 19, 12, 0, tzinfo=UTC)
+
+
+def _lid(core, key):
+    return core.history._conn.execute(
+        "SELECT id FROM learnings WHERE pattern_key = ?", (key,)
+    ).fetchone()["id"]
 
 
 async def test_core_failure_result_skips_ops(sock_path, tmp_path):

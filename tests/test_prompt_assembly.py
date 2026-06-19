@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 
 from shelldon.core.history import HistoryStore
 from shelldon.core.memory import CuratedMemory
-from shelldon.contracts import RewriteAbout
+from shelldon.contracts import RewriteAbout, RewriteSummary
 from shelldon.worker.prompt import (
     SYSTEM_INSTRUCTION,
     _fts_query,
@@ -52,6 +52,42 @@ def test_missing_sections_are_omitted_not_blank():
 def test_blank_directive_about_omitted():
     out = assemble_prompt("hi", directive="   ", about="\n")
     assert "# Owner directive" not in out and "# About you" not in out
+
+
+# --- Story 6.2: the dream's running summary is injected (after about, before recent) ---
+
+
+def test_summary_injected_after_about_before_recent():
+    out = assemble_prompt(
+        "now?",
+        about="i am shelldon",
+        summary="owner migrating to BigQuery",
+        recent=[("owner", "earlier hi")],
+    )
+    i_about = out.index("i am shelldon")
+    i_summary = out.index("owner migrating to BigQuery")
+    i_recent = out.index("earlier hi")
+    assert i_about < i_summary < i_recent
+    assert "# Conversation so far" in out
+
+
+def test_missing_summary_omitted_not_blank():
+    out = assemble_prompt("hi", about="me", summary=None)
+    assert "# Conversation so far" not in out
+    out2 = assemble_prompt("hi", summary="   ")  # blank -> omitted
+    assert "# Conversation so far" not in out2
+
+
+def test_gather_context_includes_summary(tmp_path):
+    """gather_context reads summary.md and returns it for assembly; missing -> None (no raise)."""
+    from shelldon.core.memory import CuratedMemory
+
+    CuratedMemory(tmp_path / "memory").apply_memory_op(RewriteSummary(content="a running summary"))
+    ctx = gather_context(memory_root=tmp_path / "memory", history_path=tmp_path / "h.db", owner_message="hi")
+    assert ctx["summary"] == "a running summary"
+    # no summary file -> None, never raises
+    ctx2 = gather_context(memory_root=tmp_path / "empty", history_path=tmp_path / "h2.db", owner_message="hi")
+    assert ctx2["summary"] is None
 
 
 # --- _fts_query safety ---

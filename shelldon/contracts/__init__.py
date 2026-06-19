@@ -82,10 +82,20 @@ class LogEpisode(msgspec.Struct, frozen=True, tag="log_episode", forbid_unknown_
     tags: tuple[str, ...] = ()
 
 
+class RewriteSummary(msgspec.Struct, frozen=True, tag="rewrite_summary", forbid_unknown_fields=True):
+    """Replace the bot-owned running conversation summary `summary.md` (Story 6.2, AD-15).
+
+    The dream cycle proposes it to keep context bounded — a short running summary core writes
+    to the curated tree and the 4.4 prompt assembly injects into later turns. A curated-markdown
+    op (mirrors `RewriteAbout`), so it routes through `apply_memory_op`."""
+
+    content: str
+
+
 #: The closed memory-op union — the curated-memory ops core applies via
-#: `CuratedMemory.apply_memory_op`. `capture_learning` (AD-6) is a SEPARATE op — it
-#: writes sqlite, not the markdown tree — so it is NOT in this union.
-MemoryOp = Remember | RewriteAbout | LogEpisode
+#: `CuratedMemory.apply_memory_op`. `capture_learning`/`resolve_learning` (AD-6) are SEPARATE
+#: ops — they write sqlite, not the markdown tree — so they are NOT in this union.
+MemoryOp = Remember | RewriteAbout | LogEpisode | RewriteSummary
 
 
 class CaptureLearning(msgspec.Struct, frozen=True, tag="capture_learning", forbid_unknown_fields=True):
@@ -117,11 +127,24 @@ class AddFace(msgspec.Struct, frozen=True, tag="add_face", forbid_unknown_fields
     replace: bool = False
 
 
-#: The closed set of ALL ops a worker may propose on `Result.proposed_ops` (Story 4.5):
-#: the curated-memory ops + the face op (Story 3.4) + the learnings capture op (Story 6.1).
-#: Core dispatches each to its single writer — `apply_memory_op` for memory-ops,
-#: `apply_add_face` for the face op, `history.capture_learning` for the learnings op.
-ProposedOp = MemoryOp | AddFace | CaptureLearning
+class ResolveLearning(msgspec.Struct, frozen=True, tag="resolve_learning", forbid_unknown_fields=True):
+    """Mark a `pending` learning resolved (Story 6.2, AD-15). The dream cycle proposes this to
+    transition a learning core baked into the dream prompt by its `id`: `promoted` (its durable
+    knowledge was written to markdown via `remember`/`rewrite_about`) or `pruned` (let go). A
+    SQLITE op (like `CaptureLearning`) — core applies a SOFT status transition (never a DELETE),
+    so a re-recurring pruned learning resets to `pending` (Story 6.1). NOT a `MemoryOp`. An
+    unknown/already-resolved `id` is a no-op (core validates by the row state)."""
+
+    id: int
+    status: Literal["promoted", "pruned"]
+
+
+#: The closed set of ALL ops a worker may propose on `Result.proposed_ops` (Story 4.5): the
+#: curated-memory ops + the face op (Story 3.4) + the learnings capture (6.1) + the dream's
+#: learning-resolution (6.2). Core dispatches each to its single writer — `apply_memory_op`
+#: for memory-ops, `apply_add_face` for the face op, `history.capture_learning` /
+#: `history.resolve_learning` for the sqlite learnings ops.
+ProposedOp = MemoryOp | AddFace | CaptureLearning | ResolveLearning
 
 
 class Job(msgspec.Struct, frozen=True, tag="job", forbid_unknown_fields=True):
@@ -294,8 +317,10 @@ __all__ = [
     "Remember",
     "RewriteAbout",
     "LogEpisode",
+    "RewriteSummary",
     "MemoryOp",
     "CaptureLearning",
+    "ResolveLearning",
     "AddFace",
     "ProposedOp",
     "Envelope",
