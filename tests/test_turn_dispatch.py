@@ -399,3 +399,43 @@ async def test_budget_survives_a_restart(sock_path, tmp_path):
         assert spawner2.spawns == []  # cap was loaded from disk — the restart did NOT reset it
     finally:
         await _teardown(core2)
+
+
+# --- Story 7.0 review hardening: the admit section must not leak the arbiter slot ---
+
+
+async def test_slot_released_when_recording_the_spend_fails(sock_path, tmp_path):
+    """Review #1: the arbiter slot is reserved by submit() BEFORE the spend is recorded. If
+    apply_patch raises (e.g. a disk error), nothing downstream releases the slot — _start_turn
+    is never reached — so it would leak forever and coalesce every later turn into a wedged
+    slot. The dispatch must reset the slot before propagating the error."""
+    spawner = _RecordingSpawner()
+    core = Core(sock_path, spawner, checkpoint_path=tmp_path / "state.json")
+
+    def _boom(_patch):
+        raise RuntimeError("disk full")
+
+    core.state.apply_patch = _boom  # break the spend write (same instance the dispatcher holds)
+    try:
+        with pytest.raises(RuntimeError, match="disk full"):
+            await core._dispatch_turn_job(_turn_job(prompt="ping"))
+        assert core.arbiter.worker_in_flight is False  # slot RELEASED, not wedged
+        assert spawner.spawns == []                     # the turn never started
+    finally:
+        await _teardown(core)
+
+
+async def test_non_str_builder_return_skips_not_crashes(sock_path, tmp_path):
+    """Review #2: a prompt_builder that returns a non-str truthy value (a misconfigured
+    builder yielding a list/int) must SKIP the cadence — caught and logged — not raise an
+    unguarded AttributeError from .strip() that propagates and wedges the dispatch."""
+    spawner = _RecordingSpawner()
+    core = Core(sock_path, spawner, checkpoint_path=tmp_path / "state.json")
+    bad = Job("dream", Interval(10.0), CostTier.TURN, prompt_builder=lambda: [1, 2])
+    try:
+        await core._dispatch_turn_job(bad)  # must NOT raise
+        assert spawner.spawns == []                     # skipped — no turn
+        assert core.arbiter.worker_in_flight is False   # slot untouched (never reserved)
+        assert core.state.state.budget.turns_used == 0  # no spend
+    finally:
+        await _teardown(core)

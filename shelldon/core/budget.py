@@ -5,7 +5,7 @@ single gate for turns; this module is the pure POLICY half of the turn-job gate 
 applies to scheduler-proposed turns: a **daily turn-COUNT budget** (cap total self-driven
 spend) and a **minimum-interval cooldown** (stop a proactive stampede), both of which must
 pass to admit. The driver (apply the patch + admit through the arbiter + spawn) lives in
-`core/runtime.py` — same policy/driver split as `core/reflexes.py`.
+`core/dispatch.py` — same policy/driver split as `core/reflexes.py`.
 
 Two owner decisions are baked in: the daily count resets on the owner's **LOCAL** calendar
 day (not UTC), and a job carries a **cost weight** so a heavier turn (a future dream turn)
