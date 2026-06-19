@@ -133,12 +133,13 @@ async def test_reflex_tick_mutates_state_offline(sock_path, tmp_path):
     """The tick drifts RAM state with a spawner that raises if touched — proving the
     reflex path never calls the brain/broker (works network-down)."""
     core = Core(
-        sock_path, _RaisingSpawner(), checkpoint_path=tmp_path / "state.json", reflex_interval=0.01
+        sock_path, _RaisingSpawner(), checkpoint_path=tmp_path / "state.json",
+        reflex_interval=0.01, scheduler_interval=0.01,
     )
     core.state.apply_patch({"mood.valence": 0.9, "last_interaction": _ANCIENT})
     before = core.state.state.mood.valence
 
-    task = asyncio.create_task(core._reflex_loop())
+    task = asyncio.create_task(core._scheduler_loop())
     try:
         await await_true(lambda: core.state.state.mood.valence < before)
     finally:
@@ -150,13 +151,14 @@ async def test_reflex_tick_marks_dirty_for_the_311_flush(sock_path, tmp_path):
     """A reflex write marks the struct dirty — the seam the 3.1 checkpoint loop flushes
     (3.2 adds no new disk write)."""
     core = Core(
-        sock_path, _RaisingSpawner(), checkpoint_path=tmp_path / "state.json", reflex_interval=0.01
+        sock_path, _RaisingSpawner(), checkpoint_path=tmp_path / "state.json",
+        reflex_interval=0.01, scheduler_interval=0.01,
     )
     core.state.apply_patch({"mood.valence": 0.9, "last_interaction": _ANCIENT})
     core.state.checkpoint(core.checkpoint_path)  # clear dirty
     assert core.state.dirty is False
 
-    task = asyncio.create_task(core._reflex_loop())
+    task = asyncio.create_task(core._scheduler_loop())
     try:
         await await_true(lambda: core.state.dirty is True)
     finally:
@@ -165,9 +167,11 @@ async def test_reflex_tick_marks_dirty_for_the_311_flush(sock_path, tmp_path):
 
 
 async def test_reflex_loop_survives_an_error(sock_path, tmp_path, monkeypatch):
-    """One bad tick must not permanently kill reflexes (3.1 review precedent)."""
+    """One bad tick must not permanently kill reflexes (3.1 review precedent). The
+    scheduler's per-job guard keeps ticking past a raising reflex job (AC2)."""
     core = Core(
-        sock_path, _RaisingSpawner(), checkpoint_path=tmp_path / "state.json", reflex_interval=0.01
+        sock_path, _RaisingSpawner(), checkpoint_path=tmp_path / "state.json",
+        reflex_interval=0.01, scheduler_interval=0.01,
     )
     core.state.apply_patch({"mood.valence": 0.9, "last_interaction": _ANCIENT})
 
@@ -182,7 +186,7 @@ async def test_reflex_loop_survives_an_error(sock_path, tmp_path, monkeypatch):
 
     monkeypatch.setattr(core.state, "apply_patch", flaky)
 
-    task = asyncio.create_task(core._reflex_loop())
+    task = asyncio.create_task(core._scheduler_loop())
     try:
         await await_true(lambda: calls["n"] >= 2)  # kept ticking past the error
     finally:
@@ -195,6 +199,15 @@ def test_nonpositive_reflex_interval_rejected(sock_path):
         Core(sock_path, DummySpawner(), reflex_interval=0)
     with pytest.raises(ValueError):
         Core(sock_path, DummySpawner(), reflex_interval=-1.0)
+
+
+def test_nonpositive_scheduler_interval_rejected(sock_path):
+    """A zero/negative base cadence would busy-spin asyncio.sleep(0) and starve the
+    scheduler loop (mirrors the reflex/checkpoint interval guards)."""
+    with pytest.raises(ValueError):
+        Core(sock_path, DummySpawner(), scheduler_interval=0)
+    with pytest.raises(ValueError):
+        Core(sock_path, DummySpawner(), scheduler_interval=-1.0)
 
 
 # --- AC2: turn-path last_interaction write + single-writer coexistence ---

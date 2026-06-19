@@ -199,9 +199,14 @@ async def build_harness(sock_path, *, provider=None, spawns, turn_timeout=5.0, c
 
     fs = ForkServer(sock_path, spawn=spawns.spawn, reap=spawns.reap, manage_gc=False)
     await fs.preload()
-    # reflex_interval is parked far out: these tests count lifecycle face pushes
-    # (_seq), and a mood-face push from the reflex tick (Story 3.3) would perturb that.
-    core = Core(sock_path, fs, turn_timeout=turn_timeout, reflex_interval=3600)
+    # The scheduler is parked far out: these tests count lifecycle face pushes (_seq),
+    # and a mood-face push from the reflex job (Story 3.3/5.1) would perturb that. Parking
+    # `scheduler_interval` makes the resident scheduler task sleep past the test window so
+    # NO job fires (the background-emitter rule — see test_endurance_soak); reflex_interval
+    # is parked too so any future fast tick still wouldn't drift the mood face.
+    core = Core(
+        sock_path, fs, turn_timeout=turn_timeout, reflex_interval=3600, scheduler_interval=3600
+    )
 
     source = _Source()
     outbound: list[str] = []
@@ -245,6 +250,26 @@ async def test_ac1_full_turn_round_trip(sock_path):
         # (c) exactly one worker was spawned, never two concurrent
         assert spawns.count == 1
         assert spawns.max_live == 1
+    finally:
+        await h.teardown()
+
+
+# --- Story 5.1 AC3: incoming messages bypass the scheduler (immediate, not gated) ---
+
+
+async def test_inbound_message_bypasses_a_parked_scheduler(sock_path):
+    """AD-14: 'Incoming messages/events bypass the scheduler entirely.' build_harness
+    parks the scheduler at 3600s, so its loop won't tick for an hour. A turn that still
+    completes within the normal poll window proves the inbox consumer is a PARALLEL path,
+    not gated behind a scheduler tick — the scheduler is a sibling driver, not a queue in
+    front of `core_inbox`."""
+    spawns = Spawns()
+    h = await build_harness(sock_path, provider=OkProvider(), spawns=spawns)
+    try:
+        assert h.core.scheduler_interval == 3600  # the scheduler is parked an hour out
+        h.source.feed("urgent")
+        await _await(lambda: h.outbound == ["reply to: urgent"])  # handled at once, not after a tick
+        assert spawns.count == 1
     finally:
         await h.teardown()
 
