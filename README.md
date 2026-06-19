@@ -66,9 +66,9 @@ A few decisions that shape everything:
 
 ## Status
 
-🟢 **Core pet feature-complete — Epics 1–6 done, verified against a live LLM.** Only Epic 7 (optional extensibility/embodiment) remains.
+🟢 **Core pet feature-complete — Epics 1–6 done, verified against a live LLM.** Epic 7 (optional extensibility/embodiment) in progress: turn-dispatch extraction complete (7-0), plugin host + generalized plugin contract shipped as story 7-1 (CAP-7 mechanically proven).
 
-28 stories shipped, **458 tests passing** (plus opt-in live-provider smokes), zero external runtime deps beyond the LLM SDKs, the LLM-free-core import contract held throughout. The whole loop is real and proven end-to-end against a real model (GLM-4.7 via Z.ai): message in → memory-shaped prompt → LLM reply out → expressive face reacts; the pet drifts, remembers, reaches out on its own within budget, and consolidates what it learns.
+30 stories shipped, **480 tests passing** (plus opt-in live-provider smokes), zero external runtime deps beyond the LLM SDKs, the LLM-free-core import contract held throughout. The whole loop is real and proven end-to-end against a real model (GLM-4.7 via Z.ai): message in → memory-shaped prompt → LLM reply out → expressive face reacts; the pet drifts, remembers, reaches out on its own within budget, and consolidates what it learns.
 
 - **Epic 1 — Talking Pet** ✅ the full walking skeleton end-to-end; an endurance soak proved flat memory over sustained turns.
 - **Epic 2 — Resilient Brain** ✅ an ordered provider chain with automatic fallback, degrading gracefully to reflex-only when the whole chain fails.

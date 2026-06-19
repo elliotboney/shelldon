@@ -199,6 +199,18 @@ All five items are pre-existing issues in `faces.py` or `worker/worker.py` — n
 - **`Daily` cadence no clock-jump guard** [`scheduler.py:92-95`] — NTP backward correction suppresses the daily job for up to 24h silently. Revisit if clock reliability becomes an issue (not on a Pi).
 - **`_cleanup()` does not await `_scheduler_task` cancellation** [`runtime.py:464-470`] — same pattern as the old `_reflex_task`/`_checkpoint_task`; a job that swallows `CancelledError` could zombie on shutdown. Revisit if clean shutdown becomes a requirement.
 
+## Deferred from: code review of 7-1-plugin-host-and-the-generalized-plugin-contract (2026-06-19)
+- **`_idle` sentinel bypasses `validate_claims`** — `LoadedPlugins` doesn't include the idle placeholder; inconsistent with the struct the spec defines as the canonical registry. Zero impact in 7.1 (no subscriptions); revisit when Story 7.2 builds on `loaded.subscriptions`.
+- **`LoadedPlugins` lacks `__eq__`/`__repr__`** — plain class vs the `msgspec.Struct` style used everywhere else; awkward to test or debug the load result directly. Add if a 7.2+ test needs equality comparison.
+- **`emits` field on `PluginManifest` declared but never consumed** — intentional in 7.1. Emit registry / conflict checking is a future story concern; add when it becomes needed.
+- **Tests access `srv._registry` (private `BusServer` attribute)** — pre-existing pattern across all bus-client lifecycle tests. Trigger: `BusServer` restructures or exposes a public "is actor connected?" API.
+- **`connect()` in `run_plugin_host` has no retry/timeout** — consistent with transport/display bus-client adapter pattern. Trigger: hub startup ordering becomes a production pain.
+- **`BasePlugin.run` doesn't catch `OSError`/`asyncio.IncompleteReadError` from `read_frame`** — consistent with transport/display frame-loop pattern. Trigger: `read_frame` starts surfacing `OSError` explicitly.
+- **Multiple `done` tasks: second exception silently discarded** — pre-existing `asyncio.wait(FIRST_COMPLETED)` teardown pattern. Trigger: multi-plugin simultaneous failure is observable in 7.3+.
+- **`pkgutil.iter_modules` discovery order is filesystem-dependent** — test name assertions control insertion order today. Trigger: 7.3+ real plugins expose ordering sensitivity in conflict messages.
+- **`_plugin_host_proc` doesn't pass `dict(os.environ)` to child unlike `_broker_proc`** — env is inherited on spawn; no plugins in 7.1 need explicit env. Trigger: 7.4 hardware plugin requires a credential not inherited.
+- **`package.__path__` is None for namespace packages — silently discovers nothing** — theoretical; shelldon.plugins is a regular package. Trigger: plugins are ever installed as namespace packages.
+
 ## Deferred from: code review of 7-0-extract-turn-dispatch-from-runtime (2026-06-19)
 - **`.strip()` outside try/except in `resolve_job_prompt`** [`dispatch.py:117`] — truthy non-str return from a `prompt_builder` (e.g. `list`, `int`) hits `.strip()` outside the guard → unhandled `AttributeError`. Pre-existing from `runtime.py:605`; fix if future prompt builders return structured types.
 - **`apply_patch` raises after `arbiter.submit` reserves slot → wedged arbiter** [`dispatch.py:102`] — no rollback if `state.apply_patch` raises after the slot is reserved; slot stays occupied until turn timeout. Pre-existing from `runtime.py:587-590`; also tracked in 5-3 defers. Revisit if async state writes are ever introduced.

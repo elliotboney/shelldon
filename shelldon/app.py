@@ -29,6 +29,7 @@ from shelldon.core.runtime import Core
 from shelldon.core.vault import ensure_vault
 from shelldon.display.renderer import StubRenderer
 from shelldon.display.service import run_display
+from shelldon.plugins.host import run_plugin_host
 from shelldon.transport.cli import run_cli_transport
 from shelldon.worker.forkserver import ForkServer
 
@@ -103,6 +104,7 @@ async def launch_in_process(core, socket_path, chain, renderer, inbound, outboun
         asyncio.create_task(run_broker(socket_path, chain)),
         asyncio.create_task(run_display(socket_path, renderer)),
         asyncio.create_task(run_cli_transport(socket_path, inbound=inbound, outbound=outbound)),
+        asyncio.create_task(run_plugin_host(socket_path)),  # Story 7.1 — empty set, idles
     ]
     try:
         await asyncio.gather(*tasks)
@@ -125,6 +127,10 @@ def _transport_proc(socket_path) -> None:  # pragma: no cover - runs in a child 
     asyncio.run(run_cli_transport(socket_path))  # stdin/stdout defaults
 
 
+def _plugin_host_proc(socket_path) -> None:  # pragma: no cover - runs in a child process
+    asyncio.run(run_plugin_host(socket_path))  # Story 7.1 — loads plugins/ (empty in 7.1)
+
+
 async def launch_multiprocess(core, socket_path, chain, renderer, inbound, outbound) -> None:  # pragma: no cover - real multi-process launch is exercised on Linux/Pi
     """Production launcher (AC3): core (+ bus + fork-server) in this service process,
     broker/display/transport as real OS processes. Real two-uid isolation only bites
@@ -141,6 +147,7 @@ async def launch_multiprocess(core, socket_path, chain, renderer, inbound, outbo
         ctx.Process(target=_broker_proc, args=(socket_path, dict(os.environ)), name="shelldon-broker"),
         ctx.Process(target=_display_proc, args=(socket_path,), name="shelldon-display"),
         ctx.Process(target=_transport_proc, args=(socket_path,), name="shelldon-transport"),
+        ctx.Process(target=_plugin_host_proc, args=(socket_path,), name="shelldon-plugin-host"),
     ]
     for child in children:
         child.start()

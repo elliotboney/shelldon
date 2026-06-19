@@ -72,3 +72,24 @@ forbidden_modules = [
     "ollama",
     "shelldon.broker",
 ]
+
+# AD-8/CAP-7: a plugin is a bus client speaking only the Envelope contract — it never
+# imports core's domain and holds no model/tool creds (it is not the brain). Proven
+# mechanically: shelldon.plugins imports no provider SDK and nothing from shelldon.core
+# EXCEPT the shared bus client (shelldon.core.bus) — the same seam transport/display use.
+[[tool.importlinter.contracts]]
+name = "plugins never import core (AD-8/CAP-7)"
+type = "forbidden"
+source_modules = ["shelldon.plugins"]
+forbidden_modules = [
+    "openai",
+    "anthropic",
+    "google",
+    "litellm",
+    "zhipuai",
+    "ollama",
+    "shelldon.core",
+]
+ignore_imports = [
+    "shelldon.plugins.* -> shelldon.core.bus",
+]
