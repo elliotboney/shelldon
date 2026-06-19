@@ -160,6 +160,11 @@ All five items are pre-existing issues in `faces.py` or `worker/worker.py` — n
 - **`Daily` cadence uses UTC-day; budget uses local-day** [`shelldon/core/scheduler.py:104`] — Pre-existing from Story 5.1. `Daily.is_due` compares `.date()` on tz-aware UTC datetimes (UTC calendar day) while `BudgetGate._local_date` uses `now.astimezone().date()` (owner local day). For UTC-offset owners these predicates can diverge: a daily job could fire twice in one owner-local day (UTC day flip before local day does) or the budget reset day could disagree with the cadence's fire day. Low impact until a real daily turn job is registered in 5.4+.
 - **DEFER vs SKIP paths not distinguished by log assertion in integration tests** [`tests/test_turn_dispatch.py`] — Both `test_defers_within_the_cooldown` and `test_skips_when_daily_budget_exhausted` end with identical assertions (`spawns == []`, slot/budget unchanged); the paths are separated only by setup, not by asserting distinct log output. Minor test expressiveness gap; not a functional bug.
 
+## Deferred from: code review of 5-4-proactive-action (2026-06-18)
+
+- **TURN job with neither `prompt` nor `prompt_builder` not rejected at construction** [`shelldon/core/scheduler.py:Job.__init__`] — silently skips every tick with a WARNING log; graceful skip is the designed behavior (AD-14 guard path). Add a `ValueError` at registration time to fail fast. Trigger: when a second TURN job type is added (Epic 6 dream job) and misconfiguration risk increases.
+- **`power` param lacks type annotation on `Core.__init__` and `Scheduler.__init__`** — `Callable[[], PowerState] | None` is the correct type; passing a bare `PowerState` value crashes deep in `tick`. Matches existing unannotated-param convention. Add annotation when type coverage is systematically improved, or when a new `power` caller is written (Epic 7 PiSugar2 plugin).
+
 ## Deferred from: code review of 5-3-battery-aware-backoff (2026-06-18)
 
 - **Budget rollover clock-skew** [`shelldon/core/budget.py:77-100`] — `evaluate` and `admission_patch` take `now` at different call sites; a midnight-crossing admission could double-count or miss. Extremely rare for a solo pet.

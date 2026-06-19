@@ -20,6 +20,12 @@
 - [ ] Input/range guards present (empty, whitespace-only, `lo == hi`, oversized).
 - [ ] Path/Unicode safety: human-facing names Unicode-preserving + path-traversal rejected; internal keys ASCII-only (4.2 `_safe_filename`, 4.3 vault keys).
 
+### The recurring input-edge class (Epic 5 retro — these reached review EVERY story)
+- [ ] **datetime:** a parsed timestamp is **tz-aware** before any subtraction (a tz-naive `fromisoformat` value parses fine then `TypeError`s downstream — 5.2/5.4); a **future** stamp doesn't wedge a cooldown/idle forever (5.2).
+- [ ] **strings:** a built/returned string is `.strip()`-checked, not just truthy — `"   "` is truthy but blank (5.4 `prompt_builder`).
+- [ ] **numbers:** numeric config rejects `NaN` and out-of-band via `not (x > 0)` / `not (x >= 1)` (NaN slips a bare `<=` — 5.1/5.3); cross-invariants (`cost >= 1`, `low_scale >= eased_scale`) checked at construction.
+- [ ] **external reads:** any read a future plugin/hardware path could make raise (power, sensor) is guarded and **defaults safe** — it often runs before per-job guards, so an escape kills the resident task (5.3 power read → LIVELY).
+
 ## Isolation (same change!)
 - [ ] Any new core **file-write default path** is redirected in the conftest autouse fixture **in this same change** — never discovered in verify (Epic 3 action #3; held all of Epic 4 — keep it).
 
