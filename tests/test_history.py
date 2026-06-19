@@ -120,6 +120,129 @@ def test_schema_allows_nonbreaking_user_id_add(tmp_path):
     s.close()
 
 
+# --- Story 6.1: the learnings table (capture on the hot path, AD-6) ---
+
+LATER = datetime(2026, 6, 18, 12, 0, tzinfo=UTC)
+
+
+def _learnings(s):
+    return s._conn.execute(
+        "SELECT pattern_key, observation, recurrence_count, status, first_seen, last_seen "
+        "FROM learnings ORDER BY id"
+    ).fetchall()
+
+
+def test_capture_learning_inserts_a_pending_row(tmp_path):
+    s = HistoryStore.open(tmp_path / "h.db")
+    s.capture_learning("owner prefers BigQuery", "prefers-bigquery", NOW)
+    rows = _learnings(s)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["pattern_key"] == "prefers-bigquery"
+    assert r["observation"] == "owner prefers BigQuery"
+    assert r["recurrence_count"] == 1
+    assert r["status"] == "pending"
+    assert r["first_seen"] == NOW.isoformat() == r["last_seen"]
+    s.close()
+
+
+def test_capture_learning_dedups_by_pattern_key_and_increments(tmp_path):
+    s = HistoryStore.open(tmp_path / "h.db")
+    s.capture_learning("seen it", "k", NOW)
+    s.capture_learning("seen it again", "k", LATER)
+    rows = _learnings(s)
+    assert len(rows) == 1                              # deduped, not duplicated
+    assert rows[0]["recurrence_count"] == 2
+    assert rows[0]["last_seen"] == LATER.isoformat()   # refreshed
+    assert rows[0]["first_seen"] == NOW.isoformat()    # original first_seen kept
+    s.close()
+
+
+def test_recurrence_resets_status_to_pending(tmp_path):
+    """AD-6: a re-captured learning refreshes to status='pending' — so one the dream already
+    promoted/pruned but that keeps recurring re-enters the queue."""
+    s = HistoryStore.open(tmp_path / "h.db")
+    s.capture_learning("obs", "k", NOW)
+    with s._conn:
+        s._conn.execute("UPDATE learnings SET status='promoted' WHERE pattern_key='k'")
+    s.capture_learning("obs", "k", LATER)
+    row = _learnings(s)[0]
+    assert row["status"] == "pending"        # reset
+    assert row["recurrence_count"] == 2
+    s.close()
+
+
+def test_none_pattern_key_always_inserts(tmp_path):
+    s = HistoryStore.open(tmp_path / "h.db")
+    s.capture_learning("same text", None, NOW)
+    s.capture_learning("same text", None, NOW)
+    assert len(_learnings(s)) == 2  # no dedup key -> two rows
+    s.close()
+
+
+def test_blank_pattern_key_normalizes_to_none(tmp_path):
+    """A blank/whitespace pattern_key must NOT become a dedup bucket — treat it as None."""
+    s = HistoryStore.open(tmp_path / "h.db")
+    s.capture_learning("x", "  ", NOW)
+    s.capture_learning("y", "", NOW)
+    rows = _learnings(s)
+    assert len(rows) == 2
+    assert all(r["pattern_key"] is None for r in rows)
+    s.close()
+
+
+def test_empty_observation_is_skipped_not_written(tmp_path):
+    s = HistoryStore.open(tmp_path / "h.db")
+    s.capture_learning("   \n ", "k", NOW)  # whitespace-only
+    s.capture_learning("", None, NOW)
+    assert _learnings(s) == []
+    s.close()
+
+
+def test_dedup_is_db_enforced_atomic_upsert(tmp_path):
+    """6.1-review TOCTOU fix: dedup is a UNIQUE partial index + atomic UPSERT, not a
+    SELECT-then-UPDATE. A raw duplicate INSERT of the same non-NULL pattern_key is rejected
+    at the DB layer — so a second writer (6.2's dream) can't create a duplicate row. NULL
+    keys stay exempt (multiple allowed)."""
+    s = HistoryStore.open(tmp_path / "h.db")
+    s.capture_learning("o", "k", NOW)
+    with pytest.raises(sqlite3.IntegrityError):  # the unique partial index forbids a second 'k'
+        with s._conn:
+            s._conn.execute(
+                "INSERT INTO learnings (pattern_key, observation, first_seen, last_seen) "
+                "VALUES ('k', 'dup', ?, ?)",
+                (NOW.isoformat(), NOW.isoformat()),
+            )
+    # NULL keys are exempt from the uniqueness — two raw NULL inserts both succeed.
+    with s._conn:
+        s._conn.execute(
+            "INSERT INTO learnings (pattern_key, observation, first_seen, last_seen) "
+            "VALUES (NULL, 'a', ?, ?)", (NOW.isoformat(), NOW.isoformat()))
+        s._conn.execute(
+            "INSERT INTO learnings (pattern_key, observation, first_seen, last_seen) "
+            "VALUES (NULL, 'b', ?, ?)", (NOW.isoformat(), NOW.isoformat()))
+    assert s._conn.execute("SELECT COUNT(*) FROM learnings WHERE pattern_key IS NULL").fetchone()[0] == 2
+    s.close()
+
+
+def test_status_check_constraint_rejects_unknown_status(tmp_path):
+    s = HistoryStore.open(tmp_path / "h.db")
+    s.capture_learning("o", "k", NOW)
+    with pytest.raises(sqlite3.IntegrityError):
+        with s._conn:
+            s._conn.execute("UPDATE learnings SET status='bogus' WHERE pattern_key='k'")
+    s.close()
+
+
+def test_readonly_reader_has_no_learnings_write(tmp_path):
+    """The worker's read-only handle exposes no learnings writer (6.2 adds the read path)."""
+    db = tmp_path / "h.db"
+    HistoryStore.open(db).close()
+    r = open_readonly(db)
+    assert not hasattr(r, "capture_learning")
+    r.close()
+
+
 # --- AC1 (core integration): a completed turn is recorded ---
 
 

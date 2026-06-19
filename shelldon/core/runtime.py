@@ -28,6 +28,7 @@ from uuid import uuid4
 from shelldon.contracts import (
     Actor,
     AddFace,
+    CaptureLearning,
     Envelope,
     MsgKind,
     OutboundMessage,
@@ -631,6 +632,10 @@ class Core:
                         token=op.token,
                         replace=op.replace,
                     )
+                elif isinstance(op, CaptureLearning):
+                    # The learnings op (Story 6.1) goes to the sqlite learnings table, NOT the
+                    # markdown tree — raw capture, deduped by pattern_key, no extra LLM call.
+                    self.history.capture_learning(op.observation, op.pattern_key, datetime.now(UTC))
                 else:
                     self.apply_memory_op(op)
             except Exception as exc:

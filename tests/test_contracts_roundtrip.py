@@ -13,6 +13,7 @@ from shelldon.contracts import (
     SCHEMA_VERSION,
     Actor,
     AddFace,
+    CaptureLearning,
     Completion,
     Envelope,
     InboundMessage,
@@ -171,6 +172,23 @@ def test_add_face_op_round_trips_in_proposed_ops():
     decoded = decode(encode(env))
     op = decoded.body.proposed_ops[0]
     assert type(op) is AddFace and op.name == "proud" and op.replace is False
+    assert decoded.v == SCHEMA_VERSION
+
+
+def test_capture_learning_op_round_trips_in_proposed_ops():
+    """Story 6.1: the learnings op rides the same closed proposed_ops union and decodes back
+    to CaptureLearning by tag (no SCHEMA_VERSION bump for the widened union — AD-13)."""
+    env = Envelope(
+        id="r", kind=MsgKind.RESULT, src=Actor.WORKER, dst=Actor.CORE,
+        body=Result(ok=True, proposed_ops=[
+            CaptureLearning(observation="owner codes late", pattern_key="night-owl"),
+        ]),
+        turn_id="t",
+    )
+    decoded = decode(encode(env))
+    op = decoded.body.proposed_ops[0]
+    assert type(op) is CaptureLearning and op.observation == "owner codes late"
+    assert op.pattern_key == "night-owl"
     assert decoded.v == SCHEMA_VERSION
 
 

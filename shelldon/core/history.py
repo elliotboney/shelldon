@@ -40,6 +40,26 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts
 CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
     INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
 END;
+
+-- Story 6.1: the learnings table (AD-6) — the raw, queryable capture buffer the dream
+-- cycle (6.2) later classifies/promotes/prunes. `pattern_key` is the dedup identity
+-- (nullable: an anonymous observation never dedups). `status` lifecycle is
+-- pending -> promoted | pruned; 6.1 only ever writes/refreshes `pending`.
+CREATE TABLE IF NOT EXISTS learnings (
+    id               INTEGER PRIMARY KEY,
+    pattern_key      TEXT,
+    observation      TEXT NOT NULL,
+    recurrence_count INTEGER NOT NULL DEFAULT 1,
+    status           TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'promoted', 'pruned')),
+    first_seen       TEXT NOT NULL,
+    last_seen        TEXT NOT NULL
+);
+-- UNIQUE PARTIAL index: a non-NULL pattern_key is unique (so dedup is enforced by the DB,
+-- not a non-atomic SELECT-then-UPDATE), while NULL keys are exempt — anonymous learnings
+-- always insert. This index is the conflict target for capture_learning's atomic UPSERT
+-- (closes the 6.1-review TOCTOU: a second writer (the 6.2 dream) can't duplicate or lose a
+-- row between a check and a write).
+CREATE UNIQUE INDEX IF NOT EXISTS learnings_pattern_key_uq ON learnings(pattern_key) WHERE pattern_key IS NOT NULL;
 """
 
 
@@ -134,6 +154,35 @@ class HistoryStore:
             self._conn.execute(
                 "INSERT INTO messages (turn_id, role, content, ts) VALUES (?, 'pet', ?, ?)",
                 (turn_id, pet_text, ts),
+            )
+
+    def capture_learning(self, observation: str, pattern_key: str | None, now: datetime) -> None:
+        """Record (or fold into an existing) a hot-path learning (Story 6.1, AD-6) — single
+        writer, one commit, ONE atomic statement. Dedup is by `pattern_key` ONLY: a matching
+        key increments `recurrence_count`, refreshes `last_seen`, and resets `status='pending'`
+        (so a recurring-but-already-promoted/pruned learning re-enters the dream queue). A
+        `None` (or blank) `pattern_key` always inserts a fresh row. An empty/whitespace
+        `observation` is skipped (a useless row) — logged, never written, never raised.
+
+        The insert-or-increment is an atomic UPSERT against the unique partial index — not a
+        SELECT-then-UPDATE — so a second writer (the 6.2 dream cycle) can neither duplicate a
+        row nor lose one in a check-to-write gap (6.1-review TOCTOU fix)."""
+        obs = (observation or "").strip()
+        if not obs:
+            log.warning("capture_learning: empty observation; skipping")
+            return
+        key = (pattern_key or "").strip() or None  # blank key -> None (no blank dedup bucket)
+        ts = now.isoformat()
+        with self._conn:  # one commit (AD-6 batched)
+            # A NULL key is exempt from the partial unique index, so it never conflicts (always
+            # inserts); a non-NULL key conflicts on a repeat and folds via DO UPDATE. Atomic.
+            self._conn.execute(
+                "INSERT INTO learnings (pattern_key, observation, recurrence_count, status, "
+                "first_seen, last_seen) VALUES (?, ?, 1, 'pending', ?, ?) "
+                "ON CONFLICT(pattern_key) WHERE pattern_key IS NOT NULL DO UPDATE SET "
+                "recurrence_count = recurrence_count + 1, last_seen = excluded.last_seen, "
+                "status = 'pending'",
+                (key, obs, ts, ts),
             )
 
     def recent(self, n: int = 20) -> list[sqlite3.Row]:
