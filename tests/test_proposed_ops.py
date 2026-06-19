@@ -396,6 +396,25 @@ async def test_cap11_promoted_learning_reaches_a_later_prompt(sock_path, tmp_pat
     assert "Pixel" in prompt  # the promoted learning shapes the later turn's context
 
 
+async def test_cap11_via_facts_now_surfaces(sock_path, tmp_path):
+    """Epic 6 retro #2: a promotion to facts/ (not just about.md) now reaches a later prompt —
+    the previously-discovered gap is closed. Proves the dream can meaningfully promote to facts."""
+    from shelldon.worker.prompt import build_prompt
+
+    core = _core(sock_path, tmp_path)
+    core.history.capture_learning("owner's favorite db is BigQuery", "fav-db", _now())
+    lid = _lid(core, "fav-db")
+    _open_turn(core, "F11")
+    await core._handle_result(_result_env("F11", [
+        Remember(collection="facts", name="favorite-db", content="The owner's favorite database is BigQuery."),
+        ResolveLearning(id=lid, status="promoted"),
+    ]))
+    core.history.close()
+
+    prompt = build_prompt("what db do I like?", memory_root=tmp_path / "memory", history_path=tmp_path / "no.db")
+    assert "BigQuery" in prompt and "# What you know" in prompt  # facts/ now injected
+
+
 def _now():
     from datetime import UTC, datetime
     return datetime(2026, 6, 19, 12, 0, tzinfo=UTC)

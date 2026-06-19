@@ -548,17 +548,18 @@ class Core:
             f"- [id={row['id']}] {' '.join(row['observation'].split())} (seen {row['recurrence_count']}×)"
             for row in pending
         )
-        # Promotion targets `rewrite_about` only — it is the doc the 4.4 assembly injects into
-        # later turns, so a promoted learning actually shapes future replies (CAP-11). `facts/`
-        # is durable but NOT yet surfaced; reinstate it here when 4.4 injects `facts/`.
+        # Promotion targets are now both surfaced by the 4.4 assembly (Epic 6 retro): a specific
+        # fact about the owner -> `remember` into facts/; broad self-knowledge -> `rewrite_about`.
+        # Both reach later prompts, so a promoted learning actually shapes future replies (CAP-11).
         return (
             "(Dream-time reflection: no owner message to reply to. Below are things you've "
             "noticed and jotted down. Decide which are durable enough to keep: for each one "
-            "worth remembering, fold it into who you are and what you know with a `rewrite_about` "
-            'op AND mark it resolved with `resolve_learning` status "promoted"; for the rest, mark '
-            'them `resolve_learning` status "pruned". Then refresh a short running summary of '
-            "recent conversation with `rewrite_summary` so your memory stays compact. Finally, "
-            "reply with a brief note that you tidied up.)\n\n"
+            "worth remembering, save it — a specific fact about the owner with a `remember` op "
+            "(collection facts), or broader self-knowledge with `rewrite_about` — AND mark it "
+            'resolved with `resolve_learning` status "promoted"; for the rest, mark them '
+            '`resolve_learning` status "pruned". Then refresh a short running summary of recent '
+            "conversation with `rewrite_summary` so your memory stays compact. Finally, reply "
+            "with a brief note that you tidied up.)\n\n"
             f"# Pending learnings\n{lines}"
         )
 
