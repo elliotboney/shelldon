@@ -156,6 +156,22 @@ class CuratedMemory:
         path = self._root / "summary.md"
         return path.read_text() if path.is_file() else None
 
+    def read_collection(self, collection: str) -> list[tuple[str, str]]:
+        """The `(name, content)` pairs of a curated collection (`facts`/`people`), sorted by
+        name — the accessor the prompt assembly injects so a promoted fact reaches later turns
+        (Epic 6 retro: close the `facts/` surfacing gap). Closed to `facts`/`people` so it can
+        never read `vault/` or `DIRECTIVE.md`. A missing dir → `[]`; an unreadable file is
+        skipped (fail-soft, never raises)."""
+        if collection not in _COLLECTIONS:
+            raise ValueError(f"read_collection: {collection!r} not in {_COLLECTIONS}")
+        out: list[tuple[str, str]] = []
+        for path in sorted((self._root / collection).glob("*.md")):
+            try:
+                out.append((path.stem, path.read_text()))
+            except (OSError, UnicodeError) as exc:
+                log.warning("skipping unreadable %s (%s)", path, exc)
+        return out
+
     def read_directive(self) -> str | None:
         """The owner's authoritative `DIRECTIVE.md`, or `None` if absent (AC3). Read-only
         — there is no write path to this file anywhere in this module (disjoint writers,

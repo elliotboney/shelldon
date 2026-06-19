@@ -41,6 +41,25 @@ def test_read_summary_none_before_written(tmp_path):
     assert _mem(tmp_path).read_summary() is None
 
 
+# --- facts/ + people/ surfacing (Epic 6 retro action #2: 4.4 extension) ---
+
+
+def test_read_collection_returns_name_content_sorted(tmp_path):
+    mem = _mem(tmp_path)
+    mem.apply_memory_op(Remember(collection="facts", name="zebra", content="stripey"))
+    mem.apply_memory_op(Remember(collection="facts", name="apple", content="red"))
+    assert mem.read_collection("facts") == [("apple", "red"), ("zebra", "stripey")]  # sorted by name
+
+
+def test_read_collection_missing_dir_is_empty(tmp_path):
+    assert _mem(tmp_path).read_collection("facts") == []  # never written -> [], no raise
+
+
+def test_read_collection_rejects_unknown_collection(tmp_path):
+    with pytest.raises(ValueError):
+        _mem(tmp_path).read_collection("secrets")  # closed to facts/people (never vault/DIRECTIVE)
+
+
 def test_rewrite_summary_overwrites(tmp_path):
     mem = _mem(tmp_path)
     mem.apply_memory_op(RewriteSummary(content="first"))

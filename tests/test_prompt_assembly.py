@@ -78,6 +78,45 @@ def test_missing_summary_omitted_not_blank():
     assert "# Conversation so far" not in out2
 
 
+# --- Epic 6 retro action #2: facts/ + people/ surfaced into the prompt ---
+
+
+def test_knowledge_injected_after_about_before_summary():
+    out = assemble_prompt(
+        "now?",
+        about="i am shelldon",
+        knowledge=[("favorite-db", "BigQuery"), ("Alex", "owner friend")],
+        summary="a summary",
+    )
+    i_about = out.index("i am shelldon")
+    i_know = out.index("# What you know")
+    i_summary = out.index("a summary")
+    assert i_about < i_know < i_summary
+    assert "favorite-db: BigQuery" in out and "Alex: owner friend" in out
+
+
+def test_empty_knowledge_omitted():
+    out = assemble_prompt("hi", about="me", knowledge=())
+    assert "# What you know" not in out
+
+
+def test_gather_context_surfaces_facts_and_people(tmp_path):
+    """gather_context reads facts/ + people/ so a promoted fact reaches the prompt (closes the
+    6.2-discovered gap — facts/ was durable but never injected)."""
+    from shelldon.core.memory import CuratedMemory
+    from shelldon.contracts import Remember
+
+    mem = CuratedMemory(tmp_path / "memory")
+    mem.apply_memory_op(Remember(collection="facts", name="dog", content="named Pixel"))
+    mem.apply_memory_op(Remember(collection="people", name="Alex", content="owner friend"))
+    ctx = gather_context(memory_root=tmp_path / "memory", history_path=tmp_path / "h.db", owner_message="hi")
+    flat = dict(ctx["knowledge"])
+    # names become casefolded filename stems (_safe_filename): "Alex" -> "alex"
+    assert flat["dog"] == "named Pixel" and flat["alex"] == "owner friend"
+    # missing tree -> empty, no raise
+    assert gather_context(memory_root=tmp_path / "none", history_path=tmp_path / "h2.db", owner_message="hi")["knowledge"] == []
+
+
 def test_gather_context_includes_summary(tmp_path):
     """gather_context reads summary.md and returns it for assembly; missing -> None (no raise)."""
     from shelldon.core.memory import CuratedMemory

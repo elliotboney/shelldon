@@ -29,6 +29,11 @@ log = logging.getLogger("shelldon.worker.prompt")
 RECENT_TURNS = 10
 RECALL_LIMIT = 5
 
+#: Char budget for the surfaced curated knowledge (facts/+people/, Epic 6 retro). The dream
+#: prunes the set so it stays small, but cap defensively — overflow facts are dropped with a
+#: logged count (never silently truncated), newest-by-name kept within budget.
+KNOWLEDGE_CHAR_BUDGET = 4000
+
 #: Cap the FTS5 query term count so a pathologically long message can't build a giant
 #: MATCH expression.
 _MAX_QUERY_TERMS = 32
@@ -81,6 +86,7 @@ def assemble_prompt(
     *,
     directive=None,
     about=None,
+    knowledge=(),
     summary=None,
     recent=(),
     recall=(),
@@ -88,9 +94,9 @@ def assemble_prompt(
 ) -> str:
     """PURE compose in the binding AD-6 order. `recent`/`recall` are iterables of
     `(role, content)`. A None/empty section is OMITTED entirely (no empty headers);
-    the current `owner_message` is always last. `summary` (Story 6.2) is the dream's running
-    conversation summary — broad bounded context placed after `about` and before the raw
-    recent window."""
+    the current `owner_message` is always last. `knowledge` (Epic 6 retro) is the curated
+    `facts/`+`people/` the dream promotes — durable knowledge placed right after `about`, so a
+    promoted fact actually shapes later replies. `summary` (Story 6.2) is the running summary."""
     parts: list[str] = []
     if system:
         parts.append(system)
@@ -98,6 +104,9 @@ def assemble_prompt(
         parts.append(f"# Owner directive (authoritative)\n{directive.strip()}")
     if about and about.strip():
         parts.append(f"# About you\n{about.strip()}")
+    know_lines = [f"- {name}: {content.strip()}" for name, content in knowledge if content.strip()]
+    if know_lines:
+        parts.append("# What you know\n" + "\n".join(know_lines))
     if summary and summary.strip():
         parts.append(f"# Conversation so far\n{summary.strip()}")
     recent_lines = [f"{role}: {content}" for role, content in recent]
@@ -126,11 +135,15 @@ def gather_context(
     history_path = DEFAULT_HISTORY_PATH if history_path is None else history_path
 
     directive = about = summary = None
+    knowledge: list[tuple[str, str]] = []
     try:
         mem = CuratedMemory(memory_root)
         directive = mem.read_directive()
         about = mem.read_about()
         summary = mem.read_summary()  # Story 6.2: the dream's running summary (may be None)
+        # Epic 6 retro: surface the curated facts/+people/ the dream promotes, so a promoted
+        # fact actually shapes later replies (it was durable-but-invisible before). Bounded.
+        knowledge = _bounded_knowledge(mem.read_collection("facts") + mem.read_collection("people"))
     except (OSError, UnicodeError) as exc:
         # UnicodeError (a corrupt non-UTF-8 about.md/DIRECTIVE.md/summary.md) subclasses
         # ValueError, not OSError — so it must be listed explicitly here, or a decode error
@@ -166,10 +179,25 @@ def gather_context(
     return {
         "directive": directive,
         "about": about,
+        "knowledge": knowledge,
         "summary": summary,
         "recent": [(row["role"], row["content"]) for row in recent_rows],
         "recall": [(row["role"], row["content"]) for row in recall_rows],
     }
+
+
+def _bounded_knowledge(items: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Cap the surfaced knowledge at `KNOWLEDGE_CHAR_BUDGET` chars — keep entries until the
+    budget is hit, drop the rest with a logged count (no silent truncation)."""
+    kept: list[tuple[str, str]] = []
+    used = 0
+    for name, content in items:
+        used += len(name) + len(content)
+        if used > KNOWLEDGE_CHAR_BUDGET:
+            log.warning("knowledge over %d chars; dropping %d entr(ies)", KNOWLEDGE_CHAR_BUDGET, len(items) - len(kept))
+            break
+        kept.append((name, content))
+    return kept
 
 
 def build_prompt(owner_message, *, memory_root=None, history_path=None) -> str:
