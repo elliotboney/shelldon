@@ -228,9 +228,13 @@ def test_core_flush_writes_only_when_dirty(sock_path, tmp_path):
 
 async def test_checkpoint_loop_survives_a_disk_error(sock_path, tmp_path, monkeypatch):
     """A transient disk error in one flush must NOT permanently kill periodic
-    checkpointing — the loop logs and retries on the next tick (state stays dirty)."""
+    checkpointing — the scheduler logs and retries the checkpoint job on the next tick
+    (state stays dirty). The checkpoint flush is now a reflex-tier scheduler job (5.1)."""
     target = tmp_path / "state.json"
-    core = Core(sock_path, DummySpawner(), checkpoint_path=target, checkpoint_interval=0.01)
+    core = Core(
+        sock_path, DummySpawner(), checkpoint_path=target,
+        checkpoint_interval=0.01, scheduler_interval=0.01,
+    )
     core.state.apply_patch({"energy": 0.3})
 
     real = core.state.checkpoint
@@ -244,7 +248,7 @@ async def test_checkpoint_loop_survives_a_disk_error(sock_path, tmp_path, monkey
 
     monkeypatch.setattr(core.state, "checkpoint", flaky)
 
-    task = asyncio.create_task(core._checkpoint_loop())
+    task = asyncio.create_task(core._scheduler_loop())
     try:
         await await_true(lambda: target.exists())  # written despite the first error
         assert calls["n"] >= 2

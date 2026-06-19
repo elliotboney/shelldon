@@ -154,3 +154,9 @@ All five items are pre-existing issues in `faces.py` or `worker/worker.py` — n
 
 ## Deferred from: code review of 5-0-resilience-hardening-prep (2026-06-18)
 - **`test_fork_oserror_becomes_runtime_error` patches `os.fork` globally** [`tests/test_resilience.py:233`] — works correctly now; fragile only if import style in forkserver.py changes from `os.fork()` to `from os import fork`. Revisit if that import style changes.
+
+## Deferred from: code review of 5-1-core-scheduler-with-named-multi-cadence-jobs (2026-06-18)
+- **`Idle` cadence never fires until 5.4 wires `last_interaction`** [`runtime.py:366-369`] — `_scheduler_loop` hardcodes `last_interaction=None`; any Idle job registered before 5.4 updates the call silently never fires. Story 5.4 must parse `state.state.last_interaction` to a `datetime` and pass it to `scheduler.tick()`.
+- **`Cadence` base class uses `NotImplementedError` not `abc.ABC`** [`scheduler.py:44`] — a subclass that forgets `is_due()` only fails at runtime. Change to `abc.ABC` + `@abstractmethod` when adding future cadence types.
+- **`Daily` cadence no clock-jump guard** [`scheduler.py:92-95`] — NTP backward correction suppresses the daily job for up to 24h silently. Revisit if clock reliability becomes an issue (not on a Pi).
+- **`_cleanup()` does not await `_scheduler_task` cancellation** [`runtime.py:464-470`] — same pattern as the old `_reflex_task`/`_checkpoint_task`; a job that swallows `CancelledError` could zombie on shutdown. Revisit if clean shutdown becomes a requirement.

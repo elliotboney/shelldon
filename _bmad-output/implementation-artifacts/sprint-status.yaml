@@ -31,7 +31,7 @@
 # - Daily-driver line = Epics 1-4 + story 1-9 (soak); Epics 5-7 are enrichment
 
 generated: 2026-06-16 10:47:47 CDT
-last_updated: 2026-06-18 CDT  # Story 5.0 review findings addressed (structural AC1 fix + 8 patches; 320 pass), awaiting approval
+last_updated: 2026-06-18 CDT  # Story 5.0 done + committed; Story 5.1 created (ready-for-dev)
 project: shelldon
 project_key: NOKEY
 tracking_system: file-system
@@ -78,7 +78,7 @@ development_status:
   # --- Epic 5: Autonomous Life ---
   epic-5: in-progress  # 2026-06-18: Story 5.0 created (first story of epic)
   5-0-resilience-hardening-prep: done  # dev complete 2026-06-18: coherent timeout chain W<R<T kills the ~90s wedge; ≤1-slot always releases; bounded reap+SIGKILL; fork/child/preload hardening. Review findings addressed (structural AC1 fix: reap awaited before arbiter release, no divergence window; +8 patches). +13 tests (test_resilience.py), suite 320 pass/3 skip, contracts KEPT. GATES 5.1. Absorbs the now-unowned resilience debt — 4.5 worker-completion timeout align/inject (_COMPLETION_TIMEOUT_S vs core degrade), outbound write_frame timeout (worker→core), 120/90/30s asymmetry + worker_in_flight freeze, Epic 2 #3 arbiter/fork resilience (os.fork OSError, waitpid timeout/SIGKILL, child FD closerange, Arbiter.try_begin lock). Its OWN story so it can't be skipped under feature pressure.
-  5-1-core-scheduler-with-named-multi-cadence-jobs: backlog
+  5-1-core-scheduler-with-named-multi-cadence-jobs: done  # created 2026-06-18; done 2026-06-18: named-job scheduler (interval/daily/idle cadence + reflex/turn cost tier, AD-14); reflex+checkpoint folded into reflex jobs, _reflex_loop/_checkpoint_loop deleted, one parkable _scheduler_task; events bypass (AC3); background-emitter rule written into soak (closes soak-background-emitter-doc icebox). Review: 5 patches fixed (tick guard, NaN/tz-aware cadence rejection, +tests), 4 defers accepted. +22 tests, suite 342 pass/soak 2 pass, contracts KEPT. Turn-job dispatch = 5.2 seam (nothing forks on a cadence).
   5-2-cost-tier-gating-and-credit-budget: backlog
   5-3-battery-aware-backoff: backlog
   5-4-proactive-action: backlog
@@ -109,7 +109,7 @@ icebox:
 
   # --- Iceboxed from Epic 4 retro (2026-06-18): standalone chores that slipped in Epic 3 because they had no story slot ---
   panel-emulator-render-spike: deferred  # prove ONE render path (real Waveshare V4 or omni-epd emulator) for the 6 faces. Carried from Epic 2 #5 / Epic 3 action #1. Trigger: hardware bring-up. Faces are token-only verified today.
-  soak-background-emitter-doc: deferred  # document in test_endurance_soak.py that any new core background emitter must park its interval or _seq/_bg invariants break. Epic 3 action #4. Trigger: next core background emitter added (Epic 5 scheduler).
+  soak-background-emitter-doc: done  # CLOSED by Story 5.1 (2026-06-18): the background-emitter rule is now written into test_endurance_soak.py's module docstring; the scheduler is parked in both soak constructions.
   await-true-timeout-diagnostics: deferred  # dump registry/turn state on await_true timeout (bare AssertionError today). Epic 2 #1 leftover / Epic 3 action #7. Trigger: CI debugging pain.
   test-hygiene-burndown: deferred  # Epic 2 #4 + 4.x deferred-work: _Collector dup across test_broker_service*.py, hardcoded retry-count asserts, _no_broker_backoff docstring overstatement. Trigger: next broker-test change.
   atomic-write-helper-extract: deferred  # temp→fsync→os.replace idiom triplicated across core/faces.py, core/state.py, core/memory.py. Trigger: a 4th writer is added — extract to one core util then.

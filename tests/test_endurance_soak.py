@@ -14,6 +14,25 @@ Two complementary proofs (see the story's "why two tests"):
    is truly observable. Skipped on macOS exactly like tests/test_forkserver_fork.py.
 
 Drive an extended soak with e.g. `SHELLDON_SOAK_TURNS=5000 uv run pytest -m soak`.
+
+THE BACKGROUND-EMITTER RULE (binding — Story 5.1 / Epic 3 retro #4)
+==================================================================
+This soak's accounting is EXACT, so any core background task that emits a face push
+or schedules a tracked task will break it. Two invariants are at stake:
+
+  * `core._seq == 2 * SOAK_TURNS` — exactly two face pushes per turn (thinking +
+    reply). A between-turn mood-face push from the reflex job would add to `_seq`.
+  * `len(core._bg) == 0` drains — `_bg` holds only transient per-turn reap tasks. A
+    permanent resident (a long-lived loop task) placed in `_bg` would never drain.
+
+THEREFORE any new core background emitter (today: the Story 5.1 scheduler) MUST:
+  1. live in its OWN task slot (e.g. `core._scheduler_task`), never in `_bg`; and
+  2. be PARKABLE — expose an injectable cadence so this soak can push it out of the
+     measurement window. The scheduler is parked here via `scheduler_interval=3600`
+     (its loop sleeps the interval BEFORE its first tick, so no job fires during the
+     run) AND `reflex_interval=3600`. When you add the NEXT resident emitter, park it
+     the same way in BOTH soak constructions (build_harness for the in-process test,
+     and the direct Core() below for the real-fork test) in the SAME change.
 """
 
 import asyncio
@@ -165,7 +184,8 @@ async def test_real_fork_rss_stays_flat(sock_path):
     the PARENT's RSS stays flat over a sustained run. Linux/Pi only."""
     fs = ForkServer(sock_path)  # real os.fork() + os.waitpid(); preload freezes GC
     await fs.preload()
-    core = Core(sock_path, fs, turn_timeout=10.0, reflex_interval=3600)  # no mood push during the soak
+    # Park the scheduler (see "background-emitter rule" at the top of this module).
+    core = Core(sock_path, fs, turn_timeout=10.0, reflex_interval=3600, scheduler_interval=3600)
 
     source = _Source()
     outbound: list[str] = []

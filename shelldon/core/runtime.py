@@ -41,6 +41,7 @@ from shelldon.core.faces import DEFAULT_FACES_PATH, FaceRegistry
 from shelldon.core.history import DEFAULT_HISTORY_PATH, HistoryStore
 from shelldon.core.memory import DEFAULT_MEMORY_ROOT, CuratedMemory
 from shelldon.core.reflexes import compute_reflex_patch
+from shelldon.core.scheduler import CostTier, Interval, Job, Scheduler
 from shelldon.core.state import DEFAULT_CHECKPOINT_PATH, PersistentState
 from shelldon.core.turn import TurnFence
 
@@ -71,8 +72,14 @@ DEFAULT_TURN_TIMEOUT = 30.0
 DEFAULT_CHECKPOINT_INTERVAL = 60.0
 
 #: Default resident-reflex tick cadence (Story 3.2). A gentle in-core drift between
-#: turns (no LLM) — tests inject a small interval. Epic 5's scheduler subsumes it.
+#: turns (no LLM) — tests inject a small interval. Now the reflex job's interval (5.1).
 DEFAULT_REFLEX_INTERVAL = 10.0
+
+#: Default scheduler base tick (Story 5.1). The resolution at which the scheduler
+#: re-checks job due-ness — finer than the smallest job period (reflex, 10s) so each
+#: job fires close to its own cadence. Injectable so the 1.9 soak can park the
+#: scheduler far out of its measurement window (the background-emitter rule).
+DEFAULT_SCHEDULER_INTERVAL = 1.0
 
 #: Cap on the memory-ops one turn may propose (Story 4.5). A runaway/abusive reply
 #: can't flood the curated tree; the overflow is dropped with a warning (never silently
@@ -93,6 +100,7 @@ class Core:
         checkpoint_path=None,
         checkpoint_interval: float = DEFAULT_CHECKPOINT_INTERVAL,
         reflex_interval: float = DEFAULT_REFLEX_INTERVAL,
+        scheduler_interval: float = DEFAULT_SCHEDULER_INTERVAL,
         faces_path=None,
         history_path=None,
         memory_root=None,
@@ -101,6 +109,8 @@ class Core:
             raise ValueError(f"checkpoint_interval must be positive, got {checkpoint_interval!r}")
         if reflex_interval <= 0:
             raise ValueError(f"reflex_interval must be positive, got {reflex_interval!r}")
+        if scheduler_interval <= 0:
+            raise ValueError(f"scheduler_interval must be positive, got {scheduler_interval!r}")
         self.bus = BusServer(socket_path=socket_path)
         self.fence = TurnFence()
         self.arbiter = Arbiter()
@@ -109,6 +119,7 @@ class Core:
         self.checkpoint_path = checkpoint_path if checkpoint_path is not None else DEFAULT_CHECKPOINT_PATH
         self.checkpoint_interval = checkpoint_interval
         self.reflex_interval = reflex_interval
+        self.scheduler_interval = scheduler_interval
         #: Personality state lives in RAM for the process lifetime, restored from the
         #: last checkpoint (defaults cleanly on first run — AC1).
         self.state = PersistentState.load(self.checkpoint_path)
@@ -136,13 +147,26 @@ class Core:
         #: so a turn end can AWAIT it before releasing the arbiter slot — the fork-server
         #: guard and the arbiter slot then free in lockstep, with no divergence window.
         self._reap_task: asyncio.Task | None = None
-        #: The periodic checkpoint flush AND the resident reflex tick are long-lived
-        #: SINGLETON tasks, so each lives in its own slot (like `_timeout_task`), NOT
-        #: in `_bg`. `_bg` holds transient per-turn reap tasks that drain to empty; a
-        #: permanent resident there would break that "drains to 0" invariant (1.9 soak).
-        self._checkpoint_task: asyncio.Task | None = None
-        self._reflex_task: asyncio.Task | None = None
+        #: The named-job scheduler is a long-lived SINGLETON task, so it lives in its
+        #: own slot (like `_timeout_task`), NOT in `_bg`. `_bg` holds transient per-turn
+        #: reap tasks that drain to empty; a permanent resident there would break that
+        #: "drains to 0" invariant (1.9 soak — see test_endurance_soak).
+        self._scheduler_task: asyncio.Task | None = None
         self._bg: set[asyncio.Task] = set()
+        #: The in-core scheduler (Story 5.1, AD-14) — "heartbeat is now just one job."
+        #: The Epic 3 reflex drift and the periodic checkpoint flush are wired here as
+        #: reflex-tier jobs (they moved off their standalone loops; behavior unchanged).
+        #: Built-ins are registered explicitly at composition (a general plugin API is
+        #: Epic 7). Turn-tier dispatch (cooldown + credit budget + the arbiter gate) is
+        #: Story 5.2: the scheduler's `dispatch_turn` seam is left unwired here, and no
+        #: turn job is registered, so nothing forks on a cadence (AD-14).
+        self.scheduler = Scheduler(now=lambda: datetime.now(UTC))
+        self.scheduler.register(
+            Job("reflex", Interval(self.reflex_interval), CostTier.REFLEX, self._run_reflex_job)
+        )
+        self.scheduler.register(
+            Job("checkpoint", Interval(self.checkpoint_interval), CostTier.REFLEX, self._run_checkpoint_job)
+        )
 
     async def run(self) -> None:
         """Start the bus, wait for the spawner, then consume core_inbox forever.
@@ -153,8 +177,7 @@ class Core:
         """
         await self.bus.start()
         await self.spawner.ready()
-        self._checkpoint_task = asyncio.create_task(self._checkpoint_loop())
-        self._reflex_task = asyncio.create_task(self._reflex_loop())
+        self._scheduler_task = asyncio.create_task(self._scheduler_loop())
         try:
             while True:
                 env = await self.bus.core_inbox.get()
@@ -328,26 +351,38 @@ class Core:
         self._seq += 1
         return self._seq
 
-    # --- personality-state periodic checkpoint (Story 3.1; NFR7) ---
+    # --- the scheduler loop + the reflex/checkpoint jobs (Story 5.1; AD-14) ---
 
-    async def _checkpoint_loop(self) -> None:
-        """Flush the personality state on a fixed interval, ONLY if dirty (periodic,
-        not per change). A single in-core interval task — the seam Story 3.2's reflex
-        tick and Epic 5's scheduler subsume later without changing checkpoint behavior.
-        Cancelled cleanly on teardown."""
+    async def _scheduler_loop(self) -> None:
+        """The single resident scheduler task (AC1): tick the named jobs on the base
+        cadence. ONE task in its own slot — NEVER `_bg` (a permanent resident there
+        breaks the 1.9 soak's '_bg drains to 0'); parkable via `scheduler_interval` so
+        the soak can push it out of its measurement window (the background-emitter rule,
+        see test_endurance_soak). Per-job guards live in `Scheduler.tick`. Cancelled
+        cleanly on teardown."""
         try:
             while True:
-                await asyncio.sleep(self.checkpoint_interval)
+                await asyncio.sleep(self.scheduler_interval)
                 try:
-                    self._checkpoint_if_dirty()
+                    # No idle-tier job is registered in 5.1, so `last_interaction` is
+                    # unused here; Story 5.4's idle greeting job will pass it (the signal
+                    # already lives in state.last_interaction).
+                    await self.scheduler.tick()
                 except Exception as exc:
-                    # A transient disk error must NOT permanently kill periodic
-                    # checkpointing. Log and keep going — state stays dirty, so the
-                    # next interval retries the flush. (CancelledError is a
-                    # BaseException, so teardown still propagates past this guard.)
-                    log.warning("periodic checkpoint failed (%s); retrying next interval", exc)
+                    # Scheduler.tick guards each JOB; this guards the tick scaffolding
+                    # itself (the clock read + due-set computation) so one bad tick can
+                    # NEVER kill the resident scheduler task. CancelledError is a
+                    # BaseException, so teardown still propagates past this guard.
+                    log.warning("scheduler tick failed (%s); ticking on", exc)
         except asyncio.CancelledError:
             return
+
+    async def _run_checkpoint_job(self) -> None:
+        """The periodic checkpoint flush (Story 3.1, NFR7) as a reflex-tier job — the
+        seam the 3.1 comment said Epic 5's scheduler subsumes. Flushes only if dirty
+        (periodic, not per change). The scheduler guards it: a transient disk error
+        logs and retries next tick (state stays dirty)."""
+        self._checkpoint_if_dirty()
 
     def _checkpoint_if_dirty(self) -> None:
         if self.state.dirty:
@@ -355,26 +390,15 @@ class Core:
 
     # --- resident reflexes (Story 3.2; AD-5/AD-14, CAP-2) ---
 
-    async def _reflex_loop(self) -> None:
-        """Drift the personality-state on a fixed in-core tick — no LLM, no network
-        (it touches only `self.state`). Computes a sparse patch via the pure reflex
-        policy and applies it through the single-writer `apply_patch`, skipping a
-        no-op tick. A single in-core interval task — the seam Epic 5's scheduler
-        subsumes as a cost-tier 'reflex job' without changing behavior. Cancelled
-        cleanly on teardown."""
-        try:
-            while True:
-                await asyncio.sleep(self.reflex_interval)
-                try:
-                    self._reflex_tick()
-                    await self._maybe_push_mood_face()
-                except Exception as exc:
-                    # One bad tick must NOT permanently kill reflexes — log and keep
-                    # ticking (the pet stays alive). Same hardening as the checkpoint
-                    # loop. CancelledError is a BaseException, so teardown still exits.
-                    log.warning("reflex tick failed (%s); retrying next interval", exc)
-        except asyncio.CancelledError:
-            return
+    async def _run_reflex_job(self) -> None:
+        """The Epic 3 reflex drift as a reflex-tier scheduler job (AC2) — no LLM, no
+        network (it touches only `self.state`). Computes a sparse patch via the pure
+        reflex policy, applies it through the single-writer `apply_patch` (a no-op tick
+        is skipped), then pushes the mood face between turns. Behavior is unchanged: it
+        moved off the standalone `_reflex_loop`, it did not change. The scheduler guards
+        it (one bad tick logs + keeps ticking)."""
+        self._reflex_tick()
+        await self._maybe_push_mood_face()
 
     def _reflex_tick(self) -> None:
         patch = compute_reflex_patch(self.state.state, datetime.now(UTC))
@@ -448,12 +472,9 @@ class Core:
         if self._timeout_task is not None:
             self._timeout_task.cancel()
             self._timeout_task = None
-        if self._checkpoint_task is not None:
-            self._checkpoint_task.cancel()
-            self._checkpoint_task = None
-        if self._reflex_task is not None:
-            self._reflex_task.cancel()
-            self._reflex_task = None
+        if self._scheduler_task is not None:
+            self._scheduler_task.cancel()
+            self._scheduler_task = None
         for task in list(self._bg):
             task.cancel()
         self._bg.clear()
