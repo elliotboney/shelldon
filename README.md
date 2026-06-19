@@ -15,6 +15,8 @@ shelldon is a tiny AI pet you **talk to** — a little face on a screen that tal
 - 💬 **Chats with you** — type to it, it replies with a genuine LLM brain
 - 😊 **Has a face and moods** — an expressive E-Ink face that shifts with how it feels and what's happening
 - 🧠 **Remembers you** — it builds up memory of who you are and what you've talked about
+- 🌱 **Learns over time** — jots down what matters as you talk, then in a *dream cycle* consolidates the durable bits into lasting memory and lets the rest go
+- 👋 **Acts on its own** — reaches out with a thought when you've been quiet a while, bounded by a daily budget and battery state so it never spams or overspends
 - 🫧 **Feels alive** — blinks, idles, and drifts in mood between chats, even when you're not around
 - 🪶 **Runs anywhere** — fully in your terminal (zero hardware) *or* on a palm-sized Raspberry Pi with a screen
 
@@ -64,14 +66,16 @@ A few decisions that shape everything:
 
 ## Status
 
-🟢 **Epics 1–3 complete — Epic 4 (Memory & Continuity) in progress.**
+🟢 **Core pet feature-complete — Epics 1–6 done, verified against a live LLM.** Only Epic 7 (optional extensibility/embodiment) remains.
 
-18 stories shipped, 244 tests passing. The daily-driver pet is real: a chat turn runs message in → LLM reply out → expressive face reacts, with provider-chain fallback, resident reflexes between turns, and now durable memory.
+28 stories shipped, **458 tests passing** (plus opt-in live-provider smokes), zero external runtime deps beyond the LLM SDKs, the LLM-free-core import contract held throughout. The whole loop is real and proven end-to-end against a real model (GLM-4.7 via Z.ai): message in → memory-shaped prompt → LLM reply out → expressive face reacts; the pet drifts, remembers, reaches out on its own within budget, and consolidates what it learns.
 
 - **Epic 1 — Talking Pet** ✅ the full walking skeleton end-to-end; an endurance soak proved flat memory over sustained turns.
 - **Epic 2 — Resilient Brain** ✅ an ordered provider chain with automatic fallback, degrading gracefully to reflex-only when the whole chain fails.
 - **Epic 3 — A Pet That Feels Alive** ✅ persistent personality state, a resident reflex loop (blink/idle/mood drift), and a self-modifiable expressive-face registry.
-- **Epic 4 — Memory & Continuity** *(in progress)* — sqlite conversation history (WAL/FTS5) and the curated markdown memory tree have landed, plus the worker→core write-back wire that lets the pet propose what to remember while core stays the sole writer. Remaining: injecting memory into the prompt, OS-level vault isolation, and chat-driven face self-modification.
+- **Epic 4 — Memory & Continuity** ✅ sqlite conversation history (WAL/FTS5) + a curated markdown memory tree (sole-writer core, worker proposes), an OS-isolated vault, and memory injected into every prompt so the past shapes the reply.
+- **Epic 5 — Autonomous Life** ✅ a core-resident multi-cadence scheduler, a daily credit budget + cooldown, battery-aware backoff, and proactive action — the pet acts on its own, bounded.
+- **Epic 6 — Dreaming & Learning** ✅ cheap hot-path learning capture + a scheduled dream cycle that classifies, promotes the durable learnings into memory, and prunes the rest. Verified: a real model captures, classifies, and consolidates exactly as designed.
 
 | Artifact | Path |
 |---|---|
@@ -101,7 +105,7 @@ Everything talks over an Envelope bus (Unix domain sockets); `core/` is mechanic
 
 The broker sits at the only egress to any LLM. It holds an ordered chain of adapters, two wire formats:
 
-- **Anthropic-format** — the `anthropic` SDK, serving both **GLM-5.2 via Z.ai's Anthropic-compatible endpoint** and **native Claude**. One adapter, two endpoints — the only difference is config.
+- **Anthropic-format** — the `anthropic` SDK, serving both **GLM-4.7 via Z.ai's Anthropic-compatible endpoint** and **native Claude**. One adapter, two endpoints — the only difference is config.
 - **OpenAI-compatible** — the `openai` SDK, serving **Ollama-over-LAN**, **OpenAI**, **OpenRouter**, and any OpenAI-compatible endpoint. One adapter reaches the whole free-tier crowd — Groq, Cerebras, Gemini, NVIDIA NIM, Mistral — by config alone (see [Cost of running it](#cost-of-running-it)).
 
 `PROVIDER_CHAIN="glm,ollama"` builds a two-element chain. `glm,groq,openrouter` builds three. An unknown preset fails at startup — no silent degradation.
@@ -143,19 +147,19 @@ OPENAI_MODEL=llama-3.3-70b-versatile
 
 Free-tier quotas are **independent per provider**, so the smart move is to stack them in the chain and let it rotate when one hits a rate limit — e.g. `PROVIDER_CHAIN="glm,groq,cerebras,openrouter"`. (Dedicated one-word presets — `gemini`, `groq`, `cerebras` — are a small planned convenience on top of the generic `openai` preset.) Two caveats: free tiers usually train on your prompts, so keep anything sensitive off them; and providers cut quotas without notice — check live limits.
 
-**Under $20/month — GLM via Z.ai.** [GLM-5.2](https://z.ai) is a capable hosted model with an Anthropic-compatible API, which is why it's shelldon's default provider. Pricing is token-based and in practice lands well under $20/month for a pet that talks with you daily. [Use this link for a discount at signup.](https://z.ai/subscribe?ic=LGN84JDUIC)
+**Under $20/month — GLM via Z.ai.** [GLM-4.7](https://z.ai) is a capable hosted model with an Anthropic-compatible API, which is why it's shelldon's default provider. Pricing is token-based and in practice lands well under $20/month for a pet that talks with you daily. [Use this link for a discount at signup.](https://z.ai/subscribe?ic=LGN84JDUIC)
 
 ## Roadmap
 
-**Daily-driver line** — Epics 1–4 are the version that lives on the desk every day. Epics 5–7 are enrichment, added when wanted.
+**Daily-driver line** — Epics 1–4 are the version that lives on the desk every day; Epics 5–6 are the autonomy + learning enrichment. **Epics 1–6 are all done — the core pet is feature-complete.** Epic 7 is optional embodiment/extensibility, added when wanted.
 
 - [x] **Epic 1 — Talking Pet** — walking skeleton: chat turn end-to-end, face reacts, endurance soak ✅ (9/9 stories)
 - [x] **Epic 2 — Resilient Brain** — provider chain fallback, degrade-to-reflex on chain exhaustion ✅ (3/3 stories) ⭐ daily-driver
 - [x] **Epic 3 — A Pet That Feels Alive** — resident reflexes, mood drift, self-modifiable expressive face ✅ (3/3 stories) ⭐ daily-driver
-- [ ] **Epic 4 — Memory & Continuity** — sqlite conversation history (FTS5) + curated markdown memory + owner directive ⭐ daily-driver *(in progress — history, curated memory, and the propose-ops write-back wire done; prompt injection + vault + face self-modify remain)*
-- [ ] **Epic 5 — Autonomous Life** — scheduler, proactive action, cost-tiered, battery-aware — enrichment
-- [ ] **Epic 6 — Dreaming & Learning** — capture learnings hot-path + dream-cycle consolidation — enrichment
-- [ ] **Epic 7 — Extensibility & Optional Embodiment** — generalized plugin model, XP, optional physical sensing — enrichment
+- [x] **Epic 4 — Memory & Continuity** — sqlite conversation history (FTS5) + curated markdown memory + owner directive + OS-isolated vault + memory-shaped prompts ✅ ⭐ daily-driver
+- [x] **Epic 5 — Autonomous Life** — multi-cadence scheduler, proactive action, daily credit budget, battery-aware backoff ✅
+- [x] **Epic 6 — Dreaming & Learning** — hot-path learning capture + dream-cycle consolidation (classify / promote / prune) ✅
+- [ ] **Epic 7 — Extensibility & Optional Embodiment** — generalized plugin model, XP, optional physical sensing — *optional; the core pet is complete without it*
 
 ## Credits
 
