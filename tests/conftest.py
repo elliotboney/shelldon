@@ -12,6 +12,7 @@ import shelldon.broker.broker as _broker
 import shelldon.broker.service as _service
 import shelldon.core.memory as _memory
 import shelldon.core.runtime as _runtime
+import shelldon.plugins.xp as _xp
 import shelldon.worker.prompt as _prompt
 
 
@@ -44,6 +45,10 @@ def _isolate_state_checkpoint(tmp_path, monkeypatch):
     # breach + tests reading the wrong store).
     monkeypatch.setattr(_prompt, "DEFAULT_MEMORY_ROOT", tmp_path / "memory")
     monkeypatch.setattr(_prompt, "DEFAULT_HISTORY_PATH", tmp_path / "history.db")
+    # Story 7.3: the XP plugin is auto-discovered (on by default) and writes its private
+    # state to DEFAULT_XP_STATE_PATH; the module-level PLUGIN resolves it lazily, so
+    # redirecting the global here keeps the app-smoke turn off real ~/.shelldon.
+    monkeypatch.setattr(_xp, "DEFAULT_XP_STATE_PATH", tmp_path / "xp_state.json")
 
 
 @pytest.fixture(autouse=True)
