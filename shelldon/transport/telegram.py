@@ -130,13 +130,23 @@ async def run_telegram_transport(
             await client.aclose()
 
 
+def resolve_token(env) -> str | None:
+    """shelldon's OWN bot token wins (`SHELLDON_TELEGRAM_BOT_TOKEN`) so v2 runs a separate bot
+    from a v1 that uses `TELEGRAM_BOT_TOKEN` — even in a shared env — falling back to the plain
+    name when only one bot is configured."""
+    return env.get("SHELLDON_TELEGRAM_BOT_TOKEN") or env.get("TELEGRAM_BOT_TOKEN")
+
+
 async def run_telegram_from_env(socket_path: str, env=None) -> None:
     """Build + run the Telegram adapter from the environment (the app's production glue):
-    `TELEGRAM_BOT_TOKEN` (required), `ALLOWED_USERS`, `ALLOW_ALL_USERS`."""
+    `SHELLDON_TELEGRAM_BOT_TOKEN`/`TELEGRAM_BOT_TOKEN` (required), `ALLOWED_USERS`,
+    `ALLOW_ALL_USERS`."""
     env = os.environ if env is None else env
-    token = env.get("TELEGRAM_BOT_TOKEN")
+    token = resolve_token(env)
     if not token:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN is required for the telegram transport")
+        raise RuntimeError(
+            "SHELLDON_TELEGRAM_BOT_TOKEN (or TELEGRAM_BOT_TOKEN) is required for the telegram transport"
+        )
     allow_all = env.get("ALLOW_ALL_USERS", "").strip().lower() in ("1", "true", "yes", "on")
     await run_telegram_transport(
         socket_path,
