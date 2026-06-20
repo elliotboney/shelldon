@@ -121,9 +121,8 @@ class XpPlugin(BasePlugin):
     def _state_path(self) -> Path:
         return Path(self._explicit_path) if self._explicit_path is not None else DEFAULT_XP_STATE_PATH
 
-    async def on_start(self, emit) -> None:
-        # Bind the draw seam, load private state, then draw it so the widget shows on boot.
-        await super().on_start(emit)
+    async def on_start(self, host) -> None:
+        await super().on_start(host)
         self.state = _load_state(self._state_path)
         await self._draw()
 
@@ -143,8 +142,8 @@ class XpPlugin(BasePlugin):
         await self._draw()
 
     async def _draw(self) -> None:
-        if self._emit is not None:
-            await self._emit(Region.STATUS_BAR, _widget_text(self.state))
+        if self._host is not None:
+            await self._host.draw(Region.STATUS_BAR, _widget_text(self.state))
 
 
 def make_xp_plugin(*, state_path: Path | None = None) -> XpPlugin:

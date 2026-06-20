@@ -139,6 +139,13 @@ class BusServer:
                 await self._deliver_to(Actor.PLUGIN_HOST, env)
             else:
                 log.debug("no plugin-host subscribed; dropping event %s", env.id)
+            # Story 7.5: core is ALSO a broadcast consumer — a plugin-emitted affect nudge
+            # (NUDGE_*) is reacted to in the runtime via core_inbox. Guarded by `src != CORE`
+            # so core never receives its OWN broadcasts back (e.g. MESSAGE_ANSWERED): no
+            # self-loop, no wasted enqueue. The hub stays kind-agnostic — the runtime's
+            # reactions map decides which kinds actually move mood.
+            if env.src is not Actor.CORE:
+                await self.core_inbox.put(env)
             return
         dest = ROUTING_TABLE[env.kind]
         if dest is Actor.CORE:

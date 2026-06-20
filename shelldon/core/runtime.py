@@ -22,6 +22,7 @@ later.
 
 import asyncio
 import logging
+import time
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -48,6 +49,7 @@ from shelldon.core.reflexes import compute_reflex_patch
 from shelldon.core.budget import BudgetGate
 from shelldon.core.dispatch import TurnDispatcher
 from shelldon.core.power import BackoffPolicy, PowerState
+from shelldon.core.reactions import compute_nudge_patch
 from shelldon.core.scheduler import CostTier, Idle, Interval, Job, Scheduler
 from shelldon.core.state import DEFAULT_CHECKPOINT_PATH, PersistentState
 from shelldon.core.turn import TurnFence
@@ -131,6 +133,12 @@ DREAM_COST = 3
 #: self-initiated (no owner message), so its directive is not stored as if the owner typed it.
 DREAM_OWNER_MARKER = "(shelldon dreamed)"
 
+#: Default per-kind cooldown (seconds) between mood nudges (Story 7.5). A buggy or chatty
+#: plugin can't peg the mood: a second nudge of the SAME affect kind within this window is
+#: dropped (the reflex baseline-settle, Story 3.2, provides the decay back to neutral). 30s
+#: mirrors the 5.2 turn-cooldown idiom. Injectable; per-kind so distinct affects are independent.
+DEFAULT_NUDGE_COOLDOWN = 30.0
+
 #: Cap on the memory-ops one turn may propose (Story 4.5). A runaway/abusive reply
 #: can't flood the curated tree; the overflow is dropped with a warning (never silently
 #: truncated). Generous — a normal turn proposes a handful.
@@ -158,6 +166,8 @@ class Core:
         low_charge_threshold: float = DEFAULT_LOW_CHARGE_THRESHOLD,
         proactive_idle_interval: float = DEFAULT_PROACTIVE_IDLE_INTERVAL,
         dream_idle_interval: float = DEFAULT_DREAM_IDLE_INTERVAL,
+        nudge_cooldown: float = DEFAULT_NUDGE_COOLDOWN,
+        monotonic=None,
         power=None,
         faces_path=None,
         history_path=None,
@@ -184,6 +194,12 @@ class Core:
         self.scheduler_interval = scheduler_interval
         self.proactive_idle_interval = proactive_idle_interval
         self.dream_idle_interval = dream_idle_interval
+        self.nudge_cooldown = nudge_cooldown
+        #: Monotonic clock for the per-kind nudge cooldown (Story 7.5). Injectable so the
+        #: cooldown is testable without real sleeps; defaults to the wall-free `time.monotonic`.
+        self._monotonic = monotonic if monotonic is not None else time.monotonic
+        #: Last-applied timestamp per affect kind — the debounce ledger (Story 7.5).
+        self._last_nudge: dict[EventKind, float] = {}
         #: Personality state lives in RAM for the process lifetime, restored from the
         #: last checkpoint (defaults cleanly on first run — AC1).
         self.state = PersistentState.load(self.checkpoint_path)
@@ -319,6 +335,10 @@ class Core:
                         await self._start_turn(prompt)
                 elif env.kind is MsgKind.RESULT:
                     await self._handle_result(env)
+                elif env.kind is MsgKind.EVENT:
+                    # A broadcast event the hub delivered to core (Story 7.5) — today only a
+                    # plugin-emitted affect nudge moves mood; any other kind is a no-op.
+                    await self._handle_nudge(env.body.event)
                 else:
                     log.warning("core ignoring unexpected inbox envelope %s (%s)", env.id, env.kind)
         finally:
@@ -619,6 +639,28 @@ class Core:
         token = self.faces.select(m.mood.valence, m.mood.arousal, m.energy)
         if token != self._last_face:
             await self._push_face(token)
+
+    # --- plugin-affect nudges (Story 7.5; AD-5/AD-1) ---
+
+    async def _handle_nudge(self, kind: EventKind) -> None:
+        """Apply a plugin-emitted affect nudge to mood — reflex-tier: no arbiter, no fork,
+        no LLM, no budget (a state nudge, like `_run_reflex_job`). The pure `reactions` map
+        owns the magnitude (core, not the plugin, decides how far the soul moves); a non-affect
+        kind core happens to see (e.g. its own MESSAGE_ANSWERED) maps to nothing and is ignored.
+        A per-kind cooldown debounces a flood; the patch goes through the single-writer
+        `apply_patch` and the mood face re-renders between turns (the existing 3.3 guard). It
+        deliberately does NOT touch `last_interaction` — a nudge moves mood, not the idle clock."""
+        m = self.state.state
+        patch = compute_nudge_patch(kind, m.mood.valence, m.mood.arousal)
+        if not patch:
+            return
+        now = self._monotonic()
+        last = self._last_nudge.get(kind)
+        if last is not None and now - last < self.nudge_cooldown:
+            return  # same affect kind within the cooldown — debounced
+        self._last_nudge[kind] = now
+        self.state.apply_patch(patch)
+        await self._maybe_push_mood_face()
 
     def apply_add_face(self, name: str, **kwargs) -> None:
         """Validate and apply a face addition to the registry (atomic, comment-

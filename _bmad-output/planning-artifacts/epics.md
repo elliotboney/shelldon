@@ -738,6 +738,24 @@ So that, if I add the hardware, it reacts to presence and touch — while the ch
 **When** the pet runs
 **Then** the chat-bot pet functions fully (CAP-3 optionality)
 
+### Story 7.5: Mood-nudge — a bounded plugin→core affect channel
+
+As the owner,
+I want any plugin to nudge the pet's mood over the bus via semantic affect events,
+So that physical and behavioral plugin events visibly move the pet's soul (its face reacts) — while core stays the sole writer of mood/face.
+
+<!-- Brainstorm-born (2026-06-19), not in the original epic plan; split out of 7.4 D3 / Open Q1. Design spec: docs/superpowers/specs/2026-06-19-mood-nudge-design.md. -->
+
+**Acceptance Criteria:**
+
+**Given** a closed set of generic *affect* event kinds (`nudge-positive`/`nudge-negative`/`nudge-excited`/`nudge-calm`) distinct from *fact* kinds
+**When** a plugin emits one (e.g. the sensing button emits `nudge-excited` alongside `button-pressed`)
+**Then** the hub delivers the broadcast event to core (guarded `src != core`) and a reflex-tier, LLM-free handler maps the affect to a bounded, clamped, cooldown-debounced mood patch — core owns the magnitude (plugins own the meaning)
+
+**Given** the nudged mood and the existing mood→face compositor
+**When** the pet is idle
+**Then** the face re-renders to reflect the nudge (e.g. excited), and decay is free (the Story 3.2 reflex settles mood back to baseline) — no new `MsgKind`/`Region`/`Event`-body/`SCHEMA_VERSION` change; plugins still never import core (import-linter KEPT)
+
 ---
 
 ## Deferred / Icebox

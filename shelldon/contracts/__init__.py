@@ -67,6 +67,20 @@ class EventKind(StrEnum):
     MESSAGE_ANSWERED = "message-answered"
     TOOL_USED = "tool-used"
     DAY_ALIVE = "day-alive"
+    #: Sensing kinds emitted BY plugins (Story 7.4) — the host validates a plugin only
+    #: emits what its `manifest.emits` declares (AD-11). Same broadcast fan-out as above.
+    BUTTON_PRESSED = "button-pressed"
+    PRESENCE_ARRIVED = "presence-arrived"
+    PRESENCE_LEFT = "presence-left"
+    #: Generic AFFECT kinds (Story 7.5): a semantic mood nudge any plugin may emit. Distinct
+    #: from the *fact* kinds above — a fact is "what happened" (a button was pressed), an
+    #: affect is "how to feel" (get excited). Core (not the plugin) owns the magnitude: it
+    #: maps each of these to a bounded, clamped mood patch via `core/reactions.py`. The
+    #: sensing plugins (7.4) emit one of these ALONGSIDE their fact so the pet's face reacts.
+    NUDGE_POSITIVE = "nudge-positive"
+    NUDGE_NEGATIVE = "nudge-negative"
+    NUDGE_EXCITED = "nudge-excited"
+    NUDGE_CALM = "nudge-calm"
 
 
 #: --- Memory-ops (AD-6): the closed, fixed-arg vocabulary core validates+applies ---

@@ -98,13 +98,13 @@ def test_duplicate_subscription_is_NOT_a_conflict():
 
 # --- AC2: discovery from the plugins package ------------------------------------
 
-def test_real_plugins_package_discovers_the_xp_plugin():
-    # Story 7.3: the XP plugin is on by default (auto-discovered). The infra modules
-    # (host/manifest/__init__) expose no MANIFEST, so they self-exclude — only xp loads.
+def test_real_plugins_package_discovers_the_shipped_plugins():
+    # The shipped, on-by-default plugins: the XP widget (7.3) + the two sensing plugins
+    # (7.4, which idle with no hardware source). Infra modules expose no MANIFEST.
     import shelldon.plugins as pkg
 
     found = discover_plugins(pkg)
-    assert [p.manifest.name for p in found] == ["xp"]
+    assert {p.manifest.name for p in found} == {"xp", "sensing-button", "sensing-ble"}
 
 
 def test_discovers_a_real_plugin_module_from_a_package(tmp_path):
@@ -199,19 +199,82 @@ def test_discovery_skips_a_module_that_fails_to_import(tmp_path, caplog):
             del sys.modules[mod]
 
 
+# --- Story 7.4 AC1: the plugin event-emit seam (plugins -> bus) -------------------
+
+class _Emitter(BasePlugin):
+    """Emits a declared event once in on_start (Story 7.4)."""
+
+    def __init__(self, name, emits, kind):
+        super().__init__(PluginManifest(name=name, emits=emits))
+        self._kind = kind
+
+    async def on_start(self, host) -> None:
+        await super().on_start(host)
+        await host.emit_event(self._kind)
+
+
+async def _host_registered_7_4(srv, timeout=1.0):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if srv._registry.get(Actor.PLUGIN_HOST) is not None:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("plugin-host never registered")
+
+
+async def test_plugin_emits_a_declared_event_to_subscribers(sock_path):
+    emitter = _Emitter("btn", (EventKind.BUTTON_PRESSED,), EventKind.BUTTON_PRESSED)
+    sub = _Recorder("sub", (EventKind.BUTTON_PRESSED,))
+    srv = BusServer(socket_path=sock_path)
+    await srv.start()
+    host_task = asyncio.create_task(run_plugin_host(sock_path, plugins=[emitter, sub]))
+    try:
+        # emitter.on_start -> host.emit_event -> hub broadcast -> back to host -> sub.on_event
+        await _poll(lambda: sub.got == [EventKind.BUTTON_PRESSED], timeout=2.0)
+        await srv.stop()
+        await asyncio.wait_for(host_task, timeout=1.0)
+    finally:
+        if not host_task.done():
+            host_task.cancel()
+            await asyncio.gather(host_task, return_exceptions=True)
+
+
+async def test_plugin_emitting_an_undeclared_kind_is_dropped(sock_path, caplog):
+    # The plugin declares NO emits but tries to emit BUTTON_PRESSED — dropped + logged,
+    # the subscriber never receives it (a plugin emits only what its manifest declares).
+    emitter = _Emitter("btn", (), EventKind.BUTTON_PRESSED)
+    sub = _Recorder("sub", (EventKind.BUTTON_PRESSED,))
+    srv = BusServer(socket_path=sock_path)
+    await srv.start()
+    with caplog.at_level("WARNING", logger="shelldon.plugins.host"):
+        host_task = asyncio.create_task(run_plugin_host(sock_path, plugins=[emitter, sub]))
+        try:
+            await _host_registered_7_4(srv)
+            await asyncio.sleep(0.1)  # give any (wrongly) emitted event time to round-trip
+            assert sub.got == []
+            assert any("did not declare" in r.message.lower() for r in caplog.records)
+            await srv.stop()
+            await asyncio.wait_for(host_task, timeout=1.0)
+        finally:
+            if not host_task.done():
+                host_task.cancel()
+                await asyncio.gather(host_task, return_exceptions=True)
+
+
 # --- Story 7.3 AC3: the draw seam (host hands each plugin a region-scoped emitter) ---
 
 class _Drawer(BasePlugin):
-    """A fake plugin that draws to a region in on_start (Story 7.3)."""
+    """A fake plugin that draws to a region in on_start (Story 7.3, via the 7.4 host handle)."""
 
     def __init__(self, name, regions, draw_region, text="hello"):
         super().__init__(PluginManifest(name=name, regions=regions))
         self._draw_region = draw_region
         self._text = text
 
-    async def on_start(self, emit) -> None:
-        await super().on_start(emit)  # stores self._emit
-        await emit(self._draw_region, self._text)
+    async def on_start(self, host) -> None:
+        await super().on_start(host)  # stores self._host
+        await host.draw(self._draw_region, self._text)
 
 
 async def _wait_registered(srv, actor, timeout=1.0):

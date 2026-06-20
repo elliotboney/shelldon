@@ -21,11 +21,26 @@ from shelldon.plugins.manifest import PluginManifest
 
 
 def test_eventkind_is_the_closed_broadcast_set():
-    # The AD-11 closed event-kind set the manifest declares subscriptions against.
+    # The AD-11 closed event-kind set: core-emitted lifecycle kinds (7.2) + plugin-emitted
+    # sensing kinds (7.4). All fan out the same way; the manifest declares which a plugin
+    # subscribes to / emits.
     assert EventKind.MESSAGE_ANSWERED == "message-answered"
     assert EventKind.TOOL_USED == "tool-used"
     assert EventKind.DAY_ALIVE == "day-alive"
-    assert {k.value for k in EventKind} == {"message-answered", "tool-used", "day-alive"}
+    assert EventKind.BUTTON_PRESSED == "button-pressed"
+    assert EventKind.PRESENCE_ARRIVED == "presence-arrived"
+    assert EventKind.PRESENCE_LEFT == "presence-left"
+    # Story 7.5: generic *affect* kinds any plugin emits to nudge the pet's mood (core
+    # maps them to a bounded patch). Distinct from the *fact* kinds above.
+    assert EventKind.NUDGE_POSITIVE == "nudge-positive"
+    assert EventKind.NUDGE_NEGATIVE == "nudge-negative"
+    assert EventKind.NUDGE_EXCITED == "nudge-excited"
+    assert EventKind.NUDGE_CALM == "nudge-calm"
+    assert {k.value for k in EventKind} == {
+        "message-answered", "tool-used", "day-alive",
+        "button-pressed", "presence-arrived", "presence-left",
+        "nudge-positive", "nudge-negative", "nudge-excited", "nudge-calm",
+    }
 
 
 def test_status_bar_widget_region_exists():

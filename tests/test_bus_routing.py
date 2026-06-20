@@ -143,3 +143,54 @@ async def test_broadcast_event_dropped_when_no_plugin_host(sock_path):
         await srv.deliver(env)  # must not raise
     finally:
         await srv.stop()
+
+
+async def test_broadcast_event_from_a_plugin_also_reaches_core_inbox(sock_path):
+    """Story 7.5: core is a SECOND broadcast consumer (mood nudges). A plugin-emitted
+    event (src=PLUGIN_HOST) lands on core_inbox so the runtime can react to it — in
+    addition to the plugin-host fan-out."""
+    srv = await _server(sock_path)
+    try:
+        _, ph_writer = await connect(srv.socket_path, Actor.PLUGIN_HOST)
+        await asyncio.sleep(0.05)  # let the hub register the plugin-host
+
+        env = Envelope(
+            id="evp",
+            kind=MsgKind.EVENT,
+            src=Actor.PLUGIN_HOST,
+            dst=None,
+            body=Event(event=EventKind.NUDGE_EXCITED),
+        )
+        await write_frame(ph_writer, env)
+
+        got = await asyncio.wait_for(srv.core_inbox.get(), timeout=1.0)
+        assert got == env
+    finally:
+        await srv.stop()
+
+
+async def test_broadcast_event_from_core_is_not_echoed_back_to_core(sock_path):
+    """Story 7.5: the `src != CORE` guard — core's OWN broadcasts (e.g. MESSAGE_ANSWERED)
+    still reach the plugin-host but are NOT enqueued back onto core_inbox (no self-loop)."""
+    srv = await _server(sock_path)
+    try:
+        ph_reader, _ = await connect(srv.socket_path, Actor.PLUGIN_HOST)
+        await asyncio.sleep(0.05)
+
+        env = Envelope(
+            id="evc",
+            kind=MsgKind.EVENT,
+            src=Actor.CORE,
+            dst=None,
+            body=Event(event=EventKind.MESSAGE_ANSWERED),
+        )
+        await srv.deliver(env)
+
+        # It still fans out to the plugin-host ...
+        got = await asyncio.wait_for(read_frame(ph_reader), timeout=1.0)
+        assert got == env
+        # ... but core does not receive its own event back.
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(srv.core_inbox.get(), timeout=0.2)
+    finally:
+        await srv.stop()
