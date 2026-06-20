@@ -43,9 +43,9 @@ from shelldon.core.faces import DEFAULT_FACES_PATH, FaceRegistry
 from shelldon.core.history import DEFAULT_HISTORY_PATH, HistoryStore
 from shelldon.core.memory import DEFAULT_MEMORY_ROOT, CuratedMemory
 from shelldon.core.reflexes import compute_reflex_patch
-from shelldon.core.budget import BudgetGate, Decision
+from shelldon.core.budget import BudgetGate
+from shelldon.core.dispatch import TurnDispatcher
 from shelldon.core.power import BackoffPolicy, PowerState
-from shelldon.core.proactive import build_dream_prompt, build_proactive_prompt
 from shelldon.core.scheduler import CostTier, Idle, Interval, Job, Scheduler
 from shelldon.core.state import DEFAULT_CHECKPOINT_PATH, PersistentState
 from shelldon.core.turn import TurnFence
@@ -236,9 +236,22 @@ class Core:
         #: Epic 7). Turn-tier jobs route to `_dispatch_turn_job` — the arbiter-gated +
         #: cooldown + daily-budget seam (Story 5.2). No turn job is registered in 5.1/5.2
         #: (the first proactive job is Story 5.4); the gate is live and tested for it.
+        #: The turn-dispatch driver (Story 7.0) — the arbiter + cooldown + budget admit gate
+        #: for scheduler-proposed turn jobs, extracted from this class into `core/dispatch.py`.
+        #: Constructed with the collaborators it reads injected, plus a `start_turn` callback
+        #: into `_start_turn` (the turn lifecycle stays here). `Core` keeps thin delegators
+        #: (`_dispatch_turn_job` etc.) so existing callers are unchanged.
+        self._dispatcher = TurnDispatcher(
+            arbiter=self.arbiter,
+            budget=self._budget,
+            state=self.state,
+            faces=self.faces,
+            history=self.history,
+            start_turn=self._start_turn,
+        )
         self.scheduler = Scheduler(
             now=lambda: datetime.now(UTC),
-            dispatch_turn=self._dispatch_turn_job,
+            dispatch_turn=self._dispatcher.dispatch_turn_job,
             power=self._power,
             backoff=self._backoff,
         )
@@ -259,7 +272,7 @@ class Core:
                 "proactive",
                 Idle(self.proactive_idle_interval),
                 CostTier.TURN,
-                prompt_builder=self._build_proactive_prompt,
+                prompt_builder=self._dispatcher.build_proactive_prompt,
                 history_owner_text=PROACTIVE_OWNER_MARKER,
             )
         )
@@ -278,7 +291,7 @@ class Core:
                 "dream",
                 Idle(self.dream_idle_interval),
                 CostTier.TURN,
-                prompt_builder=self._build_dream_prompt,
+                prompt_builder=self._dispatcher.build_dream_prompt,
                 history_owner_text=DREAM_OWNER_MARKER,
                 cost=DREAM_COST,
             )
@@ -523,22 +536,12 @@ class Core:
         return dt
 
     def _build_proactive_prompt(self) -> str:
-        """Build the proactive turn's prompt from live personality state (Story 5.4) — the
-        Idle job's `prompt_builder`, resolved at dispatch. The feeling word reuses the face
-        vocabulary (`faces.select`) as the single mood-label source, so the pet's musing is
-        tinted by how it currently feels. Pure-ish: reads state, no await, never blocks the
-        admit critical section."""
-        m = self.state.state
-        feeling = self.faces.select(m.mood.valence, m.mood.arousal, m.energy)
-        return build_proactive_prompt(feeling)
+        """Thin delegator to `TurnDispatcher.build_proactive_prompt` (Story 7.0 extract)."""
+        return self._dispatcher.build_proactive_prompt()
 
     def _build_dream_prompt(self) -> str:
-        """The dream Job's `prompt_builder` (Story 6.2), resolved at dispatch: read the pending
-        learnings (core owns the store) and hand them to the pure `build_dream_prompt` policy
-        (extracted to `core/proactive.py` — Epic 6 retro). Returns "" when nothing is pending →
-        the dispatch skips (no dream, no spend). A sqlite read, no await (atomic in admit)."""
-        pending = self.history.pending_learnings()
-        return build_dream_prompt([(r["id"], r["observation"], r["recurrence_count"]) for r in pending])
+        """Thin delegator to `TurnDispatcher.build_dream_prompt` (Story 7.0 extract)."""
+        return self._dispatcher.build_dream_prompt()
 
     async def _run_checkpoint_job(self) -> None:
         """The periodic checkpoint flush (Story 3.1, NFR7) as a reflex-tier job — the
@@ -548,72 +551,12 @@ class Core:
         self._checkpoint_if_dirty()
 
     async def _dispatch_turn_job(self, job: Job) -> None:
-        """The arbiter-gated dispatch seam (Story 5.2) for a due TURN-tier job (AD-9/AD-14).
-
-        A scheduler turn is admitted ONLY when the slot is free AND the cooldown has
-        elapsed AND the daily turn budget allows the job's cost; otherwise it is DEFERRED
-        (re-proposed next cadence) or SKIPPED. On admission it records the spend through
-        the single-writer `apply_patch` (AD-5), reserves the arbiter slot, and starts the
-        turn via the normal lifecycle — AD-14: the scheduler never forks directly, and the
-        turn rides the same 5.0-hardened path (release-safety: `submit` here is always
-        balanced by `complete` on the Result/timeout, or `reset` on a spawn failure).
-
-        A scheduler turn is NEVER coalesced into the owner's catch-up slot — only owner
-        messages coalesce. If a turn is in flight, the job defers. (Concurrency note: the
-        scheduler runs as a sibling task to the `run()` consumer, but the admit sequence
-        below — is_idle check → apply_patch → submit — has NO `await`, so it is atomic
-        w.r.t. the consumer; the arbiter's no-lock single-critical-section invariant holds.)"""
-        text = self._resolve_job_prompt(job)
-        if not text:
-            return  # promptless / builder failed / empty -> skip (logged in the resolver)
-        if not self.arbiter.is_idle:
-            log.info("turn job %r deferred: a turn is already in flight", job.name)
-            return
-        now = datetime.now(UTC)
-        decision = self._budget.evaluate(self.state.state.budget, now, cost=job.cost)
-        if decision is Decision.DEFER:
-            log.info("turn job %r deferred: within the turn cooldown", job.name)
-            return
-        if decision is Decision.SKIP:
-            log.info("turn job %r skipped: daily turn budget (%d) exhausted", job.name, self._budget.daily_turn_budget)
-            return
-        # ADMIT. Reserve the arbiter slot first; the slot is free (checked above, no await
-        # since), so submit returns the prompt. Guard the return defensively: a None would
-        # mean the no-await invariant broke — don't spend budget or start a bogus turn.
-        prompt = self.arbiter.submit(text)
-        if prompt is None:  # unreachable while is_idle holds in this await-free section
-            log.error("turn job %r: arbiter slot unexpectedly busy at admit; not spending budget", job.name)
-            return
-        # Record the spend BEFORE the spawn (a fork that then fails still counts —
-        # conservative for credit protection), then start through the normal lifecycle. A
-        # proactive turn (Story 5.4) records its synthetic owner-side marker, not the prompt.
-        self.state.apply_patch(self._budget.admission_patch(self.state.state.budget, now, cost=job.cost))
-        await self._start_turn(prompt, record_owner_text=job.history_owner_text)
+        """Thin delegator to `TurnDispatcher.dispatch_turn_job` (Story 7.0 extract)."""
+        await self._dispatcher.dispatch_turn_job(job)
 
     def _resolve_job_prompt(self, job: Job) -> str | None:
-        """The turn job's prompt: built live from state (Story 5.4 `prompt_builder`) or the
-        static `prompt`. A builder that raises is guarded -> None (skip, never wedge — the
-        promptless-skip guarantee). An empty/None resolved prompt also skips."""
-        if job.prompt_builder is not None:
-            try:
-                built = job.prompt_builder()
-            except Exception as exc:
-                log.warning("turn job %r prompt builder failed (%s); skipping", job.name, exc)
-                return None
-            # `.strip()` so a whitespace-only return (truthy in Python) skips like an empty one
-            # — a blank prompt must never reach the worker.
-            built = (built or "").strip()
-            if not built:
-                # An empty builder return is an INTENTIONAL skip signal (the dream builder
-                # returns "" when no learnings are pending — the common 6h case), NOT a misconfig.
-                # debug-level so a normal skip doesn't spam prod every cadence. (A static
-                # promptless turn job below stays warning — that IS a misconfiguration.)
-                log.debug("turn job %r prompt builder returned nothing; skipping this cadence", job.name)
-                return None
-            return built
-        if job.prompt is None:
-            log.warning("turn job %r has no prompt; skipping (a turn job must carry one)", job.name)
-        return job.prompt
+        """Thin delegator to `TurnDispatcher.resolve_job_prompt` (Story 7.0 extract)."""
+        return self._dispatcher.resolve_job_prompt(job)
 
     def _checkpoint_if_dirty(self) -> None:
         if self.state.dirty:

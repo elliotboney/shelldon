@@ -1,5 +1,5 @@
 # generated: 2026-06-16 10:47:47 CDT
-# last_updated: 2026-06-18 (Epic 4 done + retro complete; Story 5.0 resilience-prep added; chores iceboxed)
+# last_updated: 2026-06-19 (Story 7-0 runtime-dispatch-extract dev complete → review; suite 458 baseline-identical, 0 test edits, contracts KEPT)
 # project: shelldon
 # project_key: NOKEY
 # tracking_system: file-system
@@ -31,7 +31,7 @@
 # - Daily-driver line = Epics 1-4 + story 1-9 (soak); Epics 5-7 are enrichment
 
 generated: 2026-06-16 10:47:47 CDT
-last_updated: 2026-06-19 CDT  # Post-Epic-6: live-LLM verified ✓, facts/ surfacing done, dream-prompt extracted (full runtime extract deferred to Epic 7)
+last_updated: 2026-06-19 CDT  # Story 7-0 done: review (6 pre-existing findings) + owner-chosen fix of #1 (slot-leak) & #2 (non-str builder) with +2 tests; suite 460 pass, contracts KEPT
 project: shelldon
 project_key: NOKEY
 tracking_system: file-system
@@ -91,7 +91,8 @@ development_status:
   epic-6-retrospective: done  # 2026-06-19: epic-6-retro-2026-06-19.md — Dreaming & Learning. +37 tests (411→448), 0 deps/incidents, contracts KEPT. The Epic 5 "build-mechanism-ahead" bet paid off TOTALLY (the dream was almost free — pre-built prompt_builder/cost/gates). Core pet now FEATURE-COMPLETE. Dominant risk: whole memory/learning/autonomy line is mechanism-proven, NEVER live-LLM-tested. Discovered gap: 4.4 doesn't inject facts//people/ (write-only). runtime.py extract trigger HIT. Strategic fork = VERIFY (live-LLM smoke + facts/ surfacing) before EXTEND (Epic 7, optional).
 
   # --- Epic 7: Extensibility & Optional Embodiment ---
-  epic-7: backlog
+  epic-7: in-progress  # 2026-06-19: Epic 7 (optional EXTEND fork) opened with the prep refactor 7-0 (runtime-dispatch extract, icebox trigger HIT). Owner chose: extract = its OWN story/commit BEFORE 7-1 feature work.
+  7-0-extract-turn-dispatch-from-runtime: done  # created + dev complete 2026-06-19; review done 2026-06-19 — 6 findings all pre-existing (verbatim move introduced 0 regressions). Owner chose fix-in-7-0 for the 2 with teeth: #1 arbiter slot-leak if apply_patch raises → reset-before-reraise; #2 non-str builder return → .strip() inside try → skip not crash. +2 regression tests; suite 460 pass. #3–#6 (cosmetic/test/doc) stay deferred. (Epic 6 retro action #3 / icebox runtime-dispatch-extract). Extract: pull _dispatch_turn_job/_resolve_job_prompt + the 2 prompt-builder wrappers out of core/runtime.py into new core/dispatch.py (TurnDispatcher, injected deps + start_turn callback); _scheduler_loop STAYS on Core; thin Core delegators keep all 24 test_turn_dispatch.py callsites unchanged. NOT in epics.md (retro-born prep, 5-0 precedent).
   7-1-plugin-host-and-the-generalized-plugin-contract: backlog
   7-2-broadcast-event-subscriptions: backlog
   7-3-xp-leveling-plugin-optional: backlog
@@ -115,7 +116,10 @@ icebox:
   atomic-write-helper-extract: deferred  # temp→fsync→os.replace idiom triplicated across core/faces.py, core/state.py, core/memory.py. Trigger: a 4th writer is added — extract to one core util then.
 
   # --- Iceboxed from Epic 5 retro (2026-06-18) ---
-  runtime-dispatch-extract: deferred  # 2026-06-19 (Epic 6 retro action #3): trigger HIT — 6.2 grew core/runtime.py. SAFE SLICE DONE (owner chose defer-the-rest): the dream directive extracted to a pure build_dream_prompt() in core/proactive.py (joins build_proactive_prompt; runtime _build_dream_prompt is now a 2-line reader). The FULL extract (scheduler driver + _dispatch_turn_job/_resolve_job_prompt + budget/backoff/power out of Core, ~50 test refs) is DEFERRED until Epic 7 is actually committed — Epic 7 is optional, and a full extract on the green 455-test suite is pure-hygiene risk not worth taking speculatively. Trigger: Epic 7 story 1 starts.
+  runtime-dispatch-extract: scheduled  # 2026-06-19: trigger HIT → SCHEDULED as story 7-0-extract-turn-dispatch-from-runtime (ready-for-dev). Scoped down from the icebox fear: move _dispatch_turn_job/_resolve_job_prompt + the 2 prompt-builder wrappers into core/dispatch.py (TurnDispatcher); _scheduler_loop + budget/backoff/power STAY on Core (resident-task lifecycle; only the dispatch concern moves). ~24 test refs in one file, all preserved via thin Core delegators → ZERO test edits. Safe-slice (dream directive → core/proactive.build_dream_prompt) already done earlier. Behavior-preserving, its own commit BEFORE 7-1.
 
   # --- Iceboxed from Epic 6 retro (2026-06-19) ---
   two-idle-jobs-cold-start-collision: deferred  # proactive(1h) + dream(6h) are both Idle turn jobs; a cold start while already >6h idle makes both due in one tick → the arbiter admits one, the other defers and waits a fresh idle stretch (starves that cycle). Low priority. Trigger: proactive/dream starvation observed in real use → give the dream priority or stagger the cadences.
+
+  # --- Iceboxed from Story 7-0 review (2026-06-19): pre-existing dispatch-path hardening, cosmetic/test/doc ---
+  dispatch-path-defensive-hardening: deferred  # Story 7-0 review findings #3–#6, all pre-existing (predate the extract): #3 pending_learnings() row missing a key → unguarded KeyError in build_dream_prompt comprehension (rows are core-owned, shape controlled); #4 faces.select raising is caught but logged as misleading "builder failed"; #5 the no-await admit invariant is asserted only in a comment (no static check / test); #6 the start_turn bound-method injection ordering is undocumented (same pattern as Scheduler). Low priority. Trigger: next substantive change to core/dispatch.py.
