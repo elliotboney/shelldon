@@ -53,11 +53,19 @@ def test_corrupt_state_file_falls_back_to_default(tmp_path):
 # --- AC4: XP rules + the widget draw --------------------------------------------
 
 class _CapturingEmit:
+    """A fake host handle (Story 7.4) that records the plugin's draws."""
+
     def __init__(self):
         self.draws: list[tuple[Region, str]] = []
 
-    async def __call__(self, region, face):
+    async def draw(self, region, face):
         self.draws.append((region, face))
+
+    async def emit_event(self, kind):  # pragma: no cover - XP never emits
+        pass
+
+    def spawn(self, coro):  # pragma: no cover - XP spawns nothing
+        coro.close()
 
 
 def _xp(tmp_path):

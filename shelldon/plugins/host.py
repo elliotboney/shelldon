@@ -10,6 +10,7 @@ routed — the host proves the contract: discover, reject conflicts, connect as 
 client that never imports core's domain.
 """
 
+import asyncio
 import importlib
 import logging
 import pkgutil
@@ -159,26 +160,36 @@ async def _fan_out(event: Event, loaded: LoadedPlugins) -> None:
         await _safe_on_event(plugin, event)
 
 
-def _make_emitter(plugin: Plugin, writer, seqs: dict[Region, int]):
-    """Build a plugin's region-scoped draw seam (Story 7.3). The returned `emit(region,
-    face)` pushes a `StateSnapshot` to the display ONLY for a region this plugin claimed
-    (runtime single-writer guard, on top of the load-time conflict check + the FACE
-    rejection) — an unclaimed region is logged + dropped. The host owns the writer and the
-    per-region monotonic `seq`, so the plugin never builds an Envelope or touches the bus."""
-    claimed = set(plugin.manifest.regions)
+class _HostHandle:
+    """A plugin's single door to the bus (Story 7.3 draw + 7.4 emit/spawn). Scoped to ONE
+    plugin: `draw` is limited to the regions it claimed and `emit_event` to the kinds its
+    manifest declared in `emits` — the runtime half of the load-time conflict check / FACE
+    rejection. The host owns the writer + the per-region seq + the spawned tasks, so a
+    plugin never builds an Envelope, touches the connection, or leaks a background task.
+    Concurrent `write_frame`s (a draw from the read loop + an emit from a sense task) are
+    frame-safe: `write_frame` buffers the whole length-prefixed frame synchronously before
+    awaiting drain, so frames never interleave at the byte level."""
 
-    async def emit(region: Region, face: str) -> None:
-        if region not in claimed:
+    def __init__(self, plugin: Plugin, writer, seqs: dict[Region, int], tasks: list):
+        self._plugin = plugin
+        self._writer = writer
+        self._seqs = seqs
+        self._tasks = tasks
+        self._draw_regions = set(plugin.manifest.regions)
+        self._emit_kinds = set(plugin.manifest.emits)
+
+    async def draw(self, region: Region, face: str) -> None:
+        if region not in self._draw_regions:
             log.warning(
                 "plugin %r did not claim region %s; dropping its draw",
-                plugin.manifest.name, region.value,
+                self._plugin.manifest.name, region.value,
             )
             return
         # Commit the seq only AFTER a successful write (review patch): a failed write must
         # not skip a seq, or a future strict-monotonic display could drop the next frame.
-        next_seq = seqs.get(region, 0) + 1
+        next_seq = self._seqs.get(region, 0) + 1
         await write_frame(
-            writer,
+            self._writer,
             Envelope(
                 id=uuid.uuid4().hex,
                 kind=MsgKind.STATE_SNAPSHOT,
@@ -187,12 +198,32 @@ def _make_emitter(plugin: Plugin, writer, seqs: dict[Region, int]):
                 body=StateSnapshot(region=region, seq=next_seq, face=face),
             ),
         )
-        seqs[region] = next_seq
+        self._seqs[region] = next_seq
 
-    return emit
+    async def emit_event(self, kind: EventKind) -> None:
+        if kind not in self._emit_kinds:
+            log.warning(
+                "plugin %r did not declare emit %s; dropping it",
+                self._plugin.manifest.name, kind.value,
+            )
+            return
+        await write_frame(
+            self._writer,
+            Envelope(
+                id=uuid.uuid4().hex,
+                kind=MsgKind.EVENT,
+                src=Actor.PLUGIN_HOST,
+                dst=None,  # broadcast (AD-11): hub fans it back out to subscribers
+                body=Event(event=kind),
+            ),
+        )
+
+    def spawn(self, coro) -> None:
+        # The host owns the task lifecycle: it's cancelled on teardown (no leaked producer).
+        self._tasks.append(asyncio.create_task(coro))
 
 
-async def _safe_on_start(plugin: Plugin, emit) -> None:
+async def _safe_on_start(plugin: Plugin, host: _HostHandle) -> None:
     """Bind a plugin its draw seam + let it draw initial state, isolating a crash (AD-8).
 
     Graceful degradation (review Decision 3): if `on_start` raises, the plugin stays loaded
@@ -201,7 +232,7 @@ async def _safe_on_start(plugin: Plugin, emit) -> None:
     a transient draw write, which just means the initial widget is skipped. A plugin that
     needs hard disable-on-failure is a future concern (no real workload needs it yet)."""
     try:
-        await plugin.on_start(emit)
+        await plugin.on_start(host)
     except Exception:
         log.warning(
             "plugin %r raised in on_start; isolating it",
@@ -233,10 +264,13 @@ async def run_plugin_host(socket_path: str, *, plugins_package=None, plugins=Non
     log.info("plugin-host loaded %d plugin(s)", len(loaded.plugins))
 
     reader, writer = await connect(socket_path, Actor.PLUGIN_HOST)
-    # Bind each plugin its region-scoped draw seam + let it draw initial state (Story 7.3).
+    # Bind each plugin its host handle (draw + emit_event + spawn) and let it start up
+    # (draw initial state / launch a sense loop). `tasks` holds every background producer a
+    # plugin spawns, so teardown cancels them all (no leaked sense loop).
     seqs: dict[Region, int] = {}
+    tasks: list[asyncio.Task] = []
     for plugin in loaded.plugins:
-        await _safe_on_start(plugin, _make_emitter(plugin, writer, seqs))
+        await _safe_on_start(plugin, _HostHandle(plugin, writer, seqs, tasks))
     try:
         while True:
             try:
@@ -254,6 +288,10 @@ async def run_plugin_host(socket_path: str, *, plugins_package=None, plugins=Non
             else:
                 log.warning("plugin-host ignoring non-event envelope %s (%s)", env.id, env.kind)
     finally:
+        for task in tasks:  # cancel every plugin-spawned producer loop
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         writer.close()
         try:
             await writer.wait_closed()
