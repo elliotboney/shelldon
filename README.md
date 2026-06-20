@@ -66,16 +66,16 @@ A few decisions that shape everything:
 
 ## Status
 
-🟢 **Core pet feature-complete (Epics 1–6) and the optional plugin layer shipped (Epic 7).** Next: the first live-LLM verification (Epic 8) before deployment.
+🟢 **Core pet feature-complete (Epics 1–6), the optional plugin layer shipped (Epic 7), and the whole loop now verified against a live LLM (Epic 8).** Next: deployment to the Pi.
 
-34 stories shipped, **537 tests passing** (plus opt-in live-provider smokes), zero external runtime deps beyond the LLM SDKs, the LLM-free-core import contract held throughout. The whole loop is built and **mechanism-proven** end-to-end — message in → memory-shaped prompt → LLM reply out → expressive face reacts; the pet drifts, remembers, reaches out on its own within budget, consolidates what it learns, and (Epic 7) can be extended with plugins that sense and nudge its mood. One honest caveat: every behavior is verified against deterministic synthetic responses — it has **not yet been run against a live LLM**. That first real-brain smoke (GLM-4.7 via Z.ai) is the immediate next milestone (Epic 8), and the dominant remaining risk until it's done.
+34 stories shipped, **537 tests passing** (plus opt-in live-provider smokes), zero external runtime deps beyond the LLM SDKs, the LLM-free-core import contract held throughout. The whole loop runs end-to-end — message in → memory-shaped prompt → LLM reply out → expressive face reacts; the pet drifts, remembers, reaches out on its own within budget, consolidates what it learns, and (Epic 7) can be extended with plugins that sense and nudge its mood. **It's verified against a real brain, not just synthetic tests:** an opt-in live smoke (GLM-4.7 via Z.ai) drives a real owner turn *and* a real dream through the full wire — and the model emits decodable ops that core actually applies (a fact written to memory, learnings classified and resolved in sqlite). The one thing still unproven is **deployment itself** — the real fork-server worker, the Pi Zero, the E-Ink panel, and the PiSugar2/BLE hardware are stubbed/gated until bring-up.
 
 - **Epic 1 — Talking Pet** ✅ the full walking skeleton end-to-end; an endurance soak proved flat memory over sustained turns.
 - **Epic 2 — Resilient Brain** ✅ an ordered provider chain with automatic fallback, degrading gracefully to reflex-only when the whole chain fails.
 - **Epic 3 — A Pet That Feels Alive** ✅ persistent personality state, a resident reflex loop (blink/idle/mood drift), and a self-modifiable expressive-face registry.
 - **Epic 4 — Memory & Continuity** ✅ sqlite conversation history (WAL/FTS5) + a curated markdown memory tree (sole-writer core, worker proposes), an OS-isolated vault, and memory injected into every prompt so the past shapes the reply.
 - **Epic 5 — Autonomous Life** ✅ a core-resident multi-cadence scheduler, a daily credit budget + cooldown, battery-aware backoff, and proactive action — the pet acts on its own, bounded.
-- **Epic 6 — Dreaming & Learning** ✅ cheap hot-path learning capture + a scheduled dream cycle that classifies, promotes the durable learnings into memory, and prunes the rest. (Mechanism-proven; the live-LLM run that confirms a real model classifies as designed is Epic 8.)
+- **Epic 6 — Dreaming & Learning** ✅ cheap hot-path learning capture + a scheduled dream cycle that classifies, promotes the durable learnings into memory, and prunes the rest. (Confirmed live: a real GLM dream classified seeded learnings and core applied the promote/prune ops — Epic 8.)
 - **Epic 7 — Extensibility & Optional Embodiment** ✅ a generalized plugin model — plugins emit/subscribe events, own private state, and claim display regions, *never importing core* (enforced by import-linter). Exercised by an optional XP/leveling widget, optional physical sensing (PiSugar2 button + BLE pair-first presence), and a bounded plugin→core channel that lets plugin events nudge the pet's mood (so a button press or your arrival visibly moves its face).
 
 | Artifact | Path |
@@ -152,7 +152,7 @@ Free-tier quotas are **independent per provider**, so the smart move is to stack
 
 ## Roadmap
 
-**Daily-driver line** — Epics 1–4 are the version that lives on the desk every day; Epics 5–6 are the autonomy + learning enrichment. **Epics 1–6 are the core pet (feature-complete); Epic 7 added the optional plugin layer.** Next is Epic 8 — verify against a live LLM, then deploy to the Pi.
+**Daily-driver line** — Epics 1–4 are the version that lives on the desk every day; Epics 5–6 are the autonomy + learning enrichment. **Epics 1–6 are the core pet (feature-complete); Epic 7 added the optional plugin layer; Epic 8 verified the whole loop against a live LLM.** Next is deployment to the Pi.
 
 - [x] **Epic 1 — Talking Pet** — walking skeleton: chat turn end-to-end, face reacts, endurance soak ✅ (9/9 stories)
 - [x] **Epic 2 — Resilient Brain** — provider chain fallback, degrade-to-reflex on chain exhaustion ✅ (3/3 stories) ⭐ daily-driver
@@ -161,7 +161,7 @@ Free-tier quotas are **independent per provider**, so the smart move is to stack
 - [x] **Epic 5 — Autonomous Life** — multi-cadence scheduler, proactive action, daily credit budget, battery-aware backoff ✅
 - [x] **Epic 6 — Dreaming & Learning** — hot-path learning capture + dream-cycle consolidation (classify / promote / prune) ✅
 - [x] **Epic 7 — Extensibility & Optional Embodiment** — generalized plugin model, XP widget, optional physical sensing (button/BLE), plugin→core mood-nudge ✅ (6/6 stories) — *optional; the core pet is complete without it*
-- [ ] **Epic 8 — Verify & Deploy** — the first live-LLM smoke against the real brain (GLM via Z.ai), then deployment to the Pi *(next — retires the dominant risk)*
+- [~] **Epic 8 — Verify & Deploy** — live-LLM smoke against the real brain (GLM-4.7 via Z.ai) ✅ *(dominant risk retired — a real turn + a real dream verified end-to-end, core applies the model's ops)*; deployment to the Pi *(next)*
 
 ## Credits
 
