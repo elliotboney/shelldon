@@ -55,10 +55,10 @@ The dream directive works against a real brain, and the model's judgment about d
 | Core *applies* those ops over the real wire (file written / learning row transitions) | ⏳ **Story 8.0** (full-stack) |
 | Deployment (real fork worker, Pi, E-Ink, hardware) | ⏳ later |
 
-## Finding worth acting on — reinforces Epic 6 action #2 (`facts/` surfacing)
+## Live confirmation that `facts/` surfacing works (Epic 6 action #2 — already done)
 
-The live dream's instinct is to promote a specific owner-fact via **`remember` → `facts/`** (`shipping-habit`). But **4.4 prompt assembly does not inject `facts/`/`people/` into prompts** — so that promotion is durable-but-write-only and would never shape a future reply. The model leans on `facts/` *more* than the Epic 6 workaround assumed (the dream was steered toward `rewrite_about` precisely because `about.md` IS injected). This is real live evidence that **`facts/` surfacing (Epic 6 action #2) matters** — without it, the dream's most natural promotions are invisible. CAP-11 currently works only via the `rewrite_about`/`rewrite_summary` path the model also (helpfully) used.
+The live dream promoted a specific owner-fact via **`remember` → `facts/`** (`shipping-habit`). **`facts/` (and `people/`) IS injected into prompts** — `worker/prompt.py` `gather_context` reads both collections into a bounded "# What you know" section right after `about.md` (commit `f930099`, "surface facts/ + people/ into the prompt (Epic 6 retro #2)"). So that promotion is **not** write-only — a later turn's prompt will carry it. CAP-11 works through the natural path the live model chose, AND via the `rewrite_about`/`rewrite_summary` it also used. (Correction: an earlier draft of this doc — and the Epic 6/7 retro action lists — called `facts/` surfacing an open gap; it was already implemented in `f930099` before Epic 7 started.)
 
 ## Net
 
-Mechanism-proven everywhere + **elicitation now live-verified on `glm-4.7`** (turn + dream, clean). The dominant risk is materially down. Remaining: full-stack apply (8.0) and deploy. Plus a sharpened, live-evidenced case for `facts/` surfacing.
+Mechanism-proven everywhere + **elicitation now live-verified on `glm-4.7`** (turn + dream, clean — the model emits the full op vocabulary with sound promote/prune judgment, into a `facts/` channel that IS surfaced). The dominant risk is materially down. The only meaningful gap left before deploy: **full-stack apply (Story 8.0)** — proving core *applies* what the live model emits over the real wire.
