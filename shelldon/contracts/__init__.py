@@ -46,6 +46,26 @@ class Region(StrEnum):
     """
 
     FACE = "face"
+    #: Plugin-claimed widget region (Story 7.1). Core owns FACE; a plugin may claim a
+    #: widget region (e.g. the XP status-bar strip, Story 7.3) — the host rejects two
+    #: plugins claiming the same region at load (AD-5: no two writers per region).
+    STATUS_BAR = "status-bar"
+
+
+class EventKind(StrEnum):
+    """Closed set of broadcast `event` kinds (AD-11, Story 7.1). The second routing
+    mode: the hub fans one of these out to every subscribed plugin (Story 7.2). The
+    set is closed and declared HERE in `contracts/` — no component invents a kind, and
+    the subscription registry is built at load from plugin manifests, not runtime
+    self-registration. Story 7.1 only DECLARES this vocabulary (the `PluginManifest`
+    subscribes against it); the `Event` wire body + hub fan-out land in Story 7.2, so
+    this is intentionally NOT a `MsgKind`, has no `ROUTING_TABLE` row, and bumps no
+    SCHEMA_VERSION (adding a new StrEnum is wire-additive).
+    """
+
+    MESSAGE_ANSWERED = "message-answered"
+    TOOL_USED = "tool-used"
+    DAY_ALIVE = "day-alive"
 
 
 #: --- Memory-ops (AD-6): the closed, fixed-arg vocabulary core validates+applies ---
@@ -308,6 +328,7 @@ __all__ = [
     "Actor",
     "MsgKind",
     "Region",
+    "EventKind",
     "Job",
     "Result",
     "Completion",
