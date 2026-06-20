@@ -71,3 +71,8 @@ logos/
 
 # Local scripts I want to ignore, but not the ones in the repo
 glm_claude.sh
+.webui_secret_key
+
+# Other AI-CLI tooling (not product code)
+.qwen/
+QWEN.md
