@@ -10,6 +10,9 @@
 - [ ] Any **longer-lived await** (reading a completion, a socket) has a timeout backstop — no path that can block forever (4.5 worker-wedge).
 - [ ] Counts/sizes are **capped with a logged overflow** — no silent truncation.
 
+### The critical-section / slot-release class (Epic 7 retro — dev-introduced in 7.0 AND 7.2)
+- [ ] A **fail-soft side-effect** (a `_emit_event`, a face push, a best-effort write) that can **raise or suspend** is placed **AFTER** the guard-release that frees a ≤1 slot (arbiter/fence/fork) — never inside or before it. A `drain()` that suspends or an `apply_patch` that raises BEFORE `arbiter.complete()` holds the slot forever (7.2) or leaks it on the error path (7.0). Ask: "if this line hangs or throws, is the slot already released?"
+
 ## Tests assert the real thing
 - [ ] Assertions check **real values, not truthiness** (`== 0o700`, not `assert mode`).
 - [ ] No **false-positive masking** — verify the unique token isn't matched by an example/system-instruction string; add a **negative check** (4.4 CAP-6 false positive).
@@ -25,6 +28,9 @@
 - [ ] **strings:** a built/returned string is `.strip()`-checked, not just truthy — `"   "` is truthy but blank (5.4 `prompt_builder`).
 - [ ] **numbers:** numeric config rejects `NaN` and out-of-band via `not (x > 0)` / `not (x >= 1)` (NaN slips a bare `<=` — 5.1/5.3); cross-invariants (`cost >= 1`, `low_scale >= eased_scale`) checked at construction.
 - [ ] **external reads:** any read a future plugin/hardware path could make raise (power, sensor) is guarded and **defaults safe** — it often runs before per-job guards, so an escape kills the resident task (5.3 power read → LIVELY).
+
+## State integrity (Epic 7 retro — 7.3 dropped a persisted `level`)
+- [ ] **Don't persist what you can compute.** A field that is **derived** from other state (a level from XP, a total from parts) is **computed at read**, not stored — a stored derived field can drift out of sync with its source and become a silent bug. If it must be cached, there's a single recompute path and a test that the cache equals the computed value.
 
 ## Isolation (same change!)
 - [ ] Any new core **file-write default path** is redirected in the conftest autouse fixture **in this same change** — never discovered in verify (Epic 3 action #3; held all of Epic 4 — keep it).
