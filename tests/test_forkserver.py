@@ -5,10 +5,25 @@ deterministically and cross-platform. The real os.fork() path is test_forkserver
 """
 
 import asyncio
+import sqlite3
 
 import pytest
 
-from shelldon.worker.forkserver import ForkServer, WorkerBusyError
+from shelldon.worker.forkserver import ForkServer, WorkerBusyError, _close_inherited_sqlite
+
+
+def test_close_inherited_sqlite_closes_open_connections():
+    """SQLite is not fork-safe: the fork child must discard core's inherited connection
+    before opening its own, or the worker's read-only open hits SQLITE_PROTOCOL once
+    closerange tears the inherited WAL shared-memory state (Pi bug, 2026-06-20). The helper
+    closes every live sqlite connection — verified by a closed handle raising on use."""
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE t(x)")  # works while open
+
+    _close_inherited_sqlite()
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        conn.execute("SELECT 1")  # closed -> "Cannot operate on a closed database"
 
 
 class _FakeSpawner:
