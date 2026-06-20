@@ -31,7 +31,7 @@
 # - Daily-driver line = Epics 1-4 + story 1-9 (soak); Epics 5-7 are enrichment
 
 generated: 2026-06-16 10:47:47 CDT
-last_updated: 2026-06-19 CDT  # Epic 6 complete + retrospective done — core pet FEATURE-COMPLETE (verify-before-extend)
+last_updated: 2026-06-19 CDT  # Post-Epic-6: live-LLM verified ✓, facts/ surfacing done, dream-prompt extracted (full runtime extract deferred to Epic 7)
 project: shelldon
 project_key: NOKEY
 tracking_system: file-system
@@ -115,7 +115,7 @@ icebox:
   atomic-write-helper-extract: deferred  # temp→fsync→os.replace idiom triplicated across core/faces.py, core/state.py, core/memory.py. Trigger: a 4th writer is added — extract to one core util then.
 
   # --- Iceboxed from Epic 5 retro (2026-06-18) ---
-  runtime-dispatch-extract: TRIGGERED  # 2026-06-19 (Epic 6 retro): trigger HIT — 6.2's dream grew core/runtime.py again (now hosts reflex+checkpoint+proactive+dream jobs, 3 prompt builders, dispatch gate, turn lifecycle). Extract the scheduler driver + _dispatch_turn_job/_resolve_job_prompt + the prompt builders out of Core into their own module. SCHEDULE before Epic 7 (plugin events also touch core). = Epic 6 retro action #3.
+  runtime-dispatch-extract: deferred  # 2026-06-19 (Epic 6 retro action #3): trigger HIT — 6.2 grew core/runtime.py. SAFE SLICE DONE (owner chose defer-the-rest): the dream directive extracted to a pure build_dream_prompt() in core/proactive.py (joins build_proactive_prompt; runtime _build_dream_prompt is now a 2-line reader). The FULL extract (scheduler driver + _dispatch_turn_job/_resolve_job_prompt + budget/backoff/power out of Core, ~50 test refs) is DEFERRED until Epic 7 is actually committed — Epic 7 is optional, and a full extract on the green 455-test suite is pure-hygiene risk not worth taking speculatively. Trigger: Epic 7 story 1 starts.
 
   # --- Iceboxed from Epic 6 retro (2026-06-19) ---
   two-idle-jobs-cold-start-collision: deferred  # proactive(1h) + dream(6h) are both Idle turn jobs; a cold start while already >6h idle makes both due in one tick → the arbiter admits one, the other defers and waits a fresh idle stretch (starves that cycle). Low priority. Trigger: proactive/dream starvation observed in real use → give the dream priority or stagger the cadences.

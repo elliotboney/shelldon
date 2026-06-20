@@ -45,7 +45,7 @@ from shelldon.core.memory import DEFAULT_MEMORY_ROOT, CuratedMemory
 from shelldon.core.reflexes import compute_reflex_patch
 from shelldon.core.budget import BudgetGate, Decision
 from shelldon.core.power import BackoffPolicy, PowerState
-from shelldon.core.proactive import build_proactive_prompt
+from shelldon.core.proactive import build_dream_prompt, build_proactive_prompt
 from shelldon.core.scheduler import CostTier, Idle, Interval, Job, Scheduler
 from shelldon.core.state import DEFAULT_CHECKPOINT_PATH, PersistentState
 from shelldon.core.turn import TurnFence
@@ -533,35 +533,12 @@ class Core:
         return build_proactive_prompt(feeling)
 
     def _build_dream_prompt(self) -> str:
-        """Build the dream turn's directive from the pending learnings (Story 6.2) — the dream
-        Job's `prompt_builder`, resolved at dispatch. Reads the pending learnings (core owns the
-        store) and bakes them, each tagged by `id`, into a directive telling the LLM to keep the
-        durable/recurring ones and let the rest go, plus refresh a short running summary. Returns
-        "" when nothing is pending → the dispatch skips (no dream, no spend — the 5.4 empty-prompt
-        guard). Pure-ish: a sqlite read, no await (atomic in the admit section)."""
+        """The dream Job's `prompt_builder` (Story 6.2), resolved at dispatch: read the pending
+        learnings (core owns the store) and hand them to the pure `build_dream_prompt` policy
+        (extracted to `core/proactive.py` — Epic 6 retro). Returns "" when nothing is pending →
+        the dispatch skips (no dream, no spend). A sqlite read, no await (atomic in admit)."""
         pending = self.history.pending_learnings()
-        if not pending:
-            return ""  # nothing to consolidate -> skip the dream (no spend)
-        # Flatten newlines in an observation so each learning stays ONE baked line (a multi-line
-        # observation would otherwise scramble the id<->text association in the directive).
-        lines = "\n".join(
-            f"- [id={row['id']}] {' '.join(row['observation'].split())} (seen {row['recurrence_count']}×)"
-            for row in pending
-        )
-        # Promotion targets are now both surfaced by the 4.4 assembly (Epic 6 retro): a specific
-        # fact about the owner -> `remember` into facts/; broad self-knowledge -> `rewrite_about`.
-        # Both reach later prompts, so a promoted learning actually shapes future replies (CAP-11).
-        return (
-            "(Dream-time reflection: no owner message to reply to. Below are things you've "
-            "noticed and jotted down. Decide which are durable enough to keep: for each one "
-            "worth remembering, save it — a specific fact about the owner with a `remember` op "
-            "(collection facts), or broader self-knowledge with `rewrite_about` — AND mark it "
-            'resolved with `resolve_learning` status "promoted"; for the rest, mark them '
-            '`resolve_learning` status "pruned". Then refresh a short running summary of recent '
-            "conversation with `rewrite_summary` so your memory stays compact. Finally, reply "
-            "with a brief note that you tidied up.)\n\n"
-            f"# Pending learnings\n{lines}"
-        )
+        return build_dream_prompt([(r["id"], r["observation"], r["recurrence_count"]) for r in pending])
 
     async def _run_checkpoint_job(self) -> None:
         """The periodic checkpoint flush (Story 3.1, NFR7) as a reflex-tier job — the
