@@ -10,13 +10,14 @@ routed — the host proves the contract: discover, reject conflicts, connect as 
 client that never imports core's domain.
 """
 
-import asyncio
 import importlib
 import logging
 import pkgutil
 
-from shelldon.contracts import Actor, EventKind, Region
-from shelldon.core.bus import connect
+import msgspec
+
+from shelldon.contracts import Actor, Event, EventKind, MsgKind, Region
+from shelldon.core.bus import connect, read_frame
 from shelldon.plugins.manifest import BasePlugin, Plugin, PluginManifest
 
 log = logging.getLogger("shelldon.plugins.host")
@@ -126,45 +127,72 @@ def discover_plugins(package) -> list[Plugin]:
     return found
 
 
-async def run_plugin_host(socket_path: str, *, plugins_package=None) -> None:
-    """Run the plugin-host as a bus client (AD-8). Discovers + validates plugins FIRST
-    (a conflicting claim raises before any bus connection), connects as
-    `Actor.PLUGIN_HOST`, then drives each loaded plugin's `run(reader, writer)`.
+async def _safe_on_event(plugin: Plugin, event: Event) -> None:
+    """Deliver one event to one plugin, isolating a crash (AD-8: a bad plugin kills only
+    itself — the other subscribers and the host survive)."""
+    try:
+        await plugin.on_event(event)
+    except Exception:
+        log.warning(
+            "plugin %r raised in on_event(%s); isolating it",
+            getattr(plugin.manifest, "name", plugin),
+            event.event.value,
+            exc_info=True,
+        )
 
-    Mirrors the transport/display lifecycle: when the hub goes away (any plugin loop
-    ends), the rest are torn down and the connection closed. With zero plugins (the 7.1
-    production set), the host is a healthy idle bus client that ends on hub disconnect.
 
-    SINGLE-READER LIMIT (Story 7.1 — resolved into Story 7.2): the host owns ONE bus
-    connection and hands the SAME `reader`/`writer` to every plugin's `run`. That is
-    safe only while at most one plugin reads — true in 7.1 (only the idle sentinel runs).
-    With ≥2 real plugins each calling `read_frame` on the shared reader, frames would
-    interleave and corrupt framing. The fix is NOT a `connect()` per plugin — all would
-    register as `Actor.PLUGIN_HOST` and clobber each other in the hub's actor-keyed
-    registry. Story 7.2 (broadcast fan-out) makes the HOST own the single read loop and
-    dispatch events to subscribed plugins via `loaded.subscriptions` (1→N); a plugin
-    never reads the socket itself, so `Plugin.run`'s shape is provisional until then.
+async def _fan_out(event: Event, loaded: LoadedPlugins) -> None:
+    """Fan one broadcast event out to exactly the plugins that subscribed to its kind
+    (AD-11), using the manifest-built registry from load. A non-subscriber is never
+    called; each subscriber is isolated from the others.
+
+    Sequential by design (review Decision 2): `on_event` is contracted to be fast and
+    non-blocking, so a slow handler delaying the rest is a plugin bug, not a host one. A
+    per-plugin timeout / concurrent fan-out is deferred until a real workload (7.3)."""
+    for plugin in loaded.subscriptions.get(event.event, []):
+        await _safe_on_event(plugin, event)
+
+
+async def run_plugin_host(socket_path: str, *, plugins_package=None, plugins=None) -> None:
+    """Run the plugin-host as a bus client (AD-8, Story 7.2). Discovers + validates
+    plugins FIRST (a conflicting claim raises before any bus connection), connects as
+    `Actor.PLUGIN_HOST`, then owns the SINGLE bus read loop: each broadcast `Event` is
+    read once and fanned out to the plugins that subscribed to its kind
+    (`loaded.subscriptions`, the manifest registry from Story 7.1).
+
+    The host — not the plugins — owns the reader (Story 7.1 review: N plugins reading one
+    shared socket corrupts framing). Per-frame resilience mirrors transport/display: a bad
+    envelope is skipped, a framing error or hub EOF ends the loop cleanly. With zero
+    plugins (the production set today) the host is a healthy idle client that reads and
+    drops events until the hub disconnects.
+
+    `plugins` (a pre-built list) is an injection seam for tests; production discovers from
+    `plugins_package` (default: the `shelldon.plugins` package).
     """
-    if plugins_package is None:
-        import shelldon.plugins as plugins_package  # noqa: PLC0415
-
-    loaded = validate_claims(discover_plugins(plugins_package))  # raises before connect
+    if plugins is None:
+        if plugins_package is None:
+            import shelldon.plugins as plugins_package  # noqa: PLC0415
+        plugins = discover_plugins(plugins_package)
+    loaded = validate_claims(plugins)  # raises before connect
     log.info("plugin-host loaded %d plugin(s)", len(loaded.plugins))
 
     reader, writer = await connect(socket_path, Actor.PLUGIN_HOST)
-    tasks = [asyncio.create_task(p.run(reader, writer)) for p in loaded.plugins]
-    if not tasks:
-        # No plugins: stay a healthy idle client until the hub disconnects (so the
-        # host's lifecycle matches the others even in the empty 7.1 production set).
-        tasks = [asyncio.create_task(BasePlugin(PluginManifest(name="_idle")).run(reader, writer))]
     try:
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
-        # Re-raise a genuine loop failure (a cancellation is not in `done`).
-        for task in done:
-            task.result()
+        while True:
+            try:
+                env = await read_frame(reader)
+            except msgspec.ValidationError as exc:
+                log.warning("plugin-host dropping invalid envelope: %s", exc)
+                continue
+            except ValueError as exc:
+                log.warning("plugin-host hit a framing error, ending: %s", exc)
+                return
+            if env is None:  # hub gone / clean EOF
+                return
+            if env.kind is MsgKind.EVENT and isinstance(env.body, Event):
+                await _fan_out(env.body, loaded)
+            else:
+                log.warning("plugin-host ignoring non-event envelope %s (%s)", env.id, env.kind)
     finally:
         writer.close()
         try:

@@ -10,14 +10,11 @@ and may claim display regions / hardware resources — the host rejects conflict
 claims at load (AD-5: no two writers per region/resource).
 """
 
-import logging
 from typing import Protocol, runtime_checkable
 
 import msgspec
 
-from shelldon.contracts import EventKind, Region
-
-log = logging.getLogger("shelldon.plugins.manifest")
+from shelldon.contracts import Event, EventKind, Region
 
 
 class PluginManifest(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -40,47 +37,35 @@ class PluginManifest(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
 
 @runtime_checkable
 class Plugin(Protocol):
-    """The bus-client surface the plugin-host drives. A plugin exposes its `manifest`
-    and a `run(reader, writer)` coroutine the host calls after connecting it to the bus.
+    """The plugin surface the plugin-host drives (Story 7.2). A plugin exposes its
+    `manifest` and an `on_event(event)` handler the host calls when a broadcast event
+    of a kind the plugin subscribed to arrives.
 
-    In Story 7.1 nothing is routed (the event fan-out is 7.2), so the default `run`
-    stays alive until the hub closes the connection. A real plugin (XP widget 7.3,
-    sensing 7.4) overrides `run` with its own per-frame loop — built on the SAME bus
-    client and the SAME per-frame resilience the transport/display adapters use.
+    The HOST owns the single bus connection and the read loop — a plugin never reads the
+    socket itself (Story 7.1 review: N plugins each reading the shared socket corrupts
+    framing). A plugin is a pure reactor: it gets the events it subscribed to (via the
+    manifest registry) and reacts; emitting events / claiming regions is a later story.
+
+    CONTRACT (Story 7.2 review Decision 2): `on_event` MUST be fast and non-blocking. The
+    host fans out sequentially on its single read loop, so a slow/IO-blocking handler
+    delays every other subscriber and stalls the loop (and, via backpressure, core's next
+    event publish). Offload real work to your own task; do not `await` long operations
+    here. A per-plugin timeout is deferred until a real plugin workload exists (7.3).
     """
 
     manifest: PluginManifest
 
-    async def run(self, reader, writer) -> None: ...
+    async def on_event(self, event: Event) -> None: ...
 
 
 class BasePlugin:
-    """Minimal concrete plugin: holds a manifest and a stay-alive `run` (Story 7.1).
-
-    `run` blocks on the hub until EOF, then returns — so the host's lifecycle (connect,
-    drive plugins, tear down when the hub goes away) is exercisable end-to-end before any
-    event is wired. Subclasses override `run` once 7.2 gives them events to react to.
-    """
+    """Minimal concrete plugin: holds a manifest and a no-op `on_event`. Real plugins
+    (the XP widget 7.3) subclass this and override `on_event` to react to the broadcast
+    events their manifest subscribes to (Story 7.2)."""
 
     def __init__(self, manifest: PluginManifest):
         self.manifest = manifest
 
-    async def run(self, reader, writer) -> None:
-        # No traffic to consume yet (events = Story 7.2). Drain the reader so the
-        # coroutine ends cleanly when the hub disconnects (read_frame -> None / EOF),
-        # mirroring the display's pure-receiver teardown.
-        from shelldon.core.bus import read_frame
-
-        while True:
-            try:
-                env = await read_frame(reader)
-            except msgspec.ValidationError:
-                # Decodable framing, invalid message: stream still aligned -> skip it.
-                continue
-            except ValueError as exc:
-                # Framing error (oversized/corrupt length): stream offset lost -> end.
-                # Log so the operator gets a signal for why the plugin loop ended.
-                log.warning("plugin %r ended on a bus framing error: %s", self.manifest.name, exc)
-                return
-            if env is None:  # hub gone / clean EOF
-                return
+    async def on_event(self, event: Event) -> None:
+        # Default: react to nothing. Subscribers override this.
+        return

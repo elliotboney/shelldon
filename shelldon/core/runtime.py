@@ -30,6 +30,8 @@ from shelldon.contracts import (
     AddFace,
     CaptureLearning,
     Envelope,
+    Event,
+    EventKind,
     ResolveLearning,
     MsgKind,
     OutboundMessage,
@@ -388,6 +390,14 @@ class Core:
             self._record_turn(result.payload)
         await self._await_reap()  # release the fork-server guard BEFORE the arbiter slot (AC1)
         folded = self.arbiter.complete()  # ALWAYS runs — guaranteed slot release
+        if result.ok:
+            # Publish the "answered" broadcast event (Story 7.2) AFTER the slot is released
+            # (review Decision 1): _emit_event awaits bus.deliver->drain(), which can SUSPEND
+            # under a backpressured/wedged plugin-host. Before arbiter.complete() that suspend
+            # would hold the turn slot forever; after it the slot is already free, and the
+            # event is best-effort + order-independent. (Bounding core->consumer drain
+            # backpressure for ALL emit helpers is a separate, pre-existing concern — iceboxed.)
+            await self._emit_event(EventKind.MESSAGE_ANSWERED)
         if folded is not None:
             await self._start_turn(folded)
 
@@ -451,6 +461,25 @@ class Core:
                 body=OutboundMessage(text=text),
             )
         )
+
+    async def _emit_event(self, kind: EventKind) -> None:
+        """Publish a broadcast pet-lifecycle event (AD-11 mode 2, Story 7.2): the hub fans
+        it out to the plugin-host, which dispatches to subscribed plugins. Best-effort — a
+        publish failure must NEVER break the turn loop or the slot release (same discipline
+        as `_record_turn`). Core stays plugin-agnostic: it emits a closed `EventKind`,
+        knowing nothing about who (if anyone) subscribes. `dst=None` = broadcast."""
+        try:
+            await self.bus.deliver(
+                Envelope(
+                    id=uuid4().hex,
+                    kind=MsgKind.EVENT,
+                    src=Actor.CORE,
+                    dst=None,
+                    body=Event(event=kind),
+                )
+            )
+        except Exception as exc:
+            log.warning("event %s publish failed (%s); turn unaffected", kind.value, exc)
 
     async def _push_face(self, face: str) -> None:
         self._last_face = face  # track what's on screen (lifecycle AND mood pushes)

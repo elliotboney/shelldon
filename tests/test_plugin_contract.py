@@ -35,12 +35,14 @@ def test_status_bar_widget_region_exists():
     assert Region.FACE == "face"
 
 
-def test_vocabulary_is_wire_additive_not_a_new_message():
-    # EventKind is a DECLARATION, not a wire body (Story 7.2 adds the Event message).
-    # It must NOT have leaked into the MsgKind set or bumped the schema version.
+def test_eventkind_stays_distinct_from_msgkind():
+    # EventKind (the closed broadcast vocabulary) is a SEPARATE enum from MsgKind (the
+    # envelope kinds). Story 7.2 adds MsgKind.EVENT (the broadcast envelope kind) + the
+    # Event body, but the EventKind *values* (message-answered, …) are never MsgKind
+    # members, and the additive change did NOT bump the schema version (D5).
     assert SCHEMA_VERSION == 1
-    assert "EventKind" not in {k.name for k in MsgKind}
-    assert not hasattr(MsgKind, "EVENT")
+    msgkind_values = {k.value for k in MsgKind}
+    assert all(ek.value not in msgkind_values for ek in EventKind)
 
 
 def test_manifest_is_typed_and_defaults_empty():

@@ -15,7 +15,7 @@ from pathlib import Path
 
 import msgspec
 
-from shelldon.contracts import ROUTING_TABLE, Actor, Envelope
+from shelldon.contracts import ROUTING_TABLE, Actor, Envelope, MsgKind
 from shelldon.core.bus.frame import read_frame, read_registration, write_frame
 
 log = logging.getLogger("shelldon.bus")
@@ -126,10 +126,29 @@ class BusServer:
         await self._route(env)
 
     async def _route(self, env: Envelope) -> None:
+        if env.kind is MsgKind.EVENT:
+            # AD-11 routing mode 2 (broadcast, Story 7.2): a pet-lifecycle event fans out
+            # to the plugin-host, which dispatches it to the plugins that subscribed (the
+            # manifest registry). One plugin-host today, so "fan out to N subscribers" is a
+            # deliver-to-the-host; the host does the per-plugin fan-out. A broadcast with no
+            # subscriber is NORMAL (the pet runs fine with zero plugins — CAP-3), so an
+            # absent host is a debug-level drop, NOT the warning a missing point-to-point
+            # target gets. (A registered host whose write then fails is abnormal — that
+            # still warns + deregisters, in _deliver_to.)
+            if Actor.PLUGIN_HOST in self._registry:
+                await self._deliver_to(Actor.PLUGIN_HOST, env)
+            else:
+                log.debug("no plugin-host subscribed; dropping event %s", env.id)
+            return
         dest = ROUTING_TABLE[env.kind]
         if dest is Actor.CORE:
             await self.core_inbox.put(env)
             return
+        await self._deliver_to(dest, env)
+
+    async def _deliver_to(self, dest: Actor, env: Envelope) -> None:
+        """Write `env` to the registered `dest` connection; drop-with-log if `dest` is
+        absent, and deregister it if the write fails — never kill the sender."""
         target = self._registry.get(dest)
         if target is None:
             log.warning("no connection for %s; dropping %s envelope %s", dest, env.kind, env.id)
