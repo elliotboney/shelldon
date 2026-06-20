@@ -78,6 +78,19 @@ def resolve_worker_identity(env=None) -> tuple[int | None, int | None]:
     return uid, gid
 
 
+def _default_renderer(env):
+    """The display surface: the real Waveshare E-Ink panel when `SHELLDON_DISPLAY=waveshare`
+    (the Pi), else the recording `StubRenderer` (dev/headless — no hardware touched). Gated
+    like the worker uid-drop: the heavyweight path engages only when explicitly configured.
+    `WaveshareRenderer` imports cleanly here (PIL/spidev/driver are lazy-imported on first
+    draw), so referencing it off-Pi is safe."""
+    if env.get("SHELLDON_DISPLAY", "").strip().lower() == "waveshare":
+        from shelldon.display.waveshare import WaveshareRenderer
+
+        return WaveshareRenderer()
+    return StubRenderer()
+
+
 async def _await_bus_up(core: Core, timeout: float = 5.0) -> None:
     """Block until core's bus is listening, so children can connect (an unregistered
     or unreachable destination drops/fails — children must start after the socket).
@@ -120,7 +133,9 @@ def _broker_proc(socket_path, env) -> None:  # pragma: no cover - runs in a chil
 
 
 def _display_proc(socket_path) -> None:  # pragma: no cover - runs in a child process
-    asyncio.run(run_display(socket_path, StubRenderer()))  # real E-Ink driver lands with the hardware
+    # The display child builds its renderer from env (like the broker child builds its chain):
+    # the real Waveshare panel on the Pi (SHELLDON_DISPLAY=waveshare), else the stub.
+    asyncio.run(run_display(socket_path, _default_renderer(os.environ)))
 
 
 def _transport_proc(socket_path) -> None:  # pragma: no cover - runs in a child process
@@ -204,7 +219,7 @@ async def run_app(
 
     core = Core(socket_path, forkserver, memory_root=memory_root, **(core_kwargs or {}))
     chain = chain if chain is not None else build_chain(env)
-    renderer = renderer if renderer is not None else StubRenderer()
+    renderer = renderer if renderer is not None else _default_renderer(env)
     launch = launch_actors or launch_multiprocess
     await launch(core, socket_path, chain, renderer, inbound, outbound)
 
