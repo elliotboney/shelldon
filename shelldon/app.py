@@ -78,6 +78,20 @@ def resolve_worker_identity(env=None) -> tuple[int | None, int | None]:
     return uid, gid
 
 
+async def _transport_actor(socket_path, inbound=None, outbound=None, env=None) -> None:
+    """The chat surface: the Telegram bot when `SHELLDON_TRANSPORT=telegram` (build from
+    `TELEGRAM_BOT_TOKEN`/`ALLOWED_USERS`), else the local CLI (stdin/stdout, or the injected
+    in/out the test smoke passes). Gated like the renderer — the heavyweight path engages
+    only when configured. `telegram` is lazy-imported so it (and httpx) load only when used."""
+    env = os.environ if env is None else env
+    if env.get("SHELLDON_TRANSPORT", "").strip().lower() == "telegram":
+        from shelldon.transport.telegram import run_telegram_from_env
+
+        await run_telegram_from_env(socket_path, env)
+    else:
+        await run_cli_transport(socket_path, inbound=inbound, outbound=outbound)
+
+
 def _default_renderer(env):
     """The display surface: the real Waveshare E-Ink panel when `SHELLDON_DISPLAY=waveshare`
     (the Pi), else the recording `StubRenderer` (dev/headless — no hardware touched). Gated
@@ -116,7 +130,7 @@ async def launch_in_process(core, socket_path, chain, renderer, inbound, outboun
         asyncio.create_task(core.run()),
         asyncio.create_task(run_broker(socket_path, chain)),
         asyncio.create_task(run_display(socket_path, renderer)),
-        asyncio.create_task(run_cli_transport(socket_path, inbound=inbound, outbound=outbound)),
+        asyncio.create_task(_transport_actor(socket_path, inbound, outbound)),
         asyncio.create_task(run_plugin_host(socket_path)),  # Story 7.1 — empty set, idles
     ]
     try:
@@ -139,7 +153,7 @@ def _display_proc(socket_path) -> None:  # pragma: no cover - runs in a child pr
 
 
 def _transport_proc(socket_path) -> None:  # pragma: no cover - runs in a child process
-    asyncio.run(run_cli_transport(socket_path))  # stdin/stdout defaults
+    asyncio.run(_transport_actor(socket_path, env=os.environ))  # telegram or CLI, per env
 
 
 def _plugin_host_proc(socket_path) -> None:  # pragma: no cover - runs in a child process
