@@ -3,7 +3,7 @@ baseline_commit: 498a0a0
 ---
 # Story 8.0: Live-LLM smoke — full-stack verification against a real brain
 
-Status: ready-for-dev
+Status: done
 
 <!-- Retro-born (Epic 6 action #1, re-affirmed as THE binding next move by the Epic 7 retro 2026-06-19). The dominant project risk: the whole memory/learning/autonomy line is mechanism-proven but NEVER run against a live LLM. NOT in any epics.md — a verification story, like 5.0/7.0/7.5 were born outside the plan. Proposed as the first story of a "Verify & Deploy" phase (Epic 8) — owner may rename/re-slot. -->
 <!-- KEY DISCOVERY (do not rebuild): the ELICITATION smoke already exists — tests/test_turn_dream_live_smoke.py (test_live_turn_elicits_a_memory_op + test_live_dream_emits_resolve_and_summary) and a provider smoke (test_provider_live_smoke.py), both `-m live`, network-gated, NEVER RUN. The GLM-via-Z.ai chain is wired (broker/chain.py _glm, default glm-4.7, GLM_MODEL override). This story adds the FULL-STACK layer those tests bypass + captures findings. -->
@@ -56,18 +56,18 @@ so that the project's dominant risk (the whole brain is mechanism-proven but nev
 
 ## Tasks / Subtasks
 
-- [ ] **Task 1 — Full-stack live turn test** (AC1, AC4)
-  - [ ] New `tests/test_full_stack_live_smoke.py` (or extend `test_turn_dream_live_smoke.py`): `pytest.mark.live` + `skipif(not GLM key)`. Build the 1.8 harness with `chain=build_chain(os.environ)` + `Spawns(worker=run_worker)` (reuse `build_harness`/`Harness` from `test_end_to_end_turn.py`); long `turn_timeout` for real latency.
-  - [ ] Feed a memory-inviting owner message; assert reply out + non-degraded face + a `remember` APPLIED (curated `facts/` file exists, redirected to tmp via the conftest autouse). Print reply + ops.
-  - [ ] verify: skips cleanly with no key; default `uv run pytest -q` unaffected (still 537/network-free).
-- [ ] **Task 2 — Full-stack live dream test** (AC2)
-  - [ ] Seed 3 pending learnings via `core.history.capture_learning`; drive `_build_dream_prompt` through the live wire; assert a seeded learning's sqlite status transitioned (`pending`→`promoted`/`pruned`). Print directive + reply + applied ops; observe (don't gate) `rewrite_summary`.
-  - [ ] verify: skips without key; on a green run the learning row actually changed state.
-- [ ] **Task 3 — Run + capture findings** (AC3)
-  - [ ] Owner runs (paid, manual): the 2 new full-stack tests + the 2 existing elicitation smokes + the provider smoke, with `.env` loaded + `GLM_MODEL` set.
-  - [ ] Fill `live-smoke-findings-{date}.md`: per run — model, reply, ops emitted vs applied, gaps. Green → "verified"; gaps → follow-on action items.
-- [ ] **Task 4 — Boundary gate**
-  - [ ] verify: `uv run pytest -q` 537 green (live deselected); `uv run lint-imports` 3 KEPT; `uv sync --locked` 0 new deps; `git status -- shelldon/core/` empty (no product change unless a finding forces a separately-scoped fix).
+- [x] **Task 1 — Full-stack live turn test** (AC1, AC4)
+  - [x] New `tests/test_full_stack_live_smoke.py`: `pytestmark = pytest.mark.live` + `skipif(not _GLM_KEY)`. Builds the 1.8 harness with `chain=build_chain(os.environ)` + `Spawns(worker=run_worker)` (imports `build_harness`/`Spawns`/`_await` from `test_end_to_end_turn.py`, same as `test_endurance_soak`); `turn_timeout=60s` for real latency.
+  - [x] `test_full_stack_live_turn_applies_a_memory_op`: feeds a memory-inviting owner message; asserts reply out + non-degraded face (`FACE_DEGRADED not in renderer.rendered`) + a `remember` APPLIED (a `facts/` `.md` file under the conftest-redirected tmp tree). Prints reply + applied facts/ contents.
+  - [x] verify: collects + **skips cleanly with no key**; default `uv run pytest -q` unaffected (537 pass, now 7 deselected).
+- [x] **Task 2 — Full-stack live dream test** (AC2)
+  - [x] `test_full_stack_live_dream_applies_resolve_learning`: seeds 3 pending learnings via `core.history.capture_learning`; drives the REAL `core._build_dream_prompt()` directive through the live wire; asserts `len(pending_learnings())` dropped (a seeded learning transitioned `pending`→`promoted`/`pruned` in sqlite). Prints directive + reply + before/after pending. `rewrite_summary` observed, not gated.
+  - [x] verify: skips without key; collects clean.
+- [x] **Task 3 — Run + capture findings** (AC3)
+  - [x] **OWNER ran** `uv run pytest -m live -s -k full_stack` (glm-4.7) → **2 passed in 7.38s**. Turn: reply + `facts/favorite-db.md` written = "BigQuery". Dream: reply + pending learnings 3→0 (all `resolve_learning` applied). Both GREEN — no gaps.
+  - [x] `live-smoke-findings-2026-06-20.md` results table filled; elicitation + full-stack both recorded GREEN; "what remains" updated (apply path now ✅, only deployment left).
+- [x] **Task 4 — Boundary gate**
+  - [x] verify: `uv run pytest -q` → **537 pass / 3 skip / 7 deselected** (the 2 new live tests deselected); `uv run lint-imports` → **3 KEPT**; `uv sync --locked` → **0 dep changes**; `git status -- shelldon/core/` → **empty** (test-only, no product change).
 
 ## Dev Notes
 
@@ -105,14 +105,38 @@ The live network calls cost real tokens and use the owner's Z.ai key; **the dev 
 
 ### Agent Model Used
 
+claude-opus-4-8[1m] (Opus 4.8, 1M context)
+
 ### Debug Log References
+
+- `uv run pytest -m live -k full_stack --collect-only` → 2 collected (imports resolve: `build_harness`/`Spawns`/`_await` from `test_end_to_end_turn`, `build_chain`, `run_worker`).
+- `uv run pytest -m live -k full_stack` (no key in env) → **2 skipped** (skipif fires; no network, no cost).
+- `uv run pytest -q` → **537 passed, 3 skipped, 7 deselected** (was 5 deselected; +2 = the new live tests, correctly deselected by `addopts = -m 'not live'`).
+- `uv run lint-imports` → 3 KEPT / 0 broken · `uv sync --locked` → 0 dep changes · `git status -- shelldon/core/` → empty.
 
 ### Completion Notes List
 
+- **No product code, no TDD red/green cycle — by design.** 8.0 adds only a test scaffold that rides already-verified infrastructure (`build_harness`, the GLM chain, `_apply_proposed_ops`, the learnings table — all tested elsewhere). There is nothing to implement-then-make-pass; the deliverable IS the live test + the findings record. Correctness is verified by (a) clean collection + skip without a key, (b) the default suite staying green, and (c) the owner's `-m live` run.
+- **The full-stack tests assert the APPLY path, not just elicitation.** The turn test asserts a `facts/` `.md` file actually lands under the (tmp-redirected) curated tree — i.e. core decoded the model's `remember` and wrote it. The dream test seeds 3 pending learnings, feeds the REAL `_build_dream_prompt()` directive through the wire, and asserts `pending_learnings()` shrank — i.e. core applied a `resolve_learning` soft transition in sqlite. Both print the reply + the observable end state so a red run is a legible FINDING, not a silent pass.
+- **Reuses the 1.8 harness verbatim** — `Spawns(worker=run_worker)` runs the REAL `assemble_prompt` (not the identity `_passthrough_worker`), so the live model sees the real `SYSTEM_INSTRUCTION` + memory-shaped prompt; `chain=build_chain(os.environ)` is the real GLM/Z.ai chain; the conftest autouse redirects memory/history to `tmp_path` so the asserted artifacts never touch real `$HOME`.
+- **⏳ OWNER ACTION REMAINING (the actual verification):** the dev cannot run a paid network call. The one step between this and a closed story is the owner running `uv run pytest -m live -s -k full_stack` (`.env` loaded, `GLM_MODEL` set) and recording the two rows in `live-smoke-findings-2026-06-20.md`. A green pair retires the dominant risk up to deployment; a red/partial run's gap is logged + scoped as a follow-on (the retro's ask). **Status is `review` for the scaffold; flip to `done` after that run.**
+- Elicitation half already GREEN (2026-06-20, glm-4.7): a real turn emits a decodable `remember`; the real dream directive emits the full vocabulary with correct promote/prune judgment. The full-stack run extends that from "the prompt elicits the op" to "core applies the op end-to-end."
+
 ### File List
+
+- `tests/test_full_stack_live_smoke.py` — NEW. 2 `-m live` full-stack tests (turn→`facts/` file applied; dream→learning-row transition), gated on a GLM key, built on the 1.8 harness with the real chain + `run_worker`.
+- `_bmad-output/implementation-artifacts/live-smoke-findings-2026-06-20.md` — MODIFIED. Added the "Full-stack run (Story 8.0)" section + a results table to fill from the owner's run (the elicitation half was already recorded green).
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — MODIFIED. `8-0 → in-progress → review`.
 
 ### Review Findings
 
+- [x] [Review][Patch] Face-degraded assertion is a no-op — `FACE_DEGRADED not in h.renderer.rendered` compares a string to `list[StateSnapshot]`, always True, never catches a degraded face [`tests/test_full_stack_live_smoke.py:74`] — **FIXED 2026-06-20**: `not any(s.face == FACE_DEGRADED for s in h.renderer.rendered)` (mirrors `test_end_to_end_turn.py:317`). Still collects+skips clean; suite 537 green.
+- [x] [Review][Defer] `_now()` hardcoded to 2026-06-20 [`tests/test_full_stack_live_smoke.py:47–48`] — deferred, pre-existing; doesn't affect test correctness (timestamps are metadata, `pending_learnings()` doesn't filter by date), but use `datetime.now(UTC)` if the test is long-lived
+- [x] [Review][Defer] Timeout expiry yields opaque `AssertionError` from `_await`, not a labeled `(FINDING)` message [`tests/test_full_stack_live_smoke.py:65,103`] — deferred, pre-existing `_await` contract; a guard `assert h.outbound, "no reply — chain never responded"` before `h.outbound[0]` would improve failure legibility
+
 ### Change Log
 
+- 2026-06-20 — **DONE: owner ran the full-stack live smoke (glm-4.7) → 2 passed.** Turn applied a `remember` (core wrote `facts/favorite-db.md`); dream applied 3 `resolve_learning` ops (pending 3→0 in sqlite). Both GREEN, no gaps. The apply path is verified end-to-end against a live brain — **the dominant project risk (mechanism-proven, never live-LLM-tested) is RETIRED up to deployment.** Findings doc filled. Status → done.
+- 2026-06-20 — Review patch applied: the face-degraded assertion was a no-op (`str not in list[StateSnapshot]` is always True) → fixed to `not any(s.face == FACE_DEGRADED for s in h.renderer.rendered)`. 2 review items accepted as deferred (`_now()` hardcoded date; opaque `_await` timeout message — both pre-existing, non-correctness). Still collects+skips clean; suite 537 green. Owner run still gates `done`.
+- 2026-06-20 — Story 8.0 implemented (scaffold): `tests/test_full_stack_live_smoke.py` — 2 opt-in `-m live` full-stack tests driving a real owner turn + a real dream through the WHOLE wire (core→worker[`run_worker`]→broker→GLM→Result→`_apply_proposed_ops`) and asserting the APPLY end state (a `facts/` file written / a learning row transitioned), built on the 1.8 `build_harness(chain=build_chain(os.environ))`. Collects + skips cleanly without a key; default suite 537 green (7 deselected); 0 new deps; 3 contracts KEPT; no `core/` change. Findings doc extended with a full-stack section to fill from the owner's run. The paid `-m live` execution + findings-fill is the one remaining OWNER action before `done`. Status → review.
 - 2026-06-19 — Story 8.0 created (retro-born; Epic 6 action #1, re-affirmed binding by the Epic 7 retro). Full-stack live-LLM verification: a real owner turn + a real dream driven through the actual core→worker→broker→GLM→Result→apply wire (reusing the 1.8 `build_harness` with `chain=build_chain(os.environ)`), asserting core APPLIES the ops (a `facts/` file / a learning-row transition) — beyond the existing elicitation-only smokes — plus a committed findings doc. Opt-in `-m live`, network-gated, out of CI; 0 new deps; no `core/` change. Status → ready-for-dev.
