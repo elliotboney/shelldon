@@ -22,7 +22,7 @@ shelldon is a tiny AI pet you **talk to** — a little face on a screen that tal
 
 **No subscription needed.** Point it at a free AI provider and it costs **$0/month** to run — or a few dollars for a fancier brain. [Jump to costs ↓](#cost-of-running-it)
 
-That's the gist. Everything below is the *how* and *why*.
+That's the gist. **Want to run it? [Getting started ↓](#getting-started).** Everything else below is the *how* and *why*.
 
 ---
 
@@ -84,6 +84,47 @@ A few decisions that shape everything:
 | Spec (11 capabilities) | [`SPEC.md`](_bmad-output/specs/spec-openclawgotchi-v2/SPEC.md) |
 | Architecture spine (15 decisions) | [`ARCHITECTURE-SPINE.md`](_bmad-output/planning-artifacts/architecture/architecture-shelldon-2026-06-15/ARCHITECTURE-SPINE.md) |
 | Epics & stories (7 epics) | [`epics.md`](_bmad-output/planning-artifacts/epics.md) |
+
+## Getting started
+
+You need two things: a **brain** (an LLM API key) and a **chat** (a Telegram bot). Both have free or cheap options.
+
+**1. Get a brain.** shelldon defaults to **GLM via Z.ai** — Anthropic-compatible, well under $20/month for daily use. [Sign up here](https://z.ai/subscribe?ic=LGN84JDUIC) and copy an API key. (Prefer free? Point it at a free-tier provider or a local Ollama instead — see [Cost of running it](#cost-of-running-it).)
+
+**2. Get a chat.** In Telegram:
+- Message **@BotFather**, send `/newbot`, give it a name and a username ending in `bot`. It replies with a **bot token**.
+- **Message your new bot once** (`/start`) so it's allowed to see you.
+- Message **@userinfobot** to get your numeric **user id** (your allowlist entry).
+
+**3. Get the code and configure it.**
+```bash
+git clone https://github.com/elliotboney/shelldon.git
+cd shelldon
+cp .env.example .env      # then edit .env and fill in:
+#   GLM_API_KEY=...                   your Z.ai key
+#   SHELLDON_TELEGRAM_BOT_TOKEN=...   from @BotFather
+#   ALLOWED_USERS=123456789           your Telegram user id (comma-separated for more)
+```
+
+**4. Run it — pick one path:**
+
+**On a Raspberry Pi** (the full pet: E-Ink face + a service that starts on boot):
+```bash
+./deploy/setup-pi.sh            # installs uv, deps, the E-Ink stack, and a systemd service
+sudo systemctl start shelldon   # start it (autostarts on every boot from here)
+journalctl -u shelldon -f       # watch it think
+```
+The script detects the [Waveshare panel](#hardware); on a board without one it runs headless. Tune the faces in [`shelldon/display/waveshare.py`](shelldon/display/waveshare.py).
+
+**On any Linux box** (a server, a spare machine, or WSL — no hardware, chat only):
+```bash
+uv sync                                   # install deps (get uv: https://docs.astral.sh/uv/)
+set -a; . ./.env; set +a                  # load your config into the environment
+SHELLDON_TRANSPORT=telegram uv run python -m shelldon
+```
+> The forked-per-turn worker needs real `os.fork()`, so the running app is **Linux-only** (a Pi, a server, or WSL — not macOS; the test suite runs everywhere, the live app does not).
+
+Now message your bot. It'll reply with its own voice, remember what you tell it, reach out on its own when you've been quiet, and — on a Pi — show its mood on the screen.
 
 ## Architecture at a glance
 
