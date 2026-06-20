@@ -10,11 +10,18 @@ and may claim display regions / hardware resources — the host rejects conflict
 claims at load (AD-5: no two writers per region/resource).
 """
 
-from typing import Protocol, runtime_checkable
+from collections.abc import Awaitable, Callable
+from typing import Protocol, TypeAlias, runtime_checkable
 
 import msgspec
 
 from shelldon.contracts import Event, EventKind, Region
+
+#: The draw seam (Story 7.3): a region-scoped sender the host binds to a plugin via
+#: `on_start`. `emit(region, face)` pushes a render string to a display region the plugin
+#: CLAIMED (the host validates the claim + manages the per-region seq). A plugin draws
+#: through this — it never builds an Envelope or touches the bus client itself.
+Emit: TypeAlias = Callable[[Region, str], Awaitable[None]]
 
 
 class PluginManifest(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -55,16 +62,24 @@ class Plugin(Protocol):
 
     manifest: PluginManifest
 
+    async def on_start(self, emit: Emit) -> None: ...
+
     async def on_event(self, event: Event) -> None: ...
 
 
 class BasePlugin:
-    """Minimal concrete plugin: holds a manifest and a no-op `on_event`. Real plugins
-    (the XP widget 7.3) subclass this and override `on_event` to react to the broadcast
-    events their manifest subscribes to (Story 7.2)."""
+    """Minimal concrete plugin: holds a manifest, stores the bound draw seam, and no-ops
+    its lifecycle hooks. Real plugins (the XP widget 7.3) subclass this and override
+    `on_start` (draw initial state) and/or `on_event` (react to subscribed events)."""
 
     def __init__(self, manifest: PluginManifest):
         self.manifest = manifest
+        self._emit = None  # bound by the host via on_start (Story 7.3 draw seam)
+
+    async def on_start(self, emit: Emit) -> None:
+        # Host hands the plugin its region-scoped emitter once, after connect. Default:
+        # store it (subclasses override to draw an initial widget); react to nothing else.
+        self._emit = emit
 
     async def on_event(self, event: Event) -> None:
         # Default: react to nothing. Subscribers override this.

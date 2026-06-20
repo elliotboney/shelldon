@@ -13,8 +13,8 @@ import types
 
 import pytest
 
-from shelldon.contracts import Actor, Envelope, Event, EventKind, MsgKind, Region
-from shelldon.core.bus import BusServer, write_frame
+from shelldon.contracts import Actor, Envelope, Event, EventKind, MsgKind, Region, StateSnapshot
+from shelldon.core.bus import BusServer, connect, read_frame, write_frame
 from shelldon.plugins.host import (
     PluginLoadError,
     _fan_out,
@@ -98,12 +98,13 @@ def test_duplicate_subscription_is_NOT_a_conflict():
 
 # --- AC2: discovery from the plugins package ------------------------------------
 
-def test_real_plugins_package_discovers_nothing_yet():
-    # Production load in 7.1 is empty (XP=7.3, sensing=7.4); the infra modules
-    # (host/manifest/__init__) expose no MANIFEST, so they self-exclude.
+def test_real_plugins_package_discovers_the_xp_plugin():
+    # Story 7.3: the XP plugin is on by default (auto-discovered). The infra modules
+    # (host/manifest/__init__) expose no MANIFEST, so they self-exclude — only xp loads.
     import shelldon.plugins as pkg
 
-    assert discover_plugins(pkg) == []
+    found = discover_plugins(pkg)
+    assert [p.manifest.name for p in found] == ["xp"]
 
 
 def test_discovers_a_real_plugin_module_from_a_package(tmp_path):
@@ -196,6 +197,82 @@ def test_discovery_skips_a_module_that_fails_to_import(tmp_path, caplog):
         sys.path.remove(str(tmp_path))
         for mod in [m for m in sys.modules if m.startswith("halfbroken_plugins")]:
             del sys.modules[mod]
+
+
+# --- Story 7.3 AC3: the draw seam (host hands each plugin a region-scoped emitter) ---
+
+class _Drawer(BasePlugin):
+    """A fake plugin that draws to a region in on_start (Story 7.3)."""
+
+    def __init__(self, name, regions, draw_region, text="hello"):
+        super().__init__(PluginManifest(name=name, regions=regions))
+        self._draw_region = draw_region
+        self._text = text
+
+    async def on_start(self, emit) -> None:
+        await super().on_start(emit)  # stores self._emit
+        await emit(self._draw_region, self._text)
+
+
+async def _wait_registered(srv, actor, timeout=1.0):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if srv._registry.get(actor) is not None:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"{actor} never registered")
+
+
+async def test_plugin_draws_to_its_claimed_region(sock_path):
+    drawer = _Drawer("widget", (Region.STATUS_BAR,), Region.STATUS_BAR, text="Lv1")
+    srv = BusServer(socket_path=sock_path)
+    await srv.start()
+    d_reader, _d_writer = await connect(sock_path, Actor.DISPLAY)
+    host_task = asyncio.create_task(run_plugin_host(sock_path, plugins=[drawer]))
+    try:
+        got = await asyncio.wait_for(read_frame(d_reader), timeout=1.0)
+        assert got.kind is MsgKind.STATE_SNAPSHOT
+        assert got.src is Actor.PLUGIN_HOST
+        assert isinstance(got.body, StateSnapshot)
+        assert got.body.region is Region.STATUS_BAR
+        assert got.body.face == "Lv1"
+        await srv.stop()
+        await asyncio.wait_for(host_task, timeout=1.0)
+    finally:
+        if not host_task.done():
+            host_task.cancel()
+            await asyncio.gather(host_task, return_exceptions=True)
+
+
+async def test_emit_to_an_unclaimed_region_is_dropped(sock_path, caplog):
+    # The plugin claims STATUS_BAR but tries to draw to FACE (unclaimed) — the host's
+    # region-scoped guard drops it (single-writer: a plugin draws only what it claimed).
+    drawer = _Drawer("widget", (Region.STATUS_BAR,), Region.FACE, text="nope")
+    srv = BusServer(socket_path=sock_path)
+    await srv.start()
+    d_reader, _d_writer = await connect(sock_path, Actor.DISPLAY)
+    host_task = asyncio.create_task(run_plugin_host(sock_path, plugins=[drawer]))
+    try:
+        await _wait_registered(srv, Actor.PLUGIN_HOST)
+        with caplog.at_level("WARNING", logger="shelldon.plugins.host"):
+            # Nothing should reach the display; a short read times out.
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(read_frame(d_reader), timeout=0.2)
+        assert any("did not claim" in r.message.lower() or "unclaimed" in r.message.lower() for r in caplog.records)
+        await srv.stop()
+        await asyncio.wait_for(host_task, timeout=1.0)
+    finally:
+        if not host_task.done():
+            host_task.cancel()
+            await asyncio.gather(host_task, return_exceptions=True)
+
+
+def test_plugin_claiming_the_face_region_is_rejected():
+    # Core owns the face region (AD-5) — a plugin may not claim it (closes a 7.1 gap).
+    with pytest.raises(PluginLoadError) as exc:
+        validate_claims([_plugin("greedy", regions=(Region.FACE,))])
+    assert "face" in str(exc.value).lower()
 
 
 # --- AC1: fan-out via the manifest registry (host-side) -------------------------

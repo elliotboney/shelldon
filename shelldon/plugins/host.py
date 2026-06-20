@@ -13,11 +13,12 @@ client that never imports core's domain.
 import importlib
 import logging
 import pkgutil
+import uuid
 
 import msgspec
 
-from shelldon.contracts import Actor, Event, EventKind, MsgKind, Region
-from shelldon.core.bus import connect, read_frame
+from shelldon.contracts import Actor, Envelope, Event, EventKind, MsgKind, Region, StateSnapshot
+from shelldon.core.bus import connect, read_frame, write_frame
 from shelldon.plugins.manifest import BasePlugin, Plugin, PluginManifest
 
 log = logging.getLogger("shelldon.plugins.host")
@@ -62,6 +63,11 @@ def validate_claims(plugins: list[Plugin]) -> LoadedPlugins:
     for plugin in plugins:
         m: PluginManifest = plugin.manifest
         for region in m.regions:
+            if region is Region.FACE:
+                raise PluginLoadError(
+                    f"plugin {m.name!r} claims the FACE region, which core owns (AD-5) — "
+                    f"plugins may only claim widget regions"
+                )
             if region in regions:
                 raise PluginLoadError(
                     f"display region {region.value!r} claimed by both "
@@ -153,6 +159,56 @@ async def _fan_out(event: Event, loaded: LoadedPlugins) -> None:
         await _safe_on_event(plugin, event)
 
 
+def _make_emitter(plugin: Plugin, writer, seqs: dict[Region, int]):
+    """Build a plugin's region-scoped draw seam (Story 7.3). The returned `emit(region,
+    face)` pushes a `StateSnapshot` to the display ONLY for a region this plugin claimed
+    (runtime single-writer guard, on top of the load-time conflict check + the FACE
+    rejection) — an unclaimed region is logged + dropped. The host owns the writer and the
+    per-region monotonic `seq`, so the plugin never builds an Envelope or touches the bus."""
+    claimed = set(plugin.manifest.regions)
+
+    async def emit(region: Region, face: str) -> None:
+        if region not in claimed:
+            log.warning(
+                "plugin %r did not claim region %s; dropping its draw",
+                plugin.manifest.name, region.value,
+            )
+            return
+        # Commit the seq only AFTER a successful write (review patch): a failed write must
+        # not skip a seq, or a future strict-monotonic display could drop the next frame.
+        next_seq = seqs.get(region, 0) + 1
+        await write_frame(
+            writer,
+            Envelope(
+                id=uuid.uuid4().hex,
+                kind=MsgKind.STATE_SNAPSHOT,
+                src=Actor.PLUGIN_HOST,
+                dst=Actor.DISPLAY,
+                body=StateSnapshot(region=region, seq=next_seq, face=face),
+            ),
+        )
+        seqs[region] = next_seq
+
+    return emit
+
+
+async def _safe_on_start(plugin: Plugin, emit) -> None:
+    """Bind a plugin its draw seam + let it draw initial state, isolating a crash (AD-8).
+
+    Graceful degradation (review Decision 3): if `on_start` raises, the plugin stays loaded
+    and keeps receiving events with whatever state it has — `_load_state` no longer raises
+    on a bad/unreadable file (it logs + returns a default), so the realistic failure here is
+    a transient draw write, which just means the initial widget is skipped. A plugin that
+    needs hard disable-on-failure is a future concern (no real workload needs it yet)."""
+    try:
+        await plugin.on_start(emit)
+    except Exception:
+        log.warning(
+            "plugin %r raised in on_start; isolating it",
+            getattr(plugin.manifest, "name", plugin), exc_info=True,
+        )
+
+
 async def run_plugin_host(socket_path: str, *, plugins_package=None, plugins=None) -> None:
     """Run the plugin-host as a bus client (AD-8, Story 7.2). Discovers + validates
     plugins FIRST (a conflicting claim raises before any bus connection), connects as
@@ -177,6 +233,10 @@ async def run_plugin_host(socket_path: str, *, plugins_package=None, plugins=Non
     log.info("plugin-host loaded %d plugin(s)", len(loaded.plugins))
 
     reader, writer = await connect(socket_path, Actor.PLUGIN_HOST)
+    # Bind each plugin its region-scoped draw seam + let it draw initial state (Story 7.3).
+    seqs: dict[Region, int] = {}
+    for plugin in loaded.plugins:
+        await _safe_on_start(plugin, _make_emitter(plugin, writer, seqs))
     try:
         while True:
             try:
