@@ -22,6 +22,7 @@ log = logging.getLogger("shelldon.transport.telegram")
 _API = "https://api.telegram.org/bot{token}/{method}"
 _POLL_TIMEOUT = 25  # getUpdates long-poll seconds (the server holds the request open)
 _ERROR_BACKOFF = 3.0  # sleep after a transient getUpdates failure, so an outage doesn't busy-spin
+_TYPING_INTERVAL = 4.0  # re-send the 'typing…' action this often — Telegram clears it after ~5s
 
 
 class TelegramChat:
@@ -36,6 +37,7 @@ class TelegramChat:
         allow_all: bool = False,
         poll_timeout: int = _POLL_TIMEOUT,
         error_backoff: float = _ERROR_BACKOFF,
+        typing_interval: float = _TYPING_INTERVAL,
     ) -> None:
         self._client = client
         self._token = token
@@ -43,7 +45,9 @@ class TelegramChat:
         self._allow_all = allow_all
         self._poll_timeout = poll_timeout
         self._error_backoff = error_backoff
+        self._typing_interval = typing_interval
         self._chat_id = None  # where to reply — set from the last permitted message
+        self._typing_task = None  # the in-flight 'typing…' refresh loop, if any
 
     def _url(self, method: str) -> str:
         return _API.format(token=self._token, method=method)
@@ -74,21 +78,59 @@ class TelegramChat:
                 user_id = (msg.get("from") or {}).get("id")
                 if text and self._permitted(user_id):
                     self._chat_id = (msg.get("chat") or {}).get("id")
+                    self._start_typing()  # show 'typing…' while core works the (slow) turn
                     yield text
                 elif text:
                     log.info("telegram: dropping message from unauthorized user %r", user_id)
 
+    async def _typing_loop(self) -> None:
+        """Re-send the 'typing…' chat action every `_typing_interval` until cancelled, so the
+        owner can see the bot is working through a turn. A failed ping is swallowed — a missed
+        typing action must never break or end the turn."""
+        while True:
+            try:
+                await self._client.post(
+                    self._url("sendChatAction"), json={"chat_id": self._chat_id, "action": "typing"}
+                )
+            except Exception:
+                log.debug("telegram sendChatAction failed", exc_info=True)
+            await asyncio.sleep(self._typing_interval)
+
+    def _start_typing(self) -> None:
+        """(Re)start the typing-refresh loop for the current chat — cancels any prior one so a
+        second inbound before a reply doesn't leak a task."""
+        self._stop_typing()
+        if self._chat_id is not None:
+            self._typing_task = asyncio.create_task(self._typing_loop())
+
+    def _stop_typing(self) -> None:
+        if self._typing_task is not None:
+            self._typing_task.cancel()
+            self._typing_task = None
+
+    async def _send(self, text: str, parse_mode: str | None) -> bool:
+        """POST one sendMessage (optionally with `parse_mode`); return Telegram's `ok` flag."""
+        payload = {"chat_id": self._chat_id, "text": text}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        resp = await self._client.post(self._url("sendMessage"), json=payload)
+        return bool(resp.json().get("ok"))
+
     async def outbound(self, text: str) -> None:
-        """Send `text` to the chat of the current conversation. Before any inbound there is no
-        chat to reply to (drop, don't crash); a send failure drops the reply (never crashes)."""
+        """Send `text` to the current chat, stopping the typing indicator first. Rendered as
+        Markdown, but on a parse rejection (unbalanced `*`/`_`/backticks in free-form model
+        text) resend as PLAIN so a reply is never dropped over formatting. Before any inbound
+        there is no chat to reply to (drop, don't crash); any failure drops the reply (never
+        crashes)."""
+        self._stop_typing()
         if self._chat_id is None:
             log.debug("telegram: no chat yet; dropping outbound")
             return
         try:
-            resp = await self._client.post(
-                self._url("sendMessage"), json={"chat_id": self._chat_id, "text": text}
-            )
-            resp.raise_for_status()
+            if await self._send(text, parse_mode="Markdown"):
+                return
+            if not await self._send(text, parse_mode=None):  # markdown rejected → plain fallback
+                log.warning("telegram sendMessage failed (both markdown and plain); reply dropped")
         except Exception as exc:
             log.warning("telegram sendMessage failed (%s); reply dropped", exc)
 
