@@ -66,9 +66,9 @@ A few decisions that shape everything:
 
 ## Status
 
-🟢 **Core pet feature-complete (Epics 1–6), the optional plugin layer shipped (Epic 7), and the whole loop now verified against a live LLM (Epic 8).** Next: deployment to the Pi.
+🟢 **Deployed and running on real hardware.** shelldon lives on a Raspberry Pi Zero 2W as a systemd service — you text it from your phone (Telegram), it thinks with a live LLM brain, replies, shows its face on the E-Ink panel, remembers you across the conversation, and drifts in mood between chats. Epics 1–8 done.
 
-34 stories shipped, **537 tests passing** (plus opt-in live-provider smokes), zero external runtime deps beyond the LLM SDKs, the LLM-free-core import contract held throughout. The whole loop runs end-to-end — message in → memory-shaped prompt → LLM reply out → expressive face reacts; the pet drifts, remembers, reaches out on its own within budget, consolidates what it learns, and (Epic 7) can be extended with plugins that sense and nudge its mood. **It's verified against a real brain, not just synthetic tests:** an opt-in live smoke (GLM-4.7 via Z.ai) drives a real owner turn *and* a real dream through the full wire — and the model emits decodable ops that core actually applies (a fact written to memory, learnings classified and resolved in sqlite). The one thing still unproven is **deployment itself** — the real fork-server worker, the Pi Zero, the E-Ink panel, and the PiSugar2/BLE hardware are stubbed/gated until bring-up.
+39 stories shipped, **550 tests passing** (plus opt-in live-provider smokes), zero external runtime deps beyond the LLM SDKs, the LLM-free-core import contract held throughout. **It's not a demo — it runs end-to-end on a 416MB Pi:** a real Telegram message → the fork-server worker assembles a memory-shaped prompt → GLM (via Z.ai) replies → core applies the model's ops (facts written, learnings classified/resolved in sqlite) → the expressive face updates on the panel — with RAM staying flat (the ephemeral fork worker is the whole reason it survives the Pi Zero's memory, the box that OOM-killed its predecessor). It autostarts on boot, restarts on failure, and installs with one script (`deploy/setup-pi.sh`). Verification, hardware bring-up (E-Ink + the real `os.fork()` worker), and the production deployment were all proven on-device. Remaining work is polish (real privilege-drop, physical sensors, partial-refresh animations), not core function.
 
 - **Epic 1 — Talking Pet** ✅ the full walking skeleton end-to-end; an endurance soak proved flat memory over sustained turns.
 - **Epic 2 — Resilient Brain** ✅ an ordered provider chain with automatic fallback, degrading gracefully to reflex-only when the whole chain fails.
@@ -77,6 +77,7 @@ A few decisions that shape everything:
 - **Epic 5 — Autonomous Life** ✅ a core-resident multi-cadence scheduler, a daily credit budget + cooldown, battery-aware backoff, and proactive action — the pet acts on its own, bounded.
 - **Epic 6 — Dreaming & Learning** ✅ cheap hot-path learning capture + a scheduled dream cycle that classifies, promotes the durable learnings into memory, and prunes the rest. (Confirmed live: a real GLM dream classified seeded learnings and core applied the promote/prune ops — Epic 8.)
 - **Epic 7 — Extensibility & Optional Embodiment** ✅ a generalized plugin model — plugins emit/subscribe events, own private state, and claim display regions, *never importing core* (enforced by import-linter). Exercised by an optional XP/leveling widget, optional physical sensing (PiSugar2 button + BLE pair-first presence), and a bounded plugin→core channel that lets plugin events nudge the pet's mood (so a button press or your arrival visibly moves its face).
+- **Epic 8 — Verify & Deploy** ✅ live-LLM verification (a real turn + a real dream against GLM, core applies the ops), then real-hardware deployment: the fork/OOM model proven on the 416MB Pi, a Telegram chat transport, the Waveshare 2.13" E-Ink renderer, and a systemd service + one-shot `setup-pi.sh`. Includes the fix for the fork-not-fork-safe SQLite bug that had cost the pet its short-term memory on-device.
 
 | Artifact | Path |
 |---|---|
@@ -152,7 +153,7 @@ Free-tier quotas are **independent per provider**, so the smart move is to stack
 
 ## Roadmap
 
-**Daily-driver line** — Epics 1–4 are the version that lives on the desk every day; Epics 5–6 are the autonomy + learning enrichment. **Epics 1–6 are the core pet (feature-complete); Epic 7 added the optional plugin layer; Epic 8 verified the whole loop against a live LLM.** Next is deployment to the Pi.
+**Daily-driver line** — Epics 1–4 are the version that lives on the desk every day; Epics 5–6 are the autonomy + learning enrichment. **Epics 1–8 are done — shelldon is verified, deployed, and running on a real Pi as a service.** What's left is polish (privilege-drop hardening, physical sensors wired to real hardware, partial-refresh face animations).
 
 - [x] **Epic 1 — Talking Pet** — walking skeleton: chat turn end-to-end, face reacts, endurance soak ✅ (9/9 stories)
 - [x] **Epic 2 — Resilient Brain** — provider chain fallback, degrade-to-reflex on chain exhaustion ✅ (3/3 stories) ⭐ daily-driver
@@ -161,7 +162,8 @@ Free-tier quotas are **independent per provider**, so the smart move is to stack
 - [x] **Epic 5 — Autonomous Life** — multi-cadence scheduler, proactive action, daily credit budget, battery-aware backoff ✅
 - [x] **Epic 6 — Dreaming & Learning** — hot-path learning capture + dream-cycle consolidation (classify / promote / prune) ✅
 - [x] **Epic 7 — Extensibility & Optional Embodiment** — generalized plugin model, XP widget, optional physical sensing (button/BLE), plugin→core mood-nudge ✅ (6/6 stories) — *optional; the core pet is complete without it*
-- [~] **Epic 8 — Verify & Deploy** — live-LLM smoke against the real brain (GLM-4.7 via Z.ai) ✅ *(dominant risk retired — a real turn + a real dream verified end-to-end, core applies the model's ops)*; deployment to the Pi *(next)*
+- [x] **Epic 8 — Verify & Deploy** — live-LLM verification (GLM-4.7 via Z.ai) + real-hardware deployment: fork/OOM proven on the 416MB Pi, Telegram transport, Waveshare E-Ink renderer, systemd service + `setup-pi.sh`, and the fork-SQLite memory fix ✅ — *running on the desk*
+- [ ] **Polish** — real worker privilege-drop on the Pi, physical sensors (button/BLE) wired to hardware, partial-refresh face animations, Telegram niceties *(none load-bearing)*
 
 ## Credits
 
