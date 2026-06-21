@@ -99,7 +99,7 @@ class Remember(msgspec.Struct, frozen=True, tag="remember", forbid_unknown_field
     is rejected by core on apply (msgspec only enforces it on decode, not on direct
     construction, so core re-validates)."""
 
-    collection: Literal["facts", "people"]
+    collection: Literal["facts", "people", "preferences", "capabilities"]
     name: str
     content: str
 

@@ -38,7 +38,7 @@ DEFAULT_MEMORY_ROOT = Path.home() / ".shelldon" / "memory"
 _DIRECTIVE_NAME = "DIRECTIVE.md"
 
 #: The closed set of `Remember` target collections (mirrors the contract Literal).
-_COLLECTIONS = ("facts", "people")
+_COLLECTIONS = ("facts", "people", "preferences", "capabilities")
 
 #: A name becomes a filename: keep Unicode word chars (so 'José'/CJK names survive),
 #: collapse every other run — crucially path separators and dots — to a single '-'.
@@ -170,6 +170,16 @@ class CuratedMemory:
                 out.append((path.stem, path.read_text()))
             except (OSError, UnicodeError) as exc:
                 log.warning("skipping unreadable %s (%s)", path, exc)
+        return out
+
+    def read_all_collections(self) -> list[tuple[str, str]]:
+        """The `(name, content)` pairs across every curated collection, name-sorted within
+        each — the single accessor the prompt assembly surfaces so a memory the model filed
+        under any collection (facts/people/preferences/capabilities) reaches later turns.
+        Iterates the closed `_COLLECTIONS`, so a new collection surfaces with no caller edit."""
+        out: list[tuple[str, str]] = []
+        for collection in _COLLECTIONS:
+            out.extend(self.read_collection(collection))
         return out
 
     def read_directive(self) -> str | None:

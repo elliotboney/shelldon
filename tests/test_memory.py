@@ -57,7 +57,30 @@ def test_read_collection_missing_dir_is_empty(tmp_path):
 
 def test_read_collection_rejects_unknown_collection(tmp_path):
     with pytest.raises(ValueError):
-        _mem(tmp_path).read_collection("secrets")  # closed to facts/people (never vault/DIRECTIVE)
+        _mem(tmp_path).read_collection("secrets")  # still closed — vault/DIRECTIVE never readable
+
+
+def test_apply_remember_to_preferences_and_capabilities(tmp_path):
+    """GLM files memories under `preferences` and `capabilities` (observed live on the Pi);
+    both are valid collections now, written one-file-per-thing like facts/people."""
+    mem = _mem(tmp_path)
+    mem.apply_memory_op(Remember(collection="preferences", name="theme", content="dark mode"))
+    mem.apply_memory_op(Remember(collection="capabilities", name="coding", content="can write code"))
+    assert (tmp_path / "memory" / "preferences" / "theme.md").read_text() == "dark mode"
+    assert (tmp_path / "memory" / "capabilities" / "coding.md").read_text() == "can write code"
+
+
+def test_read_all_collections_surfaces_every_collection(tmp_path):
+    """read_all_collections returns the (name, content) pairs across the whole closed set,
+    so the prompt assembly surfaces preferences/capabilities the same way it does facts/people."""
+    mem = _mem(tmp_path)
+    mem.apply_memory_op(Remember(collection="facts", name="db", content="BigQuery"))
+    mem.apply_memory_op(Remember(collection="preferences", name="theme", content="dark mode"))
+    mem.apply_memory_op(Remember(collection="capabilities", name="coding", content="can write code"))
+    flat = dict(mem.read_all_collections())
+    assert flat["db"] == "BigQuery"
+    assert flat["theme"] == "dark mode"
+    assert flat["coding"] == "can write code"
 
 
 def test_rewrite_summary_overwrites(tmp_path):
