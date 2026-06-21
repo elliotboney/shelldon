@@ -9,7 +9,7 @@ advance (so updates aren't re-fetched). The live bot is exercised on the Pi, not
 
 import pytest
 
-from shelldon.transport.telegram import TelegramChat
+from shelldon.transport.telegram import TelegramChat, resolve_token
 
 
 def _update(*, uid, chat, text, update_id=1):
@@ -92,6 +92,13 @@ async def test_outbound_before_any_inbound_is_a_safe_noop():
     chat = TelegramChat(client, "TOK", allow_all=True)
     await chat.outbound("nobody to hear me")
     assert client.sent == []
+
+
+def test_shelldon_bot_token_wins_over_the_plain_name():
+    # v2 runs its OWN bot, separate from a v1 using TELEGRAM_BOT_TOKEN — even in a shared env.
+    assert resolve_token({"SHELLDON_TELEGRAM_BOT_TOKEN": "v2", "TELEGRAM_BOT_TOKEN": "v1"}) == "v2"
+    assert resolve_token({"TELEGRAM_BOT_TOKEN": "v1"}) == "v1"  # falls back when only one is set
+    assert resolve_token({}) is None
 
 
 async def test_inbound_advances_the_offset_so_updates_are_not_refetched():
