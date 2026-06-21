@@ -41,6 +41,28 @@ class WorkerBusyError(Exception):
     """Raised when a turn is requested while one is already in flight (≤1, AD-9)."""
 
 
+def _close_inherited_sqlite() -> None:
+    """Discard every SQLite connection inherited from the parent across fork().
+
+    SQLite connections are NOT fork-safe. The fork child inherits core's open WAL
+    `HistoryStore` connection (its fds + the `-shm` shared-memory mmap). Left in place, the
+    `closerange` below closes the inherited `-shm` fd while the mmap lingers — a torn
+    shared-memory state that makes the worker's OWN read-only history open fail with
+    `SQLITE_PROTOCOL` ("locking protocol") on the Pi (real fork; masked in-process on macOS).
+    The worker opens a fresh read handle, so closing the parent's is pure cleanup. Closing
+    here (BEFORE closerange) lets SQLite tear the connection down cleanly with its fds intact.
+    The child `os._exit`s, so closing every inherited connection has no downside.
+    """
+    import sqlite3
+
+    for obj in gc.get_objects():
+        if isinstance(obj, sqlite3.Connection):
+            try:
+                obj.close()
+            except Exception:  # a half-initialised / already-closed handle — ignore
+                pass
+
+
 def _real_drop(uid, gid, *, setgid=os.setgid, setuid=os.setuid, getuid=os.getuid) -> None:
     """Drop to the worker uid/gid in the fork child (AD-6 vault isolation).
 
@@ -105,6 +127,10 @@ async def _os_fork_spawn(socket_path: str, turn_id: str, prompt: str,
     if pid == 0:  # child
         code = 0
         try:
+            # SQLite is not fork-safe: discard core's inherited WAL connection FIRST, while its
+            # fds are still valid, so the closerange below can't leave a torn -shm mmap that
+            # breaks the worker's own read-only history open (SQLITE_PROTOCOL on the Pi).
+            _close_inherited_sqlite()
             # Fork-without-exec hygiene: close FDs inherited from the parent (the bus
             # listener, peer sockets, etc.) BEFORE doing anything — the worker opens its
             # own fresh connection. Keep std streams (0,1,2) so failures stay visible.
