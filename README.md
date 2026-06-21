@@ -66,24 +66,9 @@ A few decisions that shape everything:
 
 ## Status
 
-🟢 **Deployed and running on real hardware.** shelldon lives on a Raspberry Pi Zero 2W as a systemd service — you text it from your phone (Telegram), it thinks with a live LLM brain, replies, shows its face on the E-Ink panel, remembers you across the conversation, and drifts in mood between chats. Epics 1–8 done.
+🟢 **Deployed and running on real hardware.** shelldon lives on a Raspberry Pi Zero 2W as a systemd service — text it from your phone (Telegram), it thinks with a live LLM brain, replies, shows its face on the E-Ink panel, remembers you, and drifts in mood between chats. **Epics 1–8 done** (39 stories, 550 tests); what's left is polish.
 
-39 stories shipped, **550 tests passing** (plus opt-in live-provider smokes), zero external runtime deps beyond the LLM SDKs, the LLM-free-core import contract held throughout. **It's not a demo — it runs end-to-end on a 416MB Pi:** a real Telegram message → the fork-server worker assembles a memory-shaped prompt → GLM (via Z.ai) replies → core applies the model's ops (facts written, learnings classified/resolved in sqlite) → the expressive face updates on the panel — with RAM staying flat (the ephemeral fork worker is the whole reason it survives the Pi Zero's memory, the box that OOM-killed its predecessor). It autostarts on boot, restarts on failure, and installs with one script (`deploy/setup-pi.sh`). Verification, hardware bring-up (E-Ink + the real `os.fork()` worker), and the production deployment were all proven on-device. Remaining work is polish (real privilege-drop, physical sensors, partial-refresh animations), not core function.
-
-- **Epic 1 — Talking Pet** ✅ the full walking skeleton end-to-end; an endurance soak proved flat memory over sustained turns.
-- **Epic 2 — Resilient Brain** ✅ an ordered provider chain with automatic fallback, degrading gracefully to reflex-only when the whole chain fails.
-- **Epic 3 — A Pet That Feels Alive** ✅ persistent personality state, a resident reflex loop (blink/idle/mood drift), and a self-modifiable expressive-face registry.
-- **Epic 4 — Memory & Continuity** ✅ sqlite conversation history (WAL/FTS5) + a curated markdown memory tree (sole-writer core, worker proposes), an OS-isolated vault, and memory injected into every prompt so the past shapes the reply.
-- **Epic 5 — Autonomous Life** ✅ a core-resident multi-cadence scheduler, a daily credit budget + cooldown, battery-aware backoff, and proactive action — the pet acts on its own, bounded.
-- **Epic 6 — Dreaming & Learning** ✅ cheap hot-path learning capture + a scheduled dream cycle that classifies, promotes the durable learnings into memory, and prunes the rest. (Confirmed live: a real GLM dream classified seeded learnings and core applied the promote/prune ops — Epic 8.)
-- **Epic 7 — Extensibility & Optional Embodiment** ✅ a generalized plugin model — plugins emit/subscribe events, own private state, and claim display regions, *never importing core* (enforced by import-linter). Exercised by an optional XP/leveling widget, optional physical sensing (PiSugar2 button + BLE pair-first presence), and a bounded plugin→core channel that lets plugin events nudge the pet's mood (so a button press or your arrival visibly moves its face).
-- **Epic 8 — Verify & Deploy** ✅ live-LLM verification (a real turn + a real dream against GLM, core applies the ops), then real-hardware deployment: the fork/OOM model proven on the 416MB Pi, a Telegram chat transport, the Waveshare 2.13" E-Ink renderer, and a systemd service + one-shot `setup-pi.sh`. Includes the fix for the fork-not-fork-safe SQLite bug that had cost the pet its short-term memory on-device.
-
-| Artifact | Path |
-|---|---|
-| Spec (11 capabilities) | [`SPEC.md`](_bmad-output/specs/spec-openclawgotchi-v2/SPEC.md) |
-| Architecture spine (15 decisions) | [`ARCHITECTURE-SPINE.md`](_bmad-output/planning-artifacts/architecture/architecture-shelldon-2026-06-15/ARCHITECTURE-SPINE.md) |
-| Epics & stories (7 epics) | [`epics.md`](_bmad-output/planning-artifacts/epics.md) |
+→ Full progress, the epic-by-epic breakdown, and the roadmap: **[STATUS.md](STATUS.md)**.
 
 ## Getting started
 
@@ -191,20 +176,6 @@ OPENAI_MODEL=llama-3.3-70b-versatile
 Free-tier quotas are **independent per provider**, so the smart move is to stack them in the chain and let it rotate when one hits a rate limit — e.g. `PROVIDER_CHAIN="glm,groq,cerebras,openrouter"`. (Dedicated one-word presets — `gemini`, `groq`, `cerebras` — are a small planned convenience on top of the generic `openai` preset.) Two caveats: free tiers usually train on your prompts, so keep anything sensitive off them; and providers cut quotas without notice — check live limits.
 
 **Under $20/month — GLM via Z.ai.** [GLM-4.7](https://z.ai) is a capable hosted model with an Anthropic-compatible API, which is why it's shelldon's default provider. Pricing is token-based and in practice lands well under $20/month for a pet that talks with you daily. [Use this link for a discount at signup.](https://z.ai/subscribe?ic=LGN84JDUIC)
-
-## Roadmap
-
-**Daily-driver line** — Epics 1–4 are the version that lives on the desk every day; Epics 5–6 are the autonomy + learning enrichment. **Epics 1–8 are done — shelldon is verified, deployed, and running on a real Pi as a service.** What's left is polish (privilege-drop hardening, physical sensors wired to real hardware, partial-refresh face animations).
-
-- [x] **Epic 1 — Talking Pet** — walking skeleton: chat turn end-to-end, face reacts, endurance soak ✅ (9/9 stories)
-- [x] **Epic 2 — Resilient Brain** — provider chain fallback, degrade-to-reflex on chain exhaustion ✅ (3/3 stories) ⭐ daily-driver
-- [x] **Epic 3 — A Pet That Feels Alive** — resident reflexes, mood drift, self-modifiable expressive face ✅ (3/3 stories) ⭐ daily-driver
-- [x] **Epic 4 — Memory & Continuity** — sqlite conversation history (FTS5) + curated markdown memory + owner directive + OS-isolated vault + memory-shaped prompts ✅ ⭐ daily-driver
-- [x] **Epic 5 — Autonomous Life** — multi-cadence scheduler, proactive action, daily credit budget, battery-aware backoff ✅
-- [x] **Epic 6 — Dreaming & Learning** — hot-path learning capture + dream-cycle consolidation (classify / promote / prune) ✅
-- [x] **Epic 7 — Extensibility & Optional Embodiment** — generalized plugin model, XP widget, optional physical sensing (button/BLE), plugin→core mood-nudge ✅ (6/6 stories) — *optional; the core pet is complete without it*
-- [x] **Epic 8 — Verify & Deploy** — live-LLM verification (GLM-4.7 via Z.ai) + real-hardware deployment: fork/OOM proven on the 416MB Pi, Telegram transport, Waveshare E-Ink renderer, systemd service + `setup-pi.sh`, and the fork-SQLite memory fix ✅ — *running on the desk*
-- [ ] **Polish** — real worker privilege-drop on the Pi, physical sensors (button/BLE) wired to hardware, partial-refresh face animations, Telegram niceties *(none load-bearing)*
 
 ## Credits
 
