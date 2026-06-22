@@ -27,6 +27,7 @@ from shelldon.core.bus.server import bus_socket_path
 from shelldon.core.memory import DEFAULT_MEMORY_ROOT
 from shelldon.core.runtime import Core
 from shelldon.core.vault import ensure_vault
+from shelldon.worker.tools import DEFAULT_WORKSPACE_ROOT
 from shelldon.display.renderer import StubRenderer
 from shelldon.display.service import run_display
 from shelldon.plugins.host import run_plugin_host
@@ -222,6 +223,10 @@ async def run_app(
     # The vault is created owner-only (0700) by this service process, BEFORE any
     # worker can fork — so the dropped worker uid is OS-denied from the first turn.
     ensure_vault(memory_root)
+
+    # The FREE-tier file tools (Story 9.2) are jailed to this workspace; create it with
+    # NORMAL perms (NOT 0700 like the vault) so the dropped worker uid can read it.
+    os.makedirs(DEFAULT_WORKSPACE_ROOT, exist_ok=True)
 
     if forkserver is None:
         # The forked worker assembles its prompt (Story 4.4) from the SAME memory_root

@@ -182,13 +182,84 @@ class ResolveLearning(msgspec.Struct, frozen=True, tag="resolve_learning", forbi
 ProposedOp = MemoryOp | AddFace | CaptureLearning | ResolveLearning
 
 
+#: --- Tool-calling vocabulary (Epic 9, Story 9.1) ---
+#: The closed wire vocab for native function-calling. `ToolCall`/`ToolResult`/`Message`
+#: travel INSIDE `Job.messages` and `Completion.tool_calls` — they are NOT envelope-level
+#: bodies (no tag, no `_KIND_FOR_BODY`/`ROUTING_TABLE` row). The broker normalizes each
+#: provider's native tool format into these contracts so the worker loop stays
+#: provider-agnostic (AD-2); the worker (not the broker) executes the tools.
+
+
+class ToolTier(StrEnum):
+    """How dangerous a tool is. FREE runs synchronously inside the worker loop (9.1);
+    RISKY (defined here, ENFORCED in 9.3) will gate on a 2-phase owner-approval flow."""
+
+    FREE = "free"
+    RISKY = "risky"
+
+
+class ToolCall(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    """A normalized tool request from the model (broker→worker). The broker maps each
+    provider's native tool-use format (Anthropic `tool_use` block / OpenAI `tool_calls`)
+    into this closed shape; `args` is the parsed argument dict (OpenAI's JSON-string
+    arguments are decoded before this is built)."""
+
+    id: str
+    name: str
+    args: dict = msgspec.field(default_factory=dict)
+
+
+class ToolResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    """The outcome of executing a `ToolCall` (worker-side), fed back into the running
+    messages list. `ok=False` carries the error text — a tool that raises/an unknown
+    tool never crashes the turn (the model recovers from the error content, Story 9.1)."""
+
+    id: str
+    ok: bool
+    content: str = ""
+
+
+class ToolDefinition(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    """A tool the model may call, as it travels on the bus (worker→broker on `Job.tools`).
+    Serializable (no `fn` — that lives only in the worker's `ToolSpec`). The broker
+    converts this to each provider's native tool schema."""
+
+    name: str
+    description: str
+    params_schema: dict = msgspec.field(default_factory=dict)
+    tier: ToolTier = ToolTier.FREE
+
+
+class Message(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    """A multi-turn conversation message for the tool-calling path (Story 9.1).
+
+    One struct covers all roles: user/assistant text, assistant tool-calls, and tool
+    results. Fields are optional to avoid per-role sub-types. NOT tagged (not a body
+    union member) — travels inside `Job.messages`, so it is NOT in `_KIND_FOR_BODY`
+    or `ROUTING_TABLE` and is never decoded polymorphically at the envelope level."""
+
+    role: str  # "user", "assistant", "tool"
+    content: str = ""
+    tool_calls: tuple[ToolCall, ...] = ()  # role="assistant" with pending calls
+    tool_call_id: str | None = None  # role="tool", correlates with ToolCall.id
+
+
 class Job(msgspec.Struct, frozen=True, tag="job", forbid_unknown_fields=True):
     """A request body. Minimal contract shell — broker/worker stories (1.4/1.5)
     define the real payload. Carries NO credentials: the broker injects creds
     internally (AD-2), so nothing credential-shaped may ever appear here.
+
+    Tool-calling path (Story 9.1): when `tools` is non-empty the broker uses the
+    native function-calling endpoint and `messages` (the running conversation) instead
+    of `payload`. Both are additive optional defaults — a plain text Job (no tools) is
+    the unchanged pre-9.1 single round-trip (AD-13, no SCHEMA_VERSION bump). `payload`
+    defaults to "" too: it is empty on the tools path, so the default signals it is
+    optional when `messages` carries the conversation.
     """
 
-    payload: str
+    payload: str = ""
+    tools: tuple[ToolDefinition, ...] = ()
+    messages: tuple[Message, ...] = ()
 
 
 class Result(msgspec.Struct, frozen=True, tag="result", forbid_unknown_fields=True):
@@ -213,11 +284,17 @@ class Completion(msgspec.Struct, frozen=True, tag="completion", forbid_unknown_f
     nothing more. The broker stays a pure egress/safety boundary (AD-2) — it does NOT
     parse pet-domain ops; the worker turns this into a `Result` (parsing `proposed_ops`).
     Same ok/payload/error shape as `Result` minus the ops (which are the worker's job).
+
+    Tool-calling path (Story 9.1): `tool_calls` carries the model's normalized tool
+    requests. A text-only reply has `tool_calls=()` (the unchanged pre-9.1 shape); a
+    tool-call reply has `payload=""` and a non-empty `tool_calls`. Additive optional
+    default — no SCHEMA_VERSION bump (AD-13).
     """
 
     ok: bool
     payload: str = ""
     error: str | None = None
+    tool_calls: tuple[ToolCall, ...] = ()
 
 
 class InboundMessage(msgspec.Struct, frozen=True, tag="inbound-message", forbid_unknown_fields=True):
@@ -371,6 +448,11 @@ __all__ = [
     "ResolveLearning",
     "AddFace",
     "ProposedOp",
+    "ToolTier",
+    "ToolCall",
+    "ToolResult",
+    "ToolDefinition",
+    "Message",
     "Envelope",
     "ROUTING_TABLE",
     "encode",

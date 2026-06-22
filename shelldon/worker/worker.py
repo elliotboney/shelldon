@@ -26,14 +26,25 @@ from shelldon.contracts import (
     Completion,
     Envelope,
     Job,
+    Message,
     MsgKind,
     ProposedOp,
     Result,
+    ToolDefinition,
 )
 from shelldon.core.bus import connect, read_frame, write_frame
 from shelldon.worker.prompt import build_prompt
+from shelldon.worker.tools import ToolSpec, execute_tool
 
 log = logging.getLogger("shelldon.worker")
+
+#: Bound on the agentic tool loop (Story 9.1 AC2): the worker executes at most this many
+#: rounds of tool-calls before giving up with a best-effort reply — a model that loops
+#: forever can never wedge the turn. (After the Nth execution the worker still does ONE
+#: more round-trip so the model can produce a final text answer; if THAT still returns
+#: tool-calls the cap trips.) Paired with the `_COMPLETION_TIMEOUT_S` budget below
+#: (whichever trips first ends the loop).
+_MAX_TOOL_EXECUTIONS = 6
 
 #: The reply→ops wire format: a single fenced ```ops block holding a JSON array of
 #: tagged memory-ops. 4.5 owns this PARSE; Story 4.4 owns the prompt that elicits it
@@ -95,25 +106,107 @@ def parse_reply(text: str) -> tuple[str, list[ProposedOp]]:
     return payload.strip(), ops
 
 
-async def _result_from_broker(reader, turn_id: str) -> Result:
-    """Read the broker's Completion and turn it into a Result (parsing proposed_ops).
-    A missing/invalid completion (broker gone or bad frame) becomes a failure Result so
-    core degrades — never a hang (AD-12 timeout is the backstop)."""
+async def _read_completion(reader, timeout: float) -> Completion:
+    """Read one Completion frame from the broker, degrading a missing/invalid/late frame
+    into a failure `Completion` (broker gone or bad frame) so the caller never hangs —
+    AD-12 timeout is the backstop. Shared by the single-round-trip and the tool loop."""
     try:
-        env = await asyncio.wait_for(read_frame(reader), timeout=_COMPLETION_TIMEOUT_S)
+        env = await asyncio.wait_for(read_frame(reader), timeout=timeout)
     except asyncio.TimeoutError:
-        return Result(ok=False, error="broker did not answer in time")
+        return Completion(ok=False, error="broker did not answer in time")
     except (msgspec.ValidationError, ValueError, OSError, EOFError) as exc:
         # Bad frame (ValidationError/ValueError) OR a hard transport failure
         # (OSError/IncompleteReadError) → degrade, never crash the worker task.
-        return Result(ok=False, error=f"bad completion frame: {exc}")
+        return Completion(ok=False, error=f"bad completion frame: {exc}")
     if env is None or env.kind is not MsgKind.COMPLETION or not isinstance(env.body, Completion):
-        return Result(ok=False, error="no completion from broker")
-    comp: Completion = env.body
+        return Completion(ok=False, error="no completion from broker")
+    return env.body
+
+
+async def _single_round_trip(reader, writer, turn_id: str, job_payload: str) -> Result:
+    """The pre-9.1 path (no tools): send one text Job, await the Completion, parse it into
+    a Result (proposed_ops). Behavior is identical to before 9.1 — `Job.tools` is empty so
+    the broker calls `complete()` (Story 9.1 AC5)."""
+    await write_frame(
+        writer,
+        Envelope(
+            id=turn_id,
+            kind=MsgKind.JOB,
+            src=Actor.WORKER,
+            dst=Actor.BROKER,
+            body=Job(payload=job_payload),
+            turn_id=turn_id,
+        ),
+    )
+    comp = await _read_completion(reader, _COMPLETION_TIMEOUT_S)
     if not comp.ok:
         return Result(ok=False, error=comp.error)
     payload, ops = parse_reply(comp.payload)
     return Result(ok=True, payload=payload, proposed_ops=ops)
+
+
+async def _agentic_loop(
+    reader, writer, turn_id: str, job_payload: str, registry: dict[str, ToolSpec]
+) -> Result:
+    """The bounded function-calling loop (Story 9.1 AC2). Send the running messages +
+    tools to the broker; if the Completion carries tool-calls, execute the FREE-tier tools
+    synchronously, append the results, and loop; if it is text, parse it into the Result.
+
+    Bounded two ways: at most `_MAX_TOOL_EXECUTIONS` tool rounds, and within the SAME
+    `_COMPLETION_TIMEOUT_S` total budget (W < R < T coherent-timeout invariant) — it breaks
+    with < 2s left so a final Job never has too little time to get an answer. Either bound,
+    a bad tool, or an unknown tool yields a best-effort reply — the turn NEVER crashes."""
+    tool_defs = tuple(
+        ToolDefinition(
+            name=s.name, description=s.description, params_schema=s.params_schema, tier=s.tier
+        )
+        for s in registry.values()
+    )
+    messages: tuple[Message, ...] = (Message(role="user", content=job_payload),)
+    loop = asyncio.get_running_loop()
+    loop_start = loop.time()
+
+    for iteration in range(_MAX_TOOL_EXECUTIONS + 1):
+        elapsed = loop.time() - loop_start
+        remaining = _COMPLETION_TIMEOUT_S - elapsed
+        if remaining < 2.0:
+            log.warning("worker: tool loop budget exhausted (%.1fs elapsed)", elapsed)
+            return Result(ok=True, payload="I'm running short on time — let me answer directly.")
+
+        await write_frame(
+            writer,
+            Envelope(
+                id=turn_id,
+                kind=MsgKind.JOB,
+                src=Actor.WORKER,
+                dst=Actor.BROKER,
+                body=Job(payload="", tools=tool_defs, messages=messages),
+                turn_id=turn_id,
+            ),
+        )
+        comp = await _read_completion(reader, remaining)
+        if not comp.ok:
+            return Result(ok=False, error=comp.error)
+        if not comp.tool_calls:
+            payload, ops = parse_reply(comp.payload)
+            return Result(ok=True, payload=payload, proposed_ops=ops)
+        if iteration >= _MAX_TOOL_EXECUTIONS:
+            log.warning("worker: tool loop exhausted after %d executions", iteration)
+            return Result(ok=True, payload="I've used too many steps. Let me try a different approach.")
+
+        # Execute the FREE-tier tools (errors → ToolResult(ok=False), never raise) and
+        # extend the running conversation with the assistant's calls + the tool results.
+        # Preserve any assistant text that came alongside the tool-calls (Anthropic can
+        # interleave) — replaying tool_use without its leading text is a provider 400.
+        assistant_msg = Message(role="assistant", content=comp.payload, tool_calls=comp.tool_calls)
+        tool_msgs = [
+            Message(role="tool", content=tr.content, tool_call_id=tr.id)
+            for tr in (execute_tool(tc, registry) for tc in comp.tool_calls)
+        ]
+        messages = messages + (assistant_msg,) + tuple(tool_msgs)
+
+    # Unreachable (the loop returns on text/exhaustion), but stay fail-soft.
+    return Result(ok=True, payload="I've used too many steps. Let me try a different approach.")
 
 
 async def run_worker(
@@ -124,33 +217,30 @@ async def run_worker(
     memory_root=None,
     history_path=None,
     assemble=None,
+    tool_registry: dict[str, ToolSpec] | None = None,
 ) -> None:
-    """Connect as WORKER, ASSEMBLE the prompt from memory (Story 4.4), send one Job,
-    await the broker's Completion, parse it into a Result, send `Result→core`, then exit.
+    """Connect as WORKER, ASSEMBLE the prompt from memory (Story 4.4), run the turn against
+    the broker, send `Result→core`, then exit.
 
     `prompt` is the current owner message; `assemble` turns it into the Job payload by
     reading DIRECTIVE/about/history read-only and composing them in the AD-6 order
     (default: `build_prompt`, bound to `memory_root`/`history_path`). The seam lets
     turn-lifecycle tests inject an identity assembler so they stay about fencing/
-    coalescing, not prompt content."""
+    coalescing, not prompt content.
+
+    `tool_registry` (Story 9.1) selects the path: None/empty → the pre-9.1 single
+    round-trip (AC5); a non-empty registry → the bounded function-calling loop (AC2). The
+    sole production caller (`forkserver`) passes `build_tool_registry()`."""
     if assemble is None:
         def assemble(message):
             return build_prompt(message, memory_root=memory_root, history_path=history_path)
     job_payload = assemble(prompt)
     reader, writer = await connect(socket_path, Actor.WORKER)
     try:
-        await write_frame(
-            writer,
-            Envelope(
-                id=turn_id,
-                kind=MsgKind.JOB,
-                src=Actor.WORKER,
-                dst=Actor.BROKER,
-                body=Job(payload=job_payload),
-                turn_id=turn_id,
-            ),
-        )
-        result = await _result_from_broker(reader, turn_id)
+        if not tool_registry:
+            result = await _single_round_trip(reader, writer, turn_id, job_payload)
+        else:
+            result = await _agentic_loop(reader, writer, turn_id, job_payload, tool_registry)
         try:
             await asyncio.wait_for(
                 write_frame(

@@ -19,7 +19,7 @@ import pytest
 
 from shelldon.broker.broker import handle_job_chain
 from shelldon.broker.provider import TransientProviderError
-from shelldon.contracts import Job, Result
+from shelldon.contracts import Completion, Job
 
 SOAK_TURNS = int(os.environ.get("SHELLDON_FALLBACK_SOAK_TURNS", "300"))
 
@@ -65,9 +65,9 @@ async def test_fallback_holds_under_sustained_faults():
     saved_level = broker_log.level
     broker_log.setLevel(logging.ERROR)
 
-    async def one_turn(i: int) -> Result:
+    async def one_turn(i: int) -> Completion:
         res = await handle_job_chain(Job(payload=str(i)), chain)
-        assert isinstance(res, Result)  # always a Result — never an exception (no crash)
+        assert isinstance(res, Completion)  # always a Completion — never an exception (no crash)
         return res
 
     # Warmup absorbs one-time lazy allocations before measuring.

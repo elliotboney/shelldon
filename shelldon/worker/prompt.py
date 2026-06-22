@@ -47,6 +47,11 @@ SYSTEM_INSTRUCTION = (
     "owner naturally and briefly, in your own voice. Always say something back first. "
     "Write in plain, natural language — do NOT add robotic sound effects (no '*beep boop*', "
     "'*whirr*', 'Beep!') or asterisk stage-directions unless your owner explicitly asks.\n"
+    # Story 9.1/9.2: native function-calling. The model may call registered tools when they
+    # help — get_time, plus the FREE read-only/compute pack (read_file, list_dir, python_eval).
+    "You have tools you can call when they help — e.g. `get_time` for the current date/time, "
+    "`read_file`/`list_dir` to look at files in your workspace, and `python_eval` for a quick "
+    "calculation — instead of guessing.\n"
     "You MAY also update your own memory by appending ONE fenced ops block AFTER your "
     "reply — a JSON array of ops. Omit it if there is nothing worth remembering. For a "
     "`remember` op, `collection` MUST be one of: facts, people, preferences, capabilities. "

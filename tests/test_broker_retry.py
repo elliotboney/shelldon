@@ -7,7 +7,7 @@ import pytest
 
 from shelldon.broker.broker import handle_job
 from shelldon.broker.provider import PermanentProviderError, TransientProviderError
-from shelldon.contracts import Job
+from shelldon.contracts import Completion, Job, Message, ToolCall, ToolDefinition
 
 
 class _OK:
@@ -89,3 +89,46 @@ async def test_unexpected_exception_becomes_failure_result():
     res = await handle_job(Job(payload="ping"), p)
     assert not res.ok and res.error
     assert p.calls == 1  # treated as non-retryable
+
+
+# --- Story 9.1 (AC1): a Job carrying tools routes to complete_with_tools, retry shared ---
+
+
+class _ToolProvider:
+    """Fake with a native tool path. `complete` MUST NOT be called for a tools Job;
+    `complete_with_tools` fails transiently `fail_times` then returns a tool-call."""
+
+    name = "tooly"
+
+    def __init__(self, fail_times=0):
+        self.fail_times = fail_times
+        self.tool_calls = 0
+        self.text_calls = 0
+
+    async def complete(self, prompt):
+        self.text_calls += 1
+        return "should-not-be-used"
+
+    async def complete_with_tools(self, messages, tools):
+        self.tool_calls += 1
+        if self.tool_calls <= self.fail_times:
+            raise TransientProviderError("transient")
+        return Completion(ok=True, tool_calls=(ToolCall(id="c1", name=tools[0].name, args={}),))
+
+
+_TOOLS = [ToolDefinition(name="get_time", description="now", params_schema={})]
+_MSGS = (Message(role="user", content="hi"),)
+
+
+async def test_tools_job_uses_complete_with_tools_not_complete():
+    p = _ToolProvider()
+    res = await handle_job(Job(payload="", tools=tuple(_TOOLS), messages=_MSGS), p)
+    assert res.ok and res.tool_calls and res.tool_calls[0].name == "get_time"
+    assert p.tool_calls == 1 and p.text_calls == 0  # tools path only, complete() untouched
+
+
+async def test_tools_path_shares_the_transient_retry():
+    p = _ToolProvider(fail_times=1)
+    res = await handle_job(Job(payload="", tools=tuple(_TOOLS), messages=_MSGS), p)
+    assert res.ok and res.tool_calls
+    assert p.tool_calls == 2  # one transient failure + the single shared retry
