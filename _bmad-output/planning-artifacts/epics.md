@@ -114,6 +114,10 @@ The pet improves over time: during normal turns it captures learnings on the hot
 Anyone can extend the pet without touching `core/`: one generalized plugin model (hardware + behavioral) where plugins emit/subscribe events, own private state, and claim display regions — exercised by the optional XP/leveling plugin and optional physical sensing (PiSugar2 button, BLE presence). Explicitly optional; the core pet is complete after Epic 6.
 **FRs covered:** FR7, FR3
 
+### Epic 9: Self-Coding (live, tiered)
+The pet gains real tools — it runs code in-the-moment and writes its own new tools — with safe ops running free and risky ops gated behind an owner approval over Telegram. Native function-calling through the broker; the agentic loop runs inside the ephemeral fork worker; self-coded tools are bot-authored, owner-reviewed, and picked up next turn via fork-reimport. Rebuilds v1 openclawgotchi's self-coding inside v2's invariants (core stays LLM-free, broker stays sole egress). Promoted from Deferred/Icebox 2026-06-21 (A-vs-B resolved → live B + tiered). Full design: `epic-9-self-coding-design-2026-06-21.md`.
+**FRs covered:** tool execution / self-coding (FR5's deferred tool-execution clause; broker = designated home, NFR9)
+
 ---
 
 ## Epic 1: Talking Pet (walking skeleton)
@@ -758,15 +762,109 @@ So that physical and behavioral plugin events visibly move the pet's soul (its f
 
 ---
 
+## Epic 9: Self-Coding (live, tiered)
+
+The pet runs code in-the-moment and authors its own persistent tools, owner-gated by safety tier. Closes the deferred self-coding feature (was Deferred/Icebox → promoted 2026-06-21). Design decisions are fixed in `epic-9-self-coding-design-2026-06-21.md`: full v1-parity (inline + promotable named tools), tiered allowlist (FREE run free, RISKY gate via Telegram), native function-calling, the agentic loop inside the fork worker.
+
+> **Cross-cutting:** every story holds the spine invariants — core LLM-free (import-linter), broker sole model/tool-cred egress (NFR9), fork = no accumulation, single-writer, fail-soft. Tools execute worker-side (FREE, no creds); credentialed broker-side tools are out of scope for this epic. Testing follows the no-live-LLM pattern (fake providers emitting scripted tool-calls).
+
+### Story 9.1: Function-calling foundation
+
+As the owner,
+I want shelldon's brain to call defined tools through the broker and loop on the results,
+So that the pet can take real actions in a turn instead of only emitting text.
+
+**Acceptance Criteria:**
+
+**Given** the provider seam and a tool registry
+**When** a turn runs with tools available
+**Then** the broker offers `complete_with_tools(messages, tools)` (existing `complete()` untouched), normalizing each provider's native tool-call format to closed `ToolCall`/`ToolResult` contracts, so the worker loop is provider-agnostic
+**And** the worker runs a bounded agentic loop (model → tool-call → execute → feed `ToolResult` back → model …), capped at a max iteration count AND the existing completion-timeout budget
+**And** one trivial FREE tool (`get_time`) is callable end-to-end, proving the loop
+
+**Given** a tool that raises, or an unknown/malformed tool-call
+**When** the loop executes it
+**Then** it is caught and fed back as `ToolResult(ok=False, …)` (the model recovers; the turn never crashes), and loop exhaustion/timeout returns a best-effort reply with a logged note
+**And** `core/` still imports no LLM/provider code (import-linter KEPT) — the loop lives in the worker
+
+### Story 9.2: Free-tier tool pack (inline execution)
+
+As the owner,
+I want shelldon to read files and run pure computations on its own, with no approval friction,
+So that it can actually help with safe coding/info tasks in the moment.
+
+**Acceptance Criteria:**
+
+**Given** the FREE tier
+**When** the brain calls `read_file`, `list_dir`, or `python_eval`
+**Then** the tool runs synchronously in the worker with no approval, inside the bounded loop
+**And** all file tools are path-jailed to a single workspace root (symlink escapes rejected); `vault/` and credential files are always denied regardless of tier
+**And** `python_eval` runs in a restricted namespace (no `open`/`os`/`subprocess`/side-effecting imports) and is CPU/time-bounded
+
+**Given** a path-escape attempt or a side-effecting `python_eval` snippet
+**When** it is attempted
+**Then** it fails closed (rejected, logged), never escaping the jail
+
+### Story 9.3: Risky tier + Telegram approval
+
+As the owner,
+I want risky actions (writing files, running shell/git, network) to wait for my approval over Telegram,
+So that the pet's live coding can't change anything important without my say-so.
+
+**Acceptance Criteria:**
+
+**Given** a RISKY tool call (`write_file`, `run_shell`, `http_get`, `git`)
+**When** the loop reaches it
+**Then** the turn ends emitting `RequestToolApproval(call, summary)` plus a user-facing note; the pending agent state (messages so far + the pending call) is persisted in sqlite keyed by turn id (the worker never blocks waiting on a human)
+**And** the Telegram transport surfaces the summary with an inline Approve/Deny keyboard, sends with `parse_mode` (HTML + `<pre>` for tool output), and registers a command set via `setMyCommands`
+
+**Given** the owner taps Approve or Deny
+**When** the `callback_query` arrives
+**Then** a fresh worker resumes from the persisted state, executes (Approve) or skips (Deny) the call, appends the `ToolResult`, and continues the loop to a final reply
+**And** a pending approval older than its expiry is dropped (never executes), logged
+
+> General `parse_mode` reply rendering already shipped early (`6866f17`); this story owns the tool-output HTML/`<pre>`, inline keyboards, and callback routing — and absorbs field-note item 5 (slash commands).
+
+### Story 9.4: Persistent self-coded tools
+
+As the owner,
+I want shelldon to write a new tool plus its test, get my approval, and have it live next turn,
+So that the pet grows its own capabilities over time (v1's self-coding magic).
+
+**Acceptance Criteria:**
+
+**Given** the brain emits `ProposeTool(name, code, test)`
+**When** the proposal is processed
+**Then** the tool + test are staged to a staging dir (not live) and a local gate runs — `pytest` on the test plus `lint-imports` (the LLM-free-core contract auto-rejects a tool importing an LLM lib into `core/`)
+**And** on a passing gate the owner approves via the 9.3 inline keyboard, and the tool is promoted to the live tools dir
+
+**Given** a promoted tool
+**When** the next turn forks a fresh worker
+**Then** the worker discovers it (same `pkgutil.iter_modules` convention as the plugin host) and it is callable — no restart
+**And** a proposed tool whose test fails is rejected, never promoted
+
+### Story 9.5: Safety hardening
+
+As the owner,
+I want broken or runaway tools to never wedge or bankrupt the pet,
+So that live self-coding is safe to leave running on the Pi.
+
+**Acceptance Criteria:**
+
+**Given** a live tool that errors on import or raises on run
+**When** the worker loads/calls it
+**Then** it is skipped + logged (the turn survives), and a repeatedly-bad tool is moved to a quarantine dir (faces-registry pattern)
+
+**Given** a multi-call agentic loop against the live model
+**When** it runs
+**Then** `python_eval`/`run_shell` are CPU/time/memory-bounded (the 416MB Pi must not OOM) and the loop is cost-tier/credit gated (Story 5.2 reuse) so a runaway loop can't burn the budget
+
+---
+
 ## Deferred / Icebox
 
 Ideas committed-to in principle but not yet scheduled into an epic. Tracked in `sprint-status.yaml` under `icebox:`.
 
-### Self-coding tools (bot writes its own tools, human-reviewed)
+### Self-coding tools — PROMOTED to Epic 9 (2026-06-21)
 
-Carry v1 openclawgotchi's ability for the bot to **propose and write new/modified executable code for itself**, gated by **human review** — moving self-modification beyond *data* (faces/memory/persona) to *behavior*.
-
-- **Favored shape (A — PR/contributor):** the bot proposes a **tool + test**, the existing CI gate (`uv sync --locked → lint-imports → pytest`) validates it — the `import-linter` LLM-free-core contract auto-rejects any tool that pulls an LLM lib into `core/` — and a human merges; it ships on the next deploy. Reuses the per-story dev loop and the Story 4.5 "worker proposes ops on the `Result`" transport.
-- **Later option (B — live runtime gate):** bot stages a tool, human approves in the running pet, it goes live next turn via fork-reimport. Keeps v1's in-the-moment magic; needs a runtime sandbox + quarantine.
-- **Natural neighbor:** Epic 7 (extensibility) — self-coded tools are bot-authored plugins.
-- **Not locked:** A-vs-B decision is open; don't schedule until Epic 4 is done. Full design note: memory `shelldon-self-coding-tools`.
+The bot writing/running its own executable tools is **no longer iceboxed** — the A-vs-B decision was resolved (chose **live B + tiered allowlist + native function-calling**) and it is now scheduled as **Epic 9** above. Full design: `epic-9-self-coding-design-2026-06-21.md`; design note: memory `shelldon-self-coding-tools`.
