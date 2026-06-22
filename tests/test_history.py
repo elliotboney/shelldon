@@ -413,3 +413,54 @@ def test_prune_expired_approvals(tmp_path):
     assert s.take_approval("a", NOW) is None  # pruned
     assert s.take_approval("b", NOW) == b"y"  # survives
     s.close()
+
+
+# --- Story 9.4: pending_promotions (parallel to 9.3's pending_approvals) ---
+
+
+def test_park_and_take_promotion_round_trip(tmp_path):
+    s = HistoryStore.open(tmp_path / "h.db")
+    s.park_promotion("turn-1", "weather", NOW, ttl_seconds=3600)
+    assert s.take_promotion("turn-1", NOW) == "weather"
+    # Consumed: a second take returns None (the row was deleted).
+    assert s.take_promotion("turn-1", NOW) is None
+    s.close()
+
+
+def test_take_unknown_promotion_is_none(tmp_path):
+    s = HistoryStore.open(tmp_path / "h.db")
+    assert s.take_promotion("nope", NOW) is None
+    s.close()
+
+
+def test_expired_promotion_is_dropped_not_returned(tmp_path):
+    from datetime import timedelta
+
+    s = HistoryStore.open(tmp_path / "h.db")
+    s.park_promotion("turn-2", "weather", NOW, ttl_seconds=60)
+    later = NOW + timedelta(seconds=61)  # past the ttl
+    assert s.take_promotion("turn-2", later) is None  # expired → never promotes (AC3)
+    assert s.take_promotion("turn-2", NOW) is None  # and the expired row was deleted
+    s.close()
+
+
+def test_prune_expired_promotions(tmp_path):
+    from datetime import timedelta
+
+    s = HistoryStore.open(tmp_path / "h.db")
+    s.park_promotion("a", "tool-a", NOW, ttl_seconds=60)
+    s.park_promotion("b", "tool-b", NOW, ttl_seconds=99999)
+    s.prune_expired_promotions(NOW + timedelta(seconds=61))
+    assert s.take_promotion("a", NOW) is None  # pruned
+    assert s.take_promotion("b", NOW) == "tool-b"  # survives
+    s.close()
+
+
+def test_promotions_and_approvals_are_independent(tmp_path):
+    """The two tables share the turn-id keyspace but are SEPARATE (9.3 untouched): a turn id
+    parked as a promotion is NOT found by take_approval, and vice versa."""
+    s = HistoryStore.open(tmp_path / "h.db")
+    s.park_promotion("t", "weather", NOW)
+    assert s.take_approval("t", NOW) is None  # not an approval
+    assert s.take_promotion("t", NOW) == "weather"  # still the promotion
+    s.close()

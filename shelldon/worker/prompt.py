@@ -72,7 +72,15 @@ SYSTEM_INSTRUCTION = (
     # real-model uptake is unverifiable here (no live LLM) — the apply mechanism is tested.
     "When reflecting, you MAY resolve a reviewed learning with "
     '{"type":"resolve_learning","id":3,"status":"promoted"} (or "pruned"), and rewrite your '
-    'running conversation summary with {"type":"rewrite_summary","content":"…"}.'
+    'running conversation summary with {"type":"rewrite_summary","content":"…"}.\n'
+    # Story 9.4: the pet can write its OWN new tool. The model emits a propose_tool op carrying the
+    # tool module source + a pytest test; core gates it (runs the test, blocks LLM/core imports)
+    # and, only after the owner approves, promotes it — then it's callable for free on later turns.
+    "You MAY write a NEW tool for yourself when a capability is missing, by emitting a "
+    '`propose_tool` op: {"type":"propose_tool","name":"…","code":"…","test":"…"}. The `code` must '
+    "define a `run(**kwargs) -> str` function plus module-level `DESCRIPTION` (a string) and "
+    "`PARAMS_SCHEMA` (a JSON-schema dict), import NO LLM libraries, and ship with a pytest `test` "
+    "that imports the module by its name and checks `run`. It only goes live after your owner approves it."
 )
 
 #: Bare word tokens for a SAFE FTS5 query — raw owner text (quotes, parens, `*`, or

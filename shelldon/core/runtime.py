@@ -39,12 +39,14 @@ from shelldon.contracts import (
     ResolveLearning,
     MsgKind,
     OutboundMessage,
+    ProposeTool,
     Region,
     RequestToolApproval,
     Result,
     StateSnapshot,
     ToolCall,
 )
+from shelldon.core import selfcode
 from shelldon.core.arbiter import Arbiter
 from shelldon.core.bus import BusServer
 from shelldon.core.faces import DEFAULT_FACES_PATH, FaceRegistry
@@ -154,6 +156,17 @@ MAX_PROPOSED_OPS = 16
 #: 6-iteration cap, with headroom. A hard cap is Story 9.5.
 _APPROVAL_MESSAGES_WARN = 16
 
+#: Story 9.4: how much of a failed gate's pytest output to show the owner in the reply — enough
+#: to see what broke, short enough for a chat message (the full capped output is logged).
+_GATE_REPLY_OUTPUT_CHARS = 500
+
+
+def _brief(output: str) -> str:
+    """The tail of a failed gate's output for the owner's note (the failure summary pytest prints
+    last), capped — the full output is already logged at the gate."""
+    tail = output.strip()[-_GATE_REPLY_OUTPUT_CHARS:]
+    return tail if tail else "(no output)"
+
 
 class Core:
     """The turn orchestrator: owns the bus, fence, arbiter, an injected spawner, and
@@ -182,6 +195,7 @@ class Core:
         faces_path=None,
         history_path=None,
         memory_root=None,
+        workspace_root=None,
     ):
         if checkpoint_interval <= 0:
             raise ValueError(f"checkpoint_interval must be positive, got {checkpoint_interval!r}")
@@ -223,6 +237,10 @@ class Core:
         #: proposes memory-ops on its Result (Story 4.5); core validates+applies them here
         #: via the 4.2 apply path. Injectable root; tests redirect off real $HOME.
         self.memory = CuratedMemory(memory_root if memory_root is not None else DEFAULT_MEMORY_ROOT)
+        #: The self-coded-tool workspace root (Story 9.4) — core stages/gates/promotes tools here
+        #: (sole writer, AD-5); the worker discovers the live dir per fork. Defaults to the module
+        #: const; tests inject a tmp root. Same root the worker's `build_tool_registry` reads.
+        self.workspace_root = workspace_root if workspace_root is not None else selfcode.DEFAULT_WORKSPACE_ROOT
         #: The owner prompt + turn_id of the in-flight turn (≤1, AD-9), stashed at
         #: turn start so a completed/degraded turn can be paired and recorded.
         self._current_prompt: str | None = None
@@ -406,11 +424,61 @@ class Core:
         self._track(self._reap_task)
         self._arm_timeout(turn_id)
 
+    async def _handle_propose_tool(self, op: ProposeTool, turn_id: str) -> None:
+        """A self-coded-tool proposal (Story 9.4, AC1/AC2): stage the module + its test, run the
+        bounded gate (pytest + AST import-check), and either ask the owner to add it (PASS) or
+        discard it with a brief note (FAIL). Fully fail-soft — a bad/oversized proposal or a gate
+        error never crashes the turn loop (the worker fork already finished its Result)."""
+        ws = self.workspace_root
+        try:
+            module_path, _test_path = selfcode.stage(op.name, op.code, op.test, workspace_root=ws)
+        except Exception as exc:
+            log.warning("propose_tool %r: staging failed (%s)", op.name, exc)
+            await self._send_reply(f"I tried to write a tool `{op.name}` but couldn't stage it ({exc}).")
+            return
+        stem = module_path.stem
+        try:
+            passed, output = await selfcode.run_gate(stem, workspace_root=ws)
+        except Exception as exc:  # defensive — run_gate is self-guarded, but never let the loop die
+            log.warning("propose_tool %r: gate raised (%s); discarding", stem, exc)
+            selfcode.discard(stem, workspace_root=ws)
+            await self._send_reply(f"I wrote a tool `{stem}` but its check errored out, so I tossed it.")
+            return
+        if not passed:
+            selfcode.discard(stem, workspace_root=ws)
+            await self._send_reply(
+                f"I wrote a tool `{stem}` but it failed its check, so I tossed it.\n{_brief(output)}"
+            )
+            return
+        self.history.park_promotion(turn_id, stem, datetime.now(UTC))
+        await self._send_reply(
+            f"I wrote a tool `{stem}` and it passed its test — add it?", approval_turn_id=turn_id
+        )
+
     async def _handle_approval_decision(self, approval_turn_id: str, approved: bool) -> None:
-        """Owner tapped Approve/Deny on a parked RISKY call (Story 9.3, AC3/AC4). Admission:
-        a resume IS a turn (uses the ≤1 fence/arbiter/reap), so only proceed when idle — if a
-        turn is in flight, leave the approval parked and ask the owner to tap again (single-
-        owner, rare). A consumed approval that's expired/unknown is dropped with a note (AC4)."""
+        """Owner tapped Approve/Deny. TWO parked-kinds share the turn-id keyspace: a Story 9.4
+        tool PROMOTION (a file move + reply, no worker/slot needed) and a Story 9.3 RISKY-call
+        approval (a resume turn). Check the promotion FIRST — it needs no ≤1 slot, so it must run
+        before the `arbiter.is_idle` guard below. An expired/unknown decision is dropped (AC3/AC4).
+
+        9.3 admission: a resume IS a turn (uses the ≤1 fence/arbiter/reap), so only proceed when
+        idle — if a turn is in flight, leave the approval parked and ask the owner to tap again
+        (single-owner, rare). A consumed approval that's expired/unknown is dropped with a note."""
+        # Story 9.4: a parked tool promotion — promote (approve) or discard (deny), no slot needed.
+        tool_name = self.history.take_promotion(approval_turn_id, datetime.now(UTC))
+        if tool_name is not None:
+            if approved:
+                ok = selfcode.promote(tool_name, workspace_root=self.workspace_root)
+                if ok:
+                    await self._send_reply(f"`{tool_name}` is live.")
+                else:
+                    # A failed move must not orphan the staged pair on disk (review fix) — discard it.
+                    selfcode.discard(tool_name, workspace_root=self.workspace_root)
+                    await self._send_reply(f"I couldn't add `{tool_name}`, sorry — it didn't promote.")
+            else:
+                selfcode.discard(tool_name, workspace_root=self.workspace_root)
+                await self._send_reply(f"Okay, discarded `{tool_name}`.")
+            return
         if not self.arbiter.is_idle:
             await self._send_reply("I'm mid-thought — tap that again in a moment.")
             return
@@ -486,6 +554,15 @@ class Core:
             # learned even if the reply failed to reach the owner.
             self._apply_proposed_ops(result.proposed_ops)
             self._record_turn(result.payload)
+            # Story 9.4: a self-coded-tool proposal is handled here (not in the SYNC
+            # _apply_proposed_ops) because the gate is an async subprocess. It rides the worker
+            # turn that's already done (the fork emitted its Result) — off the turn-critical path
+            # in that sense; it stages + gates + (on pass) parks a promotion + asks the owner.
+            # Awaited inline: single-owner, and the gate is bounded (a timeout is a fail), so a
+            # brief wait before the slot frees below is acceptable and keeps the flow deterministic.
+            propose = next((o for o in result.proposed_ops if isinstance(o, ProposeTool)), None)
+            if propose is not None:
+                await self._handle_propose_tool(propose, env.turn_id)
         await self._await_reap()  # release the fork-server guard BEFORE the arbiter slot (AC1)
         folded = self.arbiter.complete()  # ALWAYS runs — guaranteed slot release
         if result.ok:
@@ -764,6 +841,11 @@ class Core:
             ops = ops[:MAX_PROPOSED_OPS]
         for op in ops:
             try:
+                if isinstance(op, ProposeTool):
+                    # Story 9.4: handled async in _handle_result (the gate is a subprocess) — it
+                    # is NOT a synchronous single-writer apply, so skip it here (never route it to
+                    # apply_memory_op, which would reject it as a non-memory op).
+                    continue
                 if isinstance(op, AddFace):
                     # The face op (Story 3.4) goes to the registry writer, not the memory tree.
                     self.apply_add_face(
