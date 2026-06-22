@@ -65,6 +65,11 @@ class ResumeState:
 #: more round-trip so the model can produce a final text answer; if THAT still returns
 #: tool-calls the cap trips.) Paired with the `_COMPLETION_TIMEOUT_S` budget below
 #: (whichever trips first ends the loop).
+#:
+#: Story 9.5 (credit gating): this is ALSO the runaway-spend backstop. It is the HARD per-turn
+#: model-call cap, so total self-driven spend is bounded by `daily_turn_budget` (Story 5.2) ×
+#: this ceiling model-calls/day — a runaway loop can't burn the budget. Owner turns aren't
+#: budget-gated (5.2 design) but are still bounded per-turn by this ceiling. Keep it conservative.
 _MAX_TOOL_EXECUTIONS = 6
 
 #: The reply→ops wire format: a single fenced ```ops block holding a JSON array of
@@ -166,8 +171,20 @@ async def _single_round_trip(reader, writer, turn_id: str, job_payload: str) -> 
     return Result(ok=True, payload=payload, proposed_ops=ops)
 
 
+def _record_tool_failure(failures, registry, tc, tr) -> None:
+    """Story 9.5: if a SELF-CODED tool returned `ok=False`, note its name for the Result's
+    `tool_failures` (→ core's quarantine ledger). Built-in failures never strike. No-op when
+    `failures` is None (the loop wasn't asked to collect)."""
+    if failures is None or tr.ok:
+        return
+    spec = registry.get(tc.name)
+    if spec is not None and spec.self_coded:
+        failures.add(tc.name)
+
+
 async def _agentic_loop(
-    reader, writer, turn_id: str, registry: dict[str, ToolSpec], messages: tuple[Message, ...]
+    reader, writer, turn_id: str, registry: dict[str, ToolSpec], messages: tuple[Message, ...],
+    failures: set[str] | None = None,
 ) -> Result:
     """The bounded function-calling loop (Story 9.1 AC2 + 9.3 RISKY pause). Send the running
     `messages` + tools to the broker; on tool-calls, execute the FREE-tier tools and loop; on
@@ -230,10 +247,11 @@ async def _agentic_loop(
         if risky_idx is not None:
             risky_call = comp.tool_calls[risky_idx]
             kept_calls = comp.tool_calls[: risky_idx + 1]  # FREE prefix + the risky call
-            free_results = [
-                Message(role="tool", content=tr.content, tool_call_id=tr.id)
-                for tr in (execute_tool(tc, registry) for tc in comp.tool_calls[:risky_idx])
-            ]
+            free_results = []
+            for tc in comp.tool_calls[:risky_idx]:
+                tr = execute_tool(tc, registry)
+                _record_tool_failure(failures, registry, tc, tr)
+                free_results.append(Message(role="tool", content=tr.content, tool_call_id=tr.id))
             assistant_msg = Message(role="assistant", content=comp.payload, tool_calls=kept_calls)
             paused = messages + (assistant_msg,) + tuple(free_results)
             summary = summarize_call(risky_call, registry[risky_call.name])
@@ -248,28 +266,31 @@ async def _agentic_loop(
         # alongside the tool-calls (Anthropic can interleave) — replaying tool_use without its
         # leading text is a provider 400.
         assistant_msg = Message(role="assistant", content=comp.payload, tool_calls=comp.tool_calls)
-        tool_msgs = [
-            Message(role="tool", content=tr.content, tool_call_id=tr.id)
-            for tr in (execute_tool(tc, registry) for tc in comp.tool_calls)
-        ]
+        tool_msgs = []
+        for tc in comp.tool_calls:
+            tr = execute_tool(tc, registry)
+            _record_tool_failure(failures, registry, tc, tr)
+            tool_msgs.append(Message(role="tool", content=tr.content, tool_call_id=tr.id))
         messages = messages + (assistant_msg,) + tuple(tool_msgs)
 
     # Unreachable (the loop returns on text/exhaustion), but stay fail-soft.
     return Result(ok=True, payload="I've used too many steps. Let me try a different approach.")
 
 
-async def _resume_loop(reader, writer, turn_id: str, registry, resume: "ResumeState") -> Result:
+async def _resume_loop(reader, writer, turn_id: str, registry, resume: "ResumeState",
+                       failures: set[str] | None = None) -> Result:
     """Resume a paused RISKY turn (Story 9.3): resolve the pending call — EXECUTE it on
     approve, or feed a 'denied by owner' `ToolResult` on deny — append the result so every
     `tool_use` in the restored assistant message is answered, then continue the loop to a
     final reply (or another RISKY pause)."""
     if resume.approved:
         tr = execute_tool(resume.call, registry)
+        _record_tool_failure(failures, registry, resume.call, tr)
     else:
         log.info("worker: owner DENIED %r on resumed turn %s", resume.call.name, turn_id)
         tr = ToolResult(id=resume.call.id, ok=False, content="denied by owner")
     messages = resume.messages + (Message(role="tool", content=tr.content, tool_call_id=resume.call.id),)
-    return await _agentic_loop(reader, writer, turn_id, registry, messages)
+    return await _agentic_loop(reader, writer, turn_id, registry, messages, failures)
 
 
 async def run_worker(
@@ -282,6 +303,7 @@ async def run_worker(
     assemble=None,
     tool_registry: dict[str, ToolSpec] | None = None,
     resume: "ResumeState | None" = None,
+    import_failures: tuple[str, ...] = (),
 ) -> None:
     """Connect as WORKER, ASSEMBLE the prompt from memory (Story 4.4), run the turn against
     the broker, send `Result→core`, then exit.
@@ -297,9 +319,12 @@ async def run_worker(
     round-trip (AC5), non-empty → the bounded function-calling loop (AC2). The sole production
     caller (`forkserver`) passes `build_tool_registry()` (and `resume` for an approval tap)."""
     reader, writer = await connect(socket_path, Actor.WORKER)
+    # Story 9.5: collect the self-coded tools that fail this turn (import skips seeded here +
+    # run-failures added in the loop) → Result.tool_failures → core's quarantine ledger (AD-8).
+    failures: set[str] = set(import_failures)
     try:
         if resume is not None:
-            result = await _resume_loop(reader, writer, turn_id, tool_registry, resume)
+            result = await _resume_loop(reader, writer, turn_id, tool_registry, resume, failures)
         elif not tool_registry:
             if assemble is None:
                 def assemble(message):
@@ -310,7 +335,10 @@ async def run_worker(
                 def assemble(message):
                     return build_prompt(message, memory_root=memory_root, history_path=history_path)
             messages = (Message(role="user", content=assemble(prompt)),)
-            result = await _agentic_loop(reader, writer, turn_id, tool_registry, messages)
+            result = await _agentic_loop(reader, writer, turn_id, tool_registry, messages, failures)
+        if failures:
+            # Attach the turn's failing self-coded tool names (frozen Result → replace).
+            result = msgspec.structs.replace(result, tool_failures=tuple(sorted(failures)))
         try:
             await asyncio.wait_for(
                 write_frame(

@@ -262,6 +262,21 @@ def test_propose_tool_round_trips_in_proposed_ops():
     assert back.name == "weather" and "def run" in back.code and "def test_x" in back.test
 
 
+def test_result_tool_failures_round_trips():
+    """Story 9.5: `Result.tool_failures` is additive — a turn carrying failing self-coded tool
+    names round-trips, and a plain Result defaults to () (non-breaking decode, AD-13)."""
+    env = Envelope(
+        id="r", kind=MsgKind.RESULT, src=Actor.WORKER, dst=Actor.CORE,
+        body=Result(ok=True, payload="hi", tool_failures=("badtool", "other")), turn_id="t",
+    )
+    back = decode(encode(env)).body
+    assert back.tool_failures == ("badtool", "other")
+    assert Result(ok=True).tool_failures == ()  # default
+    plain = Envelope(id="p", kind=MsgKind.RESULT, src=Actor.WORKER, dst=Actor.CORE,
+                     body=Result(ok=True, payload="hi"), turn_id="t")
+    assert decode(encode(plain)).body.tool_failures == ()
+
+
 def test_resolve_learning_rejects_bad_status():
     """status is a closed Literal — an out-of-set value is a decode error (whole-reject)."""
     with pytest.raises(msgspec.ValidationError):

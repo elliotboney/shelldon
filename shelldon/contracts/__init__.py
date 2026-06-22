@@ -315,6 +315,11 @@ class Result(msgspec.Struct, frozen=True, tag="result", forbid_unknown_fields=Tr
     payload: str = ""
     error: str | None = None
     proposed_ops: list[ProposedOp] = msgspec.field(default_factory=list)
+    #: Story 9.5: names of self-coded tools that FAILED this turn (errored on import at
+    #: discovery, or raised when called). Core strikes each in the `tool_health` ledger and
+    #: quarantines a repeatedly-bad one (AD-8). Additive optional default — a turn with no
+    #: tool failures leaves it empty, so this is a non-breaking decode (AD-13, no version bump).
+    tool_failures: tuple[str, ...] = ()
 
 
 class Completion(msgspec.Struct, frozen=True, tag="completion", forbid_unknown_fields=True):

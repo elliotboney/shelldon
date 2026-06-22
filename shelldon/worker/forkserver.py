@@ -116,6 +116,7 @@ async def _os_fork_spawn(socket_path: str, turn_id: str, prompt: str,
     prompt from (Story 4.4). `resume` (Story 9.3) continues a paused RISKY turn from
     the restored state instead of assembling a fresh prompt.
     """
+    from shelldon.core.limits import apply_resource_caps
     from shelldon.worker.tools import build_tool_registry
     from shelldon.worker.worker import run_worker
 
@@ -139,9 +140,20 @@ async def _os_fork_spawn(socket_path: str, turn_id: str, prompt: str,
             # Cap the range (SC_OPEN_MAX can be ~1e6) — only low FDs are ever inherited.
             os.closerange(3, min(os.sysconf("SC_OPEN_MAX"), _MAX_INHERITED_FD))
             _maybe_drop_privileges(worker_uid, worker_gid, drop=drop)
+            # Story 9.5 (AC2): bound the worker fork's address space + CPU so a runaway tool
+            # (python_eval / a self-coded tool) can't OOM or peg the 416MB Pi — the fork dies each
+            # turn so the cap is per-turn-clean. Linux-enforced; guarded per-limit. Set the caps
+            # BEFORE build_tool_registry — discovery imports each self-coded tool module, so its
+            # IMPORT-TIME code must already run under the caps (review fix).
+            apply_resource_caps()
+            # Collect self-coded tools that failed to import at discovery so the worker reports
+            # them on its Result (→ core quarantines a repeatedly-bad one).
+            import_failures: list[str] = []
+            registry = build_tool_registry(import_failures=import_failures)
             asyncio.run(run_worker(socket_path, turn_id, prompt,
                                    memory_root=memory_root, history_path=history_path,
-                                   tool_registry=build_tool_registry(), resume=resume))
+                                   tool_registry=registry, resume=resume,
+                                   import_failures=tuple(import_failures)))
         except BaseException:
             # A failed drop/turn must NOT vanish as exit 0 — exit non-zero so the reaper
             # (and a human reading exit status) can SEE the child failed (Story 5.0).

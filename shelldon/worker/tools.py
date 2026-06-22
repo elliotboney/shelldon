@@ -35,6 +35,7 @@ from shelldon.core.memory import DEFAULT_MEMORY_ROOT
 #: tool dirs without a core→worker import — AD-5). Re-exported here so existing
 #: `worker.tools.DEFAULT_WORKSPACE_ROOT` callers (and the file-tool jail below) are unchanged.
 from shelldon.core.selfcode import DEFAULT_WORKSPACE_ROOT, live_tools_dir
+from shelldon.core.limits import resource_cap_preexec
 
 log = logging.getLogger("shelldon.worker.tools")
 
@@ -110,6 +111,10 @@ class ToolSpec:
     params_schema: dict
     tier: ToolTier
     fn: Callable
+    #: Story 9.5: True for an owner-approved self-coded tool (discovered from the live dir),
+    #: False for a built-in. The loop uses it to attribute a run-failure to a self-coded tool
+    #: (→ `Result.tool_failures` → core's quarantine ledger). Built-in failures never strike.
+    self_coded: bool = False
 
 
 def execute_tool(call: ToolCall, registry: dict[str, ToolSpec]) -> ToolResult:
@@ -252,10 +257,11 @@ def _write_file(path: str, content: str, *, workspace_root: Path, memory_root: P
 def _run_subprocess(argv, *, cwd: Path, shell: bool = False) -> str:
     """Run a subprocess bounded by `_RISKY_TIMEOUT_S` in `cwd`, returning capped combined
     output + exit code. A timeout raises (→ ToolResult(ok=False)); a non-zero exit is NOT an
-    error (it's normal tool output the model should see)."""
+    error (it's normal tool output the model should see). Story 9.5: a `preexec_fn` sets
+    RLIMIT_AS/RLIMIT_CPU in the child so a spawned process can't escape the worker's caps."""
     proc = subprocess.run(
         argv, cwd=str(cwd), shell=shell, capture_output=True, text=True,
-        timeout=_RISKY_TIMEOUT_S,
+        timeout=_RISKY_TIMEOUT_S, preexec_fn=resource_cap_preexec(),
     )
     out = (proc.stdout or "") + (proc.stderr or "")
     return _cap(f"exit {proc.returncode}\n{out}".rstrip())
@@ -305,13 +311,15 @@ def summarize_call(call: ToolCall, spec: "ToolSpec") -> str:
 _TOOL_MODULE_ATTRS = ("run", "DESCRIPTION", "PARAMS_SCHEMA")
 
 
-def discover_self_coded_tools(workspace_root: Path) -> list[ToolSpec]:
+def discover_self_coded_tools(workspace_root: Path, *, skipped: list[str] | None = None) -> list[ToolSpec]:
     """Discover the owner-approved self-coded tools in the live dir (Story 9.4, AC4) and build a
     FREE-tier `ToolSpec` for each. Imports each `*.py` module via `importlib.util.spec_from_file_location`
     (the dir is NOT a package on `sys.path`), mirroring the plugin-host's per-module try/except
     skip (AD-8): a module missing the `run`/`DESCRIPTION`/`PARAMS_SCHEMA` convention or raising on
     import is SKIPPED + logged — the turn survives, a self-coded tool never wedges the worker.
-    (Repeated-bad-tool quarantine is Story 9.5.)"""
+
+    Story 9.5: a non-None `skipped` collects the stems of tools that failed to import/convention so
+    the worker can report them on its Result (→ core's quarantine ledger, AD-8)."""
     ld = live_tools_dir(workspace_root)
     specs: list[ToolSpec] = []
     if not ld.is_dir():
@@ -332,16 +340,20 @@ def discover_self_coded_tools(workspace_root: Path) -> list[ToolSpec]:
                 params_schema=module.PARAMS_SCHEMA,
                 tier=ToolTier.FREE,
                 fn=module.run,
+                self_coded=True,
             )
         except Exception:
             log.warning("skipping self-coded tool %r — bad import or convention", path.name, exc_info=True)
+            if skipped is not None:
+                skipped.append(path.stem)  # report it so a repeatedly-bad tool gets quarantined (9.5)
             continue
         specs.append(spec)
     return specs
 
 
 def build_tool_registry(
-    workspace_root: Path | None = None, memory_root: Path | None = None
+    workspace_root: Path | None = None, memory_root: Path | None = None, *,
+    import_failures: list[str] | None = None,
 ) -> dict[str, ToolSpec]:
     """Return the FREE-tier tools available for the current turn. Story 9.1 shipped
     `get_time`; Story 9.2 adds `read_file`/`list_dir` (jailed to `workspace_root`) and
@@ -444,7 +456,7 @@ def build_tool_registry(
     # Story 9.4: merge in the owner-approved self-coded tools (FREE). A discovered tool may NOT
     # shadow a built-in name — built-ins win (a self-coded `read_file` can't override the jailed
     # one); the collision is skipped + logged.
-    for tool in discover_self_coded_tools(ws):
+    for tool in discover_self_coded_tools(ws, skipped=import_failures):
         if tool.name in registry:
             log.warning("self-coded tool %r shadows a built-in; keeping the built-in", tool.name)
             continue
