@@ -230,7 +230,7 @@ async def test_outbound_result_write_is_bounded(monkeypatch):
     async def fake_connect(socket_path, actor):
         return object(), _FakeWriter()
 
-    async def fake_result(reader, turn_id):
+    async def fake_result(reader, writer, turn_id, job_payload):
         return Result(ok=True, payload="reply")
 
     async def fake_write_frame(writer, env):
@@ -239,7 +239,7 @@ async def test_outbound_result_write_is_bounded(monkeypatch):
         # the JOB write returns immediately
 
     monkeypatch.setattr(w, "connect", fake_connect)
-    monkeypatch.setattr(w, "_result_from_broker", fake_result)
+    monkeypatch.setattr(w, "_single_round_trip", fake_result)
     monkeypatch.setattr(w, "write_frame", fake_write_frame)
 
     # Without the bound this hangs 10s; with it, run_worker returns cleanly (no raise).

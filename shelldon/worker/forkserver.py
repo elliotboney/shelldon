@@ -115,6 +115,7 @@ async def _os_fork_spawn(socket_path: str, turn_id: str, prompt: str,
     `memory_root`/`history_path` are the read-only roots the worker assembles its
     prompt from (Story 4.4).
     """
+    from shelldon.worker.tools import build_tool_registry
     from shelldon.worker.worker import run_worker
 
     try:
@@ -138,7 +139,8 @@ async def _os_fork_spawn(socket_path: str, turn_id: str, prompt: str,
             os.closerange(3, min(os.sysconf("SC_OPEN_MAX"), _MAX_INHERITED_FD))
             _maybe_drop_privileges(worker_uid, worker_gid, drop=drop)
             asyncio.run(run_worker(socket_path, turn_id, prompt,
-                                   memory_root=memory_root, history_path=history_path))
+                                   memory_root=memory_root, history_path=history_path,
+                                   tool_registry=build_tool_registry()))
         except BaseException:
             # A failed drop/turn must NOT vanish as exit 0 — exit non-zero so the reaper
             # (and a human reading exit status) can SEE the child failed (Story 5.0).

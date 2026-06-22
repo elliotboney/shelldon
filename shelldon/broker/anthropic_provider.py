@@ -13,9 +13,66 @@ so the retry (1.4) and the fallback chain (Story 2.2) can key on them uniformly.
 import anthropic
 
 from shelldon.broker.provider import PermanentProviderError, TransientProviderError
+from shelldon.contracts import Completion, Message, ToolCall, ToolDefinition
 
 #: Native-Claude default model; GLM (Z.ai) is selected via the chain's `glm` preset.
 _DEFAULT_MODEL = "claude-sonnet-4-6"
+
+
+def _tools_to_anthropic(tools: list[ToolDefinition]) -> list[dict]:
+    """Project our `ToolDefinition`s to the Anthropic tools schema (`input_schema`)."""
+    return [
+        {"name": t.name, "description": t.description, "input_schema": t.params_schema}
+        for t in tools
+    ]
+
+
+def _messages_to_anthropic(messages: list[Message]) -> list[dict]:
+    """Convert our `Message` structs to the Anthropic SDK message format. Assistant
+    tool-calls become `tool_use` content blocks; tool results become a `user` message
+    with a `tool_result` block (Anthropic carries tool results on the user turn)."""
+    sdk: list[dict] = []
+    for m in messages:
+        if m.role == "assistant" and m.tool_calls:
+            # Keep any leading text alongside the tool_use blocks — Anthropic can return
+            # mixed text+tool_use, and replaying tool_use without that text is a 400.
+            blocks: list[dict] = []
+            if m.content:
+                blocks.append({"type": "text", "text": m.content})
+            blocks.extend(
+                {"type": "tool_use", "id": tc.id, "name": tc.name, "input": tc.args}
+                for tc in m.tool_calls
+            )
+            sdk.append({"role": "assistant", "content": blocks})
+        elif m.role == "tool":
+            sdk.append({
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": m.tool_call_id, "content": m.content}
+                ],
+            })
+        else:
+            sdk.append({"role": m.role, "content": m.content})
+    return sdk
+
+
+def normalize_anthropic_response(resp) -> Completion:
+    """Normalize an Anthropic SDK response into a closed `Completion`. Text blocks join
+    into `payload`; `tool_use` blocks become `ToolCall` contracts. A reply with neither
+    text nor tool calls is a failed turn (mirrors `complete`'s no-text rule)."""
+    text_parts: list[str] = []
+    calls: list[ToolCall] = []
+    for block in resp.content:
+        btype = getattr(block, "type", None)
+        if btype == "text":
+            text_parts.append(getattr(block, "text", ""))
+        elif btype == "tool_use":
+            # `input` may be None for a no-arg tool call — `dict(None)` would TypeError.
+            calls.append(ToolCall(id=block.id, name=block.name, args=dict(block.input or {})))
+    text = "".join(text_parts)
+    if not text and not calls:
+        raise PermanentProviderError("provider returned no text or tool calls")
+    return Completion(ok=True, payload=text, tool_calls=tuple(calls))
 
 
 class AnthropicProvider:
@@ -58,3 +115,30 @@ class AnthropicProvider:
             # a no-text reply is a failed turn, not a silent empty success.
             raise PermanentProviderError("provider returned no text")
         return text
+
+    async def complete_with_tools(
+        self, messages: list[Message], tools: list[ToolDefinition]
+    ) -> Completion:
+        """Native function-calling round-trip (Story 9.1). Raises the same provider
+        exception types as `complete` on SDK errors so the broker's retry/fallback keys
+        on them uniformly; returns a normalized `Completion` (text + `ToolCall`s) on
+        success. GLM (Z.ai) uses this same Anthropic-compatible path unchanged."""
+        try:
+            resp = await self._client.messages.create(
+                model=self._model,
+                max_tokens=self._max_tokens,
+                messages=_messages_to_anthropic(messages),
+                tools=_tools_to_anthropic(tools),
+            )
+        except (
+            anthropic.APITimeoutError,
+            anthropic.APIConnectionError,
+            anthropic.RateLimitError,
+            anthropic.InternalServerError,
+        ) as exc:
+            raise TransientProviderError(type(exc).__name__) from exc
+        except anthropic.APIStatusError as exc:
+            if exc.status_code >= 500:
+                raise TransientProviderError(type(exc).__name__) from exc
+            raise PermanentProviderError(f"status {exc.status_code}") from exc
+        return normalize_anthropic_response(resp)

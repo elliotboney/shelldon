@@ -19,7 +19,7 @@ import msgspec
 
 from shelldon.broker.broker import handle_job_chain
 from shelldon.broker.provider import LLMProvider
-from shelldon.contracts import Actor, Completion, Envelope, Job, MsgKind, Result
+from shelldon.contracts import Actor, Completion, Envelope, Job, MsgKind
 from shelldon.core.bus import connect, read_frame, write_frame
 
 log = logging.getLogger("shelldon.broker")
@@ -53,17 +53,18 @@ async def _serve_connection(reader, writer, chain: list[LLMProvider]) -> None:
         if env.kind is not MsgKind.JOB or not isinstance(env.body, Job):
             log.warning("broker ignoring non-Job envelope %s (%s)", env.id, env.kind)
             continue
-        result: Result = await handle_job_chain(env.body, chain)
-        # Return the raw completion to the WORKER, not a Result to core (Story 4.5):
-        # the worker parses its own reply into proposed_ops and emits the Result. The
-        # broker stays a pure egress boundary — text/error only, no pet-domain parsing
-        # (AD-2). turn_id is echoed so the worker (and core's fence) can correlate.
+        # The broker produces the raw provider Completion directly (Story 9.1) — it carries
+        # text/error AND any normalized tool-calls. Return it to the WORKER, not a Result to
+        # core (Story 4.5): the worker runs the tool loop and parses its own reply into
+        # proposed_ops, emitting the Result. The broker stays a pure egress boundary — no
+        # pet-domain parsing (AD-2). turn_id is echoed so the worker/core fence can correlate.
+        completion: Completion = await handle_job_chain(env.body, chain)
         out = Envelope(
             id=uuid.uuid4().hex,
             kind=MsgKind.COMPLETION,
             src=Actor.BROKER,
             dst=Actor.WORKER,
-            body=Completion(ok=result.ok, payload=result.payload, error=result.error),
+            body=completion,
             turn_id=env.turn_id,
         )
         try:
