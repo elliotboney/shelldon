@@ -11,10 +11,13 @@ Single-owner: replies go to the chat the last permitted message came from. `ALLO
 """
 
 import asyncio
+import html
 import logging
 import os
+import re
 from collections.abc import AsyncIterator
 
+from shelldon.contracts import InboundMessage
 from shelldon.transport.runner import run_transport
 
 log = logging.getLogger("shelldon.transport.telegram")
@@ -23,6 +26,29 @@ _API = "https://api.telegram.org/bot{token}/{method}"
 _POLL_TIMEOUT = 25  # getUpdates long-poll seconds (the server holds the request open)
 _ERROR_BACKOFF = 3.0  # sleep after a transient getUpdates failure, so an outage doesn't busy-spin
 _TYPING_INTERVAL = 4.0  # re-send the 'typing…' action this often — Telegram clears it after ~5s
+
+#: Slash commands registered via setMyCommands on startup (Story 9.3, field-note item 5).
+_COMMANDS = [
+    {"command": "start", "description": "Say hi to shelldon"},
+    {"command": "help", "description": "What shelldon can do"},
+]
+
+#: A `code` span in the model/approval text → an HTML <pre> block (Story 9.3 AC2: tool output
+#: renders as a code block). Used only on the HTML-parse_mode approval path.
+_CODE_SPAN = re.compile(r"`([^`]*)`")
+
+
+def _to_html(text: str) -> str:
+    """HTML-escape `text` and render markdown `code` spans as <pre>…</pre> blocks (AC2). Escapes
+    code-span content too, so a tool path/command with <,>,& can never break the HTML parse."""
+    out: list[str] = []
+    last = 0
+    for m in _CODE_SPAN.finditer(text):
+        out.append(html.escape(text[last:m.start()]))
+        out.append(f"<pre>{html.escape(m.group(1))}</pre>")
+        last = m.end()
+    out.append(html.escape(text[last:]))
+    return "".join(out)
 
 
 class TelegramChat:
@@ -55,7 +81,7 @@ class TelegramChat:
     def _permitted(self, user_id) -> bool:
         return self._allow_all or user_id in self._allowed
 
-    async def inbound(self) -> AsyncIterator[str]:
+    async def inbound(self) -> "AsyncIterator[str | InboundMessage]":
         """Long-poll getUpdates forever; yield the text of each PERMITTED message (recording
         its chat for replies) and ack it via the offset so it's never re-fetched. A transient
         API/network error backs off and retries — the adapter never dies on one bad poll."""
@@ -73,6 +99,12 @@ class TelegramChat:
                 continue
             for u in updates:
                 offset = u["update_id"] + 1  # ack: the next poll starts after this update
+                cq = u.get("callback_query")
+                if cq is not None:  # Story 9.3: an Approve/Deny tap
+                    decision = await self._handle_callback(cq)
+                    if decision is not None:
+                        yield decision
+                    continue
                 msg = u.get("message") or {}
                 text = msg.get("text")
                 user_id = (msg.get("from") or {}).get("id")
@@ -115,6 +147,65 @@ class TelegramChat:
             payload["parse_mode"] = parse_mode
         resp = await self._client.post(self._url("sendMessage"), json=payload)
         return bool(resp.json().get("ok"))
+
+    async def _handle_callback(self, cq: dict) -> "InboundMessage | None":
+        """Turn an Approve/Deny `callback_query` into an approval-decision InboundMessage
+        (Story 9.3). Always answer the query (clears the client spinner); gate on the user id
+        like chat. `callback_data` is `"{turn_id}:approve|deny"`."""
+        try:
+            await self._client.post(
+                self._url("answerCallbackQuery"), json={"callback_query_id": cq.get("id")}
+            )
+        except Exception:
+            log.debug("telegram answerCallbackQuery failed", exc_info=True)
+        user_id = (cq.get("from") or {}).get("id")
+        data = cq.get("data") or ""
+        if not self._permitted(user_id) or ":" not in data:
+            if data:
+                log.info("telegram: dropping callback from unauthorized user %r", user_id)
+            return None
+        turn_id, _, decision = data.rpartition(":")
+        if not turn_id:  # malformed callback data ("…:approve" with no id) — ignore, don't mislead
+            log.info("telegram: dropping callback with empty turn_id (%r)", data)
+            return None
+        # Reply to the chat the button lived in (so a tap also (re)sets the reply target) and
+        # show 'typing…' while the resumed worker runs (it can take seconds).
+        chat_id = ((cq.get("message") or {}).get("chat") or {}).get("id")
+        if chat_id is not None:
+            self._chat_id = chat_id
+        self._start_typing()
+        return InboundMessage(text="", approval_turn_id=turn_id, approved=(decision == "approve"))
+
+    async def send_approval(self, text: str, approval_turn_id: str) -> None:
+        """Send an approval request with an inline Approve/Deny keyboard (Story 9.3 AC2). HTML
+        parse_mode (code spans → <pre>); the buttons' callback_data carries `approval_turn_id`
+        so the tap echoes the id the resumable state is parked under. Drops on no-chat/failure."""
+        self._stop_typing()
+        if self._chat_id is None:
+            log.debug("telegram: no chat yet; dropping approval request")
+            return
+        payload = {
+            "chat_id": self._chat_id,
+            "text": _to_html(text),
+            "parse_mode": "HTML",
+            "reply_markup": {
+                "inline_keyboard": [[
+                    {"text": "✅ Approve", "callback_data": f"{approval_turn_id}:approve"},
+                    {"text": "❌ Deny", "callback_data": f"{approval_turn_id}:deny"},
+                ]]
+            },
+        }
+        try:
+            await self._client.post(self._url("sendMessage"), json=payload)
+        except Exception as exc:
+            log.warning("telegram approval send failed (%s); dropped", exc)
+
+    async def set_commands(self) -> None:
+        """Register the slash-command set once on startup (Story 9.3, field-note item 5)."""
+        try:
+            await self._client.post(self._url("setMyCommands"), json={"commands": _COMMANDS})
+        except Exception as exc:
+            log.warning("telegram setMyCommands failed (%s); continuing", exc)
 
     async def outbound(self, text: str) -> None:
         """Send `text` to the current chat, stopping the typing indicator first. Rendered as
@@ -165,8 +256,11 @@ async def run_telegram_transport(
     if own:
         client = httpx.AsyncClient(timeout=httpx.Timeout(_POLL_TIMEOUT + 10))
     chat = TelegramChat(client, token, allowed_users=allowed_users, allow_all=allow_all)
+    await chat.set_commands()  # Story 9.3: register the slash-command set on startup
     try:
-        await run_transport(socket_path, chat.inbound(), chat.outbound)
+        await run_transport(
+            socket_path, chat.inbound(), chat.outbound, on_approval_request=chat.send_approval
+        )
     finally:
         if own:
             await client.aclose()

@@ -17,6 +17,7 @@ degrades rather than hanging — the core turn timeout is the backstop.
 import asyncio
 import logging
 import re
+from dataclasses import dataclass
 from uuid import uuid4
 
 import msgspec
@@ -29,14 +30,34 @@ from shelldon.contracts import (
     Message,
     MsgKind,
     ProposedOp,
+    RequestToolApproval,
     Result,
+    ToolCall,
     ToolDefinition,
+    ToolResult,
+    ToolTier,
 )
 from shelldon.core.bus import connect, read_frame, write_frame
 from shelldon.worker.prompt import build_prompt
-from shelldon.worker.tools import ToolSpec, execute_tool
+from shelldon.worker.tools import ToolSpec, execute_tool, summarize_call
 
 log = logging.getLogger("shelldon.worker")
+
+
+@dataclass(frozen=True)
+class ResumeState:
+    """A paused RISKY-tool turn being resumed after the owner's decision (Story 9.3).
+
+    Passed to `run_worker` in the FORKED child (in-process inheritance — never serialized
+    across the bus): `messages` is the conversation up to and including the assistant's
+    tool-call (with any FREE results already appended), `call` is the pending RISKY call,
+    `approved` is the owner's choice. The worker resolves the call (execute on approve, a
+    'denied' ToolResult on deny) and continues the loop to a final reply."""
+
+    messages: tuple[Message, ...]
+    call: ToolCall
+    approved: bool
+
 
 #: Bound on the agentic tool loop (Story 9.1 AC2): the worker executes at most this many
 #: rounds of tool-calls before giving up with a best-effort reply — a model that loops
@@ -146,23 +167,26 @@ async def _single_round_trip(reader, writer, turn_id: str, job_payload: str) -> 
 
 
 async def _agentic_loop(
-    reader, writer, turn_id: str, job_payload: str, registry: dict[str, ToolSpec]
+    reader, writer, turn_id: str, registry: dict[str, ToolSpec], messages: tuple[Message, ...]
 ) -> Result:
-    """The bounded function-calling loop (Story 9.1 AC2). Send the running messages +
-    tools to the broker; if the Completion carries tool-calls, execute the FREE-tier tools
-    synchronously, append the results, and loop; if it is text, parse it into the Result.
+    """The bounded function-calling loop (Story 9.1 AC2 + 9.3 RISKY pause). Send the running
+    `messages` + tools to the broker; on tool-calls, execute the FREE-tier tools and loop; on
+    text, parse it into the Result. When a completion contains a RISKY-tier call, PAUSE: end
+    the turn emitting a `RequestToolApproval` (the worker never blocks on a human, 9.3 AC1).
 
     Bounded two ways: at most `_MAX_TOOL_EXECUTIONS` tool rounds, and within the SAME
     `_COMPLETION_TIMEOUT_S` total budget (W < R < T coherent-timeout invariant) — it breaks
     with < 2s left so a final Job never has too little time to get an answer. Either bound,
-    a bad tool, or an unknown tool yields a best-effort reply — the turn NEVER crashes."""
+    a bad tool, or an unknown tool yields a best-effort reply — the turn NEVER crashes.
+
+    `messages` is the starting conversation: `(user,)` for a fresh turn, or the restored +
+    resolved state for a resumed RISKY turn (Story 9.3)."""
     tool_defs = tuple(
         ToolDefinition(
             name=s.name, description=s.description, params_schema=s.params_schema, tier=s.tier
         )
         for s in registry.values()
     )
-    messages: tuple[Message, ...] = (Message(role="user", content=job_payload),)
     loop = asyncio.get_running_loop()
     loop_start = loop.time()
 
@@ -194,10 +218,35 @@ async def _agentic_loop(
             log.warning("worker: tool loop exhausted after %d executions", iteration)
             return Result(ok=True, payload="I've used too many steps. Let me try a different approach.")
 
-        # Execute the FREE-tier tools (errors → ToolResult(ok=False), never raise) and
-        # extend the running conversation with the assistant's calls + the tool results.
-        # Preserve any assistant text that came alongside the tool-calls (Anthropic can
-        # interleave) — replaying tool_use without its leading text is a provider 400.
+        # 9.3: PAUSE on the first RISKY call. Execute any FREE calls that precede it (so the
+        # protocol's tool_use↔tool_result pairing holds), keep the assistant message to those
+        # answered calls + the risky one, park (messages, risky_call) for owner approval, and
+        # end the turn. Calls AFTER the first risky one are dropped (the model re-requests).
+        risky_idx = next(
+            (i for i, tc in enumerate(comp.tool_calls)
+             if registry.get(tc.name) is not None and registry[tc.name].tier == ToolTier.RISKY),
+            None,
+        )
+        if risky_idx is not None:
+            risky_call = comp.tool_calls[risky_idx]
+            kept_calls = comp.tool_calls[: risky_idx + 1]  # FREE prefix + the risky call
+            free_results = [
+                Message(role="tool", content=tr.content, tool_call_id=tr.id)
+                for tr in (execute_tool(tc, registry) for tc in comp.tool_calls[:risky_idx])
+            ]
+            assistant_msg = Message(role="assistant", content=comp.payload, tool_calls=kept_calls)
+            paused = messages + (assistant_msg,) + tuple(free_results)
+            summary = summarize_call(risky_call, registry[risky_call.name])
+            log.info("worker: pausing turn %s for approval of %r", turn_id, summary)
+            return Result(
+                ok=True,
+                payload=f"I'd like to run `{summary}` — approve?",
+                proposed_ops=[RequestToolApproval(call=risky_call, summary=summary, messages=paused)],
+            )
+
+        # All-FREE completion: execute + loop (9.1/9.2 behavior). Preserve any assistant text
+        # alongside the tool-calls (Anthropic can interleave) — replaying tool_use without its
+        # leading text is a provider 400.
         assistant_msg = Message(role="assistant", content=comp.payload, tool_calls=comp.tool_calls)
         tool_msgs = [
             Message(role="tool", content=tr.content, tool_call_id=tr.id)
@@ -209,6 +258,20 @@ async def _agentic_loop(
     return Result(ok=True, payload="I've used too many steps. Let me try a different approach.")
 
 
+async def _resume_loop(reader, writer, turn_id: str, registry, resume: "ResumeState") -> Result:
+    """Resume a paused RISKY turn (Story 9.3): resolve the pending call — EXECUTE it on
+    approve, or feed a 'denied by owner' `ToolResult` on deny — append the result so every
+    `tool_use` in the restored assistant message is answered, then continue the loop to a
+    final reply (or another RISKY pause)."""
+    if resume.approved:
+        tr = execute_tool(resume.call, registry)
+    else:
+        log.info("worker: owner DENIED %r on resumed turn %s", resume.call.name, turn_id)
+        tr = ToolResult(id=resume.call.id, ok=False, content="denied by owner")
+    messages = resume.messages + (Message(role="tool", content=tr.content, tool_call_id=resume.call.id),)
+    return await _agentic_loop(reader, writer, turn_id, registry, messages)
+
+
 async def run_worker(
     socket_path: str,
     turn_id: str,
@@ -218,6 +281,7 @@ async def run_worker(
     history_path=None,
     assemble=None,
     tool_registry: dict[str, ToolSpec] | None = None,
+    resume: "ResumeState | None" = None,
 ) -> None:
     """Connect as WORKER, ASSEMBLE the prompt from memory (Story 4.4), run the turn against
     the broker, send `Result→core`, then exit.
@@ -228,19 +292,25 @@ async def run_worker(
     turn-lifecycle tests inject an identity assembler so they stay about fencing/
     coalescing, not prompt content.
 
-    `tool_registry` (Story 9.1) selects the path: None/empty → the pre-9.1 single
-    round-trip (AC5); a non-empty registry → the bounded function-calling loop (AC2). The
-    sole production caller (`forkserver`) passes `build_tool_registry()`."""
-    if assemble is None:
-        def assemble(message):
-            return build_prompt(message, memory_root=memory_root, history_path=history_path)
-    job_payload = assemble(prompt)
+    Path selection: `resume` (Story 9.3) → continue a paused RISKY turn from the restored
+    state (no assembly); else `tool_registry` (Story 9.1) None/empty → the pre-9.1 single
+    round-trip (AC5), non-empty → the bounded function-calling loop (AC2). The sole production
+    caller (`forkserver`) passes `build_tool_registry()` (and `resume` for an approval tap)."""
     reader, writer = await connect(socket_path, Actor.WORKER)
     try:
-        if not tool_registry:
-            result = await _single_round_trip(reader, writer, turn_id, job_payload)
+        if resume is not None:
+            result = await _resume_loop(reader, writer, turn_id, tool_registry, resume)
+        elif not tool_registry:
+            if assemble is None:
+                def assemble(message):
+                    return build_prompt(message, memory_root=memory_root, history_path=history_path)
+            result = await _single_round_trip(reader, writer, turn_id, assemble(prompt))
         else:
-            result = await _agentic_loop(reader, writer, turn_id, job_payload, tool_registry)
+            if assemble is None:
+                def assemble(message):
+                    return build_prompt(message, memory_root=memory_root, history_path=history_path)
+            messages = (Message(role="user", content=assemble(prompt)),)
+            result = await _agentic_loop(reader, writer, turn_id, tool_registry, messages)
         try:
             await asyncio.wait_for(
                 write_frame(

@@ -14,10 +14,14 @@ a `chat_id`/`user_id` key is a non-breaking `ALTER TABLE ADD COLUMN` later (AD-1
 
 import logging
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 log = logging.getLogger("shelldon.core.history")
+
+#: Default lifetime of a parked RISKY-tool approval (Story 9.3): a tap older than this is
+#: dropped, never executed (AC4). Module-level so tests can pass a tiny ttl.
+DEFAULT_APPROVAL_TTL_S = 3600
 
 #: Default store location — one file beside the state checkpoint. Always injectable;
 #: tests pass a `tmp_path` db and never touch real `$HOME`.
@@ -60,6 +64,17 @@ CREATE TABLE IF NOT EXISTS learnings (
 -- (closes the 6.1-review TOCTOU: a second writer (the 6.2 dream) can't duplicate or lose a
 -- row between a check and a write).
 CREATE UNIQUE INDEX IF NOT EXISTS learnings_pattern_key_uq ON learnings(pattern_key) WHERE pattern_key IS NOT NULL;
+
+-- Story 9.3: parked RISKY-tool approvals. When the worker pauses on a RISKY call it ends
+-- the turn; core stashes the resumable agent state here keyed by turn id (additive table,
+-- same CREATE-IF-NOT-EXISTS convention). `state_blob` is the msgpack of (messages, call).
+-- A tap consumes (take+delete) the row; an expired/absent row never executes (AC4).
+CREATE TABLE IF NOT EXISTS pending_approvals (
+    turn_id    TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    state_blob BLOB NOT NULL
+);
 """
 
 
@@ -210,6 +225,48 @@ class HistoryStore:
             )
         if cur.rowcount == 0:
             log.info("resolve_learning: no pending learning with id=%r (already resolved or absent)", id)
+
+    def park_approval(
+        self, turn_id: str, state_blob: bytes, now: datetime, ttl_seconds: int = DEFAULT_APPROVAL_TTL_S
+    ) -> None:
+        """Stash a paused RISKY turn's resumable state (Story 9.3) keyed by `turn_id`, with an
+        `expires_at` = now + ttl. One commit (single writer, AD-5). `INSERT OR REPLACE` so a
+        re-parked turn id overwrites cleanly."""
+        created = now.isoformat()
+        expires = (now + timedelta(seconds=ttl_seconds)).isoformat()
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO pending_approvals (turn_id, created_at, expires_at, state_blob) "
+                "VALUES (?, ?, ?, ?)",
+                (turn_id, created, expires, state_blob),
+            )
+
+    def take_approval(self, turn_id: str, now: datetime) -> bytes | None:
+        """Consume a parked approval (Story 9.3): return its `state_blob` and DELETE the row,
+        atomically in one commit — but ONLY if it hasn't expired. An absent OR expired row
+        returns None (the pending call never executes, AC4); an expired one is deleted+logged.
+        ISO-8601 UTC strings compare lexicographically, so the `expires_at > now` test is a
+        plain string comparison."""
+        now_s = now.isoformat()
+        with self._conn:
+            row = self._conn.execute(
+                "SELECT expires_at, state_blob FROM pending_approvals WHERE turn_id = ?", (turn_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            # Decide expiry INSIDE the transaction, before the DELETE, so the read+expiry+delete
+            # are one atomic step. Either way the row is consumed (an expired one is dropped).
+            expired = row["expires_at"] <= now_s
+            self._conn.execute("DELETE FROM pending_approvals WHERE turn_id = ?", (turn_id,))
+        if expired:
+            log.info("take_approval: turn %s expired (never executing)", turn_id)
+            return None
+        return row["state_blob"]
+
+    def prune_expired_approvals(self, now: datetime) -> None:
+        """Best-effort housekeeping: drop any approvals past their expiry (Story 9.3)."""
+        with self._conn:
+            self._conn.execute("DELETE FROM pending_approvals WHERE expires_at <= ?", (now.isoformat(),))
 
     def recent(self, n: int = 20) -> list[sqlite3.Row]:
         return _recent(self._conn, n)

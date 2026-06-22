@@ -3,7 +3,7 @@ baseline_commit: c8c13cf
 ---
 # Story 9.1: Function-calling foundation
 
-Status: review
+Status: done
 
 ## Story
 

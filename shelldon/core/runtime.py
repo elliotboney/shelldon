@@ -24,6 +24,8 @@ import asyncio
 import logging
 import time
 from datetime import UTC, datetime
+
+import msgspec
 from uuid import uuid4
 
 from shelldon.contracts import (
@@ -33,12 +35,15 @@ from shelldon.contracts import (
     Envelope,
     Event,
     EventKind,
+    Message,
     ResolveLearning,
     MsgKind,
     OutboundMessage,
     Region,
+    RequestToolApproval,
     Result,
     StateSnapshot,
+    ToolCall,
 )
 from shelldon.core.arbiter import Arbiter
 from shelldon.core.bus import BusServer
@@ -143,6 +148,11 @@ DEFAULT_NUDGE_COOLDOWN = 30.0
 #: can't flood the curated tree; the overflow is dropped with a warning (never silently
 #: truncated). Generous — a normal turn proposes a handful.
 MAX_PROPOSED_OPS = 16
+
+#: Story 9.3: warn (don't reject) when a parked approval's message list is unusually large —
+#: a chained-approval turn shouldn't balloon the sqlite blob. ~2 msgs/iteration × the worker's
+#: 6-iteration cap, with headroom. A hard cap is Story 9.5.
+_APPROVAL_MESSAGES_WARN = 16
 
 
 class Core:
@@ -329,10 +339,23 @@ class Core:
             while True:
                 env = await self.bus.core_inbox.get()
                 if env.kind is MsgKind.INBOUND_MSG:
-                    self._mark_interaction()
-                    prompt = self.arbiter.submit(env.body.text)
-                    if prompt is not None:
-                        await self._start_turn(prompt)
+                    if env.body.approval_turn_id is not None:
+                        # An approval DECISION (the owner tapped Approve/Deny), not chat text
+                        # (Story 9.3) — route to the resume path, never the arbiter/coalescer.
+                        self._mark_interaction()
+                        approved = env.body.approved
+                        if approved is None:  # malformed decision frame → fail safe (deny), logged
+                            log.warning(
+                                "approval decision for %s missing 'approved'; treating as deny",
+                                env.body.approval_turn_id,
+                            )
+                            approved = False
+                        await self._handle_approval_decision(env.body.approval_turn_id, approved)
+                    else:
+                        self._mark_interaction()
+                        prompt = self.arbiter.submit(env.body.text)
+                        if prompt is not None:
+                            await self._start_turn(prompt)
                 elif env.kind is MsgKind.RESULT:
                     await self._handle_result(env)
                 elif env.kind is MsgKind.EVENT:
@@ -383,6 +406,52 @@ class Core:
         self._track(self._reap_task)
         self._arm_timeout(turn_id)
 
+    async def _handle_approval_decision(self, approval_turn_id: str, approved: bool) -> None:
+        """Owner tapped Approve/Deny on a parked RISKY call (Story 9.3, AC3/AC4). Admission:
+        a resume IS a turn (uses the ≤1 fence/arbiter/reap), so only proceed when idle — if a
+        turn is in flight, leave the approval parked and ask the owner to tap again (single-
+        owner, rare). A consumed approval that's expired/unknown is dropped with a note (AC4)."""
+        if not self.arbiter.is_idle:
+            await self._send_reply("I'm mid-thought — tap that again in a moment.")
+            return
+        blob = self.history.take_approval(approval_turn_id, datetime.now(UTC))
+        if blob is None:  # expired or unknown — NEVER executes (AC4)
+            await self._send_reply("That approval expired or is no longer pending.")
+            return
+        try:
+            messages, call = msgspec.msgpack.decode(
+                blob, type=tuple[tuple[Message, ...], ToolCall]
+            )
+        except msgspec.DecodeError as exc:
+            log.warning("approval %s: corrupt parked state (%s); dropping", approval_turn_id, exc)
+            await self._send_reply("Sorry — I couldn't restore that pending action.")
+            return
+        self.arbiter.submit("[tool approval]")  # idle → reserves the ≤1 slot (returns the marker)
+        await self._start_resume_turn(messages, call, approved)
+
+    async def _start_resume_turn(self, messages, call, approved: bool) -> None:
+        """Spawn a FRESH worker that resumes a paused RISKY turn from the restored state
+        (Story 9.3). Mirrors `_start_turn` but calls `spawner.spawn_resume` — a NEW fork (AD-3),
+        no prompt assembly. A synthetic owner marker pairs the final reply for history."""
+        turn_id = uuid4().hex
+        self._current_prompt = "[resumed after tool approval]"
+        self._current_turn_id = turn_id
+        self.fence.open(turn_id)
+        try:
+            await self._push_face(FACE_THINKING)
+        except Exception as exc:
+            log.warning("resume turn %s face push failed (%s); continuing", turn_id, exc)
+        try:
+            await self.spawner.spawn_resume(turn_id, messages, call, approved)
+        except Exception as exc:
+            log.warning("spawn_resume failed for %s (%s); releasing turn guards", turn_id, exc)
+            self.fence.close(turn_id)
+            self.arbiter.reset()
+            return
+        self._reap_task = asyncio.create_task(self.spawner.reap_current())
+        self._track(self._reap_task)
+        self._arm_timeout(turn_id)
+
     async def _handle_result(self, env: Envelope) -> None:
         """Admit a Result only for the open turn (AD-12); reply+react or degrade,
         then drive at most one coalesced catch-up turn."""
@@ -396,7 +465,16 @@ class Core:
             # slot release below (Story 5.0 AC1). The narrow scope keeps the broad except
             # from masking a bug in the self-guarded ops/record helpers that follow.
             if result.ok:
-                await self._send_reply(result.payload)
+                # Story 9.3: if the worker paused on a RISKY call, its reply is an approval
+                # request — tag the outbound with the turn_id so the transport renders the
+                # Approve/Deny surface (and the tap echoes the same id the state is parked under).
+                approval = next(
+                    (o for o in result.proposed_ops if isinstance(o, RequestToolApproval)), None
+                )
+                if approval is not None:
+                    await self._send_reply(result.payload, approval_turn_id=env.turn_id)
+                else:
+                    await self._send_reply(result.payload)  # unchanged plain-reply path
                 await self._push_face(FACE_REPLY)
             else:
                 await self._degrade()
@@ -471,14 +549,14 @@ class Core:
 
     # --- emit helpers (core ORIGINATES traffic via bus.deliver) ---
 
-    async def _send_reply(self, text: str) -> None:
+    async def _send_reply(self, text: str, *, approval_turn_id: str | None = None) -> None:
         await self.bus.deliver(
             Envelope(
                 id=uuid4().hex,
                 kind=MsgKind.OUTBOUND_MSG,
                 src=Actor.CORE,
                 dst=Actor.CHAT_TRANSPORT,
-                body=OutboundMessage(text=text),
+                body=OutboundMessage(text=text, approval_turn_id=approval_turn_id),
             )
         )
 
@@ -704,6 +782,16 @@ class Core:
                     # The dream's learning-resolution (Story 6.2) — a soft sqlite status
                     # transition (promoted/pruned); a stale/unknown id is a safe no-op.
                     self.history.resolve_learning(op.id, op.status)
+                elif isinstance(op, RequestToolApproval):
+                    # Story 9.3: the worker paused on a RISKY call. Park the resumable state
+                    # (messages + the pending call) in sqlite keyed by this turn's id; the
+                    # owner's tap (echoing the id) resumes a fresh worker. msgpack of a 2-tuple.
+                    if len(op.messages) > _APPROVAL_MESSAGES_WARN:
+                        # A chained-approval turn shouldn't grow unbounded; warn (hard cap = 9.5).
+                        log.warning("parked approval %s carries %d messages (large)",
+                                    self._current_turn_id, len(op.messages))
+                    blob = msgspec.msgpack.encode((op.messages, op.call))
+                    self.history.park_approval(self._current_turn_id, blob, datetime.now(UTC))
                 else:
                     self.apply_memory_op(op)
             except Exception as exc:

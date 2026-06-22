@@ -176,10 +176,11 @@ class ResolveLearning(msgspec.Struct, frozen=True, tag="resolve_learning", forbi
 
 #: The closed set of ALL ops a worker may propose on `Result.proposed_ops` (Story 4.5): the
 #: curated-memory ops + the face op (Story 3.4) + the learnings capture (6.1) + the dream's
-#: learning-resolution (6.2). Core dispatches each to its single writer — `apply_memory_op`
-#: for memory-ops, `apply_add_face` for the face op, `history.capture_learning` /
-#: `history.resolve_learning` for the sqlite learnings ops.
-ProposedOp = MemoryOp | AddFace | CaptureLearning | ResolveLearning
+#: learning-resolution (6.2) + the RISKY-tool approval request (9.3). Core dispatches each to
+#: its single writer — `apply_memory_op` for memory-ops, `apply_add_face` for the face op,
+#: `history.capture_learning` / `history.resolve_learning` for the sqlite learnings ops, and
+#: the approval-park path for `RequestToolApproval`. The union is ASSIGNED below `Message`
+#: (Story 9.3) because `RequestToolApproval` references `ToolCall`/`Message` defined there.
 
 
 #: --- Tool-calling vocabulary (Epic 9, Story 9.1) ---
@@ -244,6 +245,26 @@ class Message(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     tool_call_id: str | None = None  # role="tool", correlates with ToolCall.id
 
 
+class RequestToolApproval(msgspec.Struct, frozen=True, tag="request_tool_approval", forbid_unknown_fields=True):
+    """A RISKY tool call the worker PAUSED on, awaiting owner approval (Epic 9, Story 9.3).
+
+    Emitted as a `Result.proposed_op`: the worker hit a RISKY-tier call, did NOT execute it,
+    and ended the turn (the fork dies — it never blocks on a human, AD-3/design §3). `call` is
+    the pending tool request; `summary` is the human-readable description for the approval
+    prompt; `messages` is the running conversation so far. Core persists `(messages, call)` to
+    sqlite keyed by turn id; on the owner's tap a fresh worker resumes from it. NOT a memory
+    write — core routes it to the approval-park path, not `apply_memory_op`."""
+
+    call: ToolCall
+    summary: str
+    messages: tuple[Message, ...] = ()
+
+
+#: The approval op joins the closed `ProposedOp` union (extended here because it references
+#: `ToolCall`/`Message`, defined above). Core dispatches it to the approval-park path.
+ProposedOp = MemoryOp | AddFace | CaptureLearning | ResolveLearning | RequestToolApproval
+
+
 class Job(msgspec.Struct, frozen=True, tag="job", forbid_unknown_fields=True):
     """A request body. Minimal contract shell — broker/worker stories (1.4/1.5)
     define the real payload. Carries NO credentials: the broker injects creds
@@ -305,9 +326,16 @@ class InboundMessage(msgspec.Struct, frozen=True, tag="inbound-message", forbid_
     Single-owner for now; a later multi-user adapter adds `chat_id`/`user_id` as an
     OPTIONAL field with a default — a non-breaking wire add (AD-13/AD-6) — so do not
     introduce one before that story needs it.
+
+    Tool-approval path (Story 9.3): when `approval_turn_id` is set this message is an
+    approval DECISION (the owner tapped Approve/Deny), not chat text — `approved` carries
+    the choice. Core routes it to the resume path, not the arbiter. Both additive optional
+    defaults — a plain owner message leaves them None (AD-13, no SCHEMA_VERSION bump).
     """
 
     text: str
+    approval_turn_id: str | None = None
+    approved: bool | None = None
 
 
 class OutboundMessage(msgspec.Struct, frozen=True, tag="outbound-message", forbid_unknown_fields=True):
@@ -316,9 +344,15 @@ class OutboundMessage(msgspec.Struct, frozen=True, tag="outbound-message", forbi
     The transport-agnostic outbound half: core emits this without knowing whether
     the adapter prints to a terminal or posts to a bot. Same single-owner shaping
     note as InboundMessage.
+
+    Tool-approval path (Story 9.3): when `approval_turn_id` is set, `text` is an approval
+    request — a transport renders it with a choice surface (Telegram: an inline Approve/Deny
+    keyboard whose taps echo this `approval_turn_id`; CLI: a text prompt). Additive optional
+    default — a plain reply leaves it None (AD-13, no SCHEMA_VERSION bump).
     """
 
     text: str
+    approval_turn_id: str | None = None
 
 
 class StateSnapshot(msgspec.Struct, frozen=True, tag="state-snapshot", forbid_unknown_fields=True):
@@ -447,6 +481,7 @@ __all__ = [
     "CaptureLearning",
     "ResolveLearning",
     "AddFace",
+    "RequestToolApproval",
     "ProposedOp",
     "ToolTier",
     "ToolCall",

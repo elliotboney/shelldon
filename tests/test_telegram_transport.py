@@ -167,3 +167,85 @@ async def test_inbound_advances_the_offset_so_updates_are_not_refetched():
     assert await _first_n(chat, 2) == ["a", "b"]
     assert client.get_calls[0]["offset"] == 0
     assert client.get_calls[1]["offset"] == 6  # 5 + 1 — the acked update isn't pulled again
+
+
+# --- Story 9.3: approval keyboard, callback decisions, setMyCommands ---
+
+
+def _callback(*, uid, chat, data, cb_id="cb1", update_id=1):
+    return {"update_id": update_id, "callback_query": {
+        "id": cb_id, "from": {"id": uid}, "data": data, "message": {"chat": {"id": chat}},
+    }}
+
+
+async def test_send_approval_renders_inline_keyboard_and_html():
+    from shelldon.transport.telegram import TelegramChat
+
+    client = _FakeClient([])
+    chat = TelegramChat(client, "TOK", allow_all=True)
+    chat._chat_id = 99  # a reply target (normally set by a prior inbound)
+    await chat.send_approval("I'd like to run `rm -rf build/` — approve?", "turn-x")
+
+    method, payload = client.posts[-1]
+    assert method == "sendMessage"
+    assert payload["parse_mode"] == "HTML"
+    assert "<pre>rm -rf build/</pre>" in payload["text"]  # code span → <pre> (AC2)
+    buttons = payload["reply_markup"]["inline_keyboard"][0]
+    assert {b["callback_data"] for b in buttons} == {"turn-x:approve", "turn-x:deny"}
+
+
+async def test_callback_query_becomes_approval_decision():
+    from shelldon.contracts import InboundMessage
+    from shelldon.transport.telegram import TelegramChat
+
+    client = _FakeClient([[_callback(uid=42, chat=99, data="turn-x:approve")]])
+    chat = TelegramChat(client, "TOK", allowed_users={42})
+    got = await _first_n(chat, 1)
+    assert got == [InboundMessage(text="", approval_turn_id="turn-x", approved=True)]
+    assert chat._chat_id == 99  # tap (re)sets the reply target
+    assert any(m == "answerCallbackQuery" for m, _ in client.posts)  # spinner cleared
+
+
+async def test_callback_deny_decision():
+    from shelldon.contracts import InboundMessage
+    from shelldon.transport.telegram import TelegramChat
+
+    client = _FakeClient([[_callback(uid=42, chat=99, data="turn-y:deny")]])
+    chat = TelegramChat(client, "TOK", allowed_users={42})
+    got = await _first_n(chat, 1)
+    assert got == [InboundMessage(text="", approval_turn_id="turn-y", approved=False)]
+
+
+async def test_callback_from_unauthorized_user_is_dropped():
+    from shelldon.transport.telegram import TelegramChat
+
+    # Unauthorized callback then a legit chat message — only the legit text reaches us.
+    client = _FakeClient([
+        [_callback(uid=666, chat=99, data="turn-x:approve", update_id=1)],
+        [_update(uid=42, chat=99, text="legit", update_id=2)],
+    ])
+    chat = TelegramChat(client, "TOK", allowed_users={42})
+    assert await _first_n(chat, 1) == ["legit"]
+
+
+async def test_set_commands_registers_command_set():
+    from shelldon.transport.telegram import TelegramChat
+
+    client = _FakeClient([])
+    chat = TelegramChat(client, "TOK", allow_all=True)
+    await chat.set_commands()
+    method, payload = client.posts[-1]
+    assert method == "setMyCommands" and len(payload["commands"]) >= 1
+
+
+async def test_callback_with_empty_turn_id_is_dropped():
+    """Review #3: callback data like ':approve' (no turn id) must be ignored, not turned into
+    a decision for an empty turn (which would mislead the owner with an 'expired' note)."""
+    from shelldon.transport.telegram import TelegramChat
+
+    client = _FakeClient([
+        [_callback(uid=42, chat=99, data=":approve", update_id=1)],
+        [_update(uid=42, chat=99, text="legit", update_id=2)],
+    ])
+    chat = TelegramChat(client, "TOK", allowed_users={42})
+    assert await _first_n(chat, 1) == ["legit"]  # the empty-id callback yielded nothing

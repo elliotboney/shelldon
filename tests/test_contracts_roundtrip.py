@@ -25,8 +25,11 @@ from shelldon.contracts import (
     OutboundMessage,
     Region,
     Remember,
+    RequestToolApproval,
     Result,
     StateSnapshot,
+    ToolCall,
+    Message,
     decode,
     encode,
 )
@@ -208,6 +211,41 @@ def test_dream_ops_round_trip_in_proposed_ops():
     ops = decode(encode(env)).body.proposed_ops
     assert type(ops[0]) is ResolveLearning and ops[0].id == 7 and ops[0].status == "promoted"
     assert type(ops[1]) is RewriteSummary and ops[1].content == "a running summary"
+
+
+def test_request_tool_approval_round_trips_in_proposed_ops():
+    """Story 9.3: the RISKY-tool approval request rides the same closed proposed_ops union and
+    decodes back by tag, carrying its nested ToolCall + Message list (no SCHEMA_VERSION bump)."""
+    op = RequestToolApproval(
+        call=ToolCall(id="w1", name="write_file", args={"path": "x", "content": "y"}),
+        summary="write_file: x",
+        messages=(Message(role="user", content="hi"),
+                  Message(role="assistant", content="", tool_calls=(ToolCall(id="w1", name="write_file", args={}),))),
+    )
+    env = Envelope(
+        id="r", kind=MsgKind.RESULT, src=Actor.WORKER, dst=Actor.CORE,
+        body=Result(ok=True, payload="approve?", proposed_ops=[op]), turn_id="t",
+    )
+    back = decode(encode(env)).body.proposed_ops[0]
+    assert type(back) is RequestToolApproval
+    assert back.call.name == "write_file" and back.summary == "write_file: x"
+    assert back.messages[1].tool_calls[0].id == "w1"
+
+
+def test_approval_message_fields_are_additive_and_non_breaking():
+    """Story 9.3: the new approval fields default such that old-shape messages still decode and
+    new-shape ones round-trip (AD-13, no SCHEMA_VERSION bump)."""
+    # New-shape: a decision inbound + an approval-request outbound.
+    dec = Envelope(id="i", kind=MsgKind.INBOUND_MSG, src=Actor.CHAT_TRANSPORT, dst=Actor.CORE,
+                   body=InboundMessage(text="", approval_turn_id="t", approved=True))
+    assert decode(encode(dec)).body == InboundMessage(text="", approval_turn_id="t", approved=True)
+    req = Envelope(id="o", kind=MsgKind.OUTBOUND_MSG, src=Actor.CORE, dst=Actor.CHAT_TRANSPORT,
+                   body=OutboundMessage(text="approve?", approval_turn_id="t"))
+    assert decode(encode(req)).body == OutboundMessage(text="approve?", approval_turn_id="t")
+    # Old-shape (no new fields) still decodes (defaults applied).
+    plain = Envelope(id="p", kind=MsgKind.OUTBOUND_MSG, src=Actor.CORE, dst=Actor.CHAT_TRANSPORT,
+                     body=OutboundMessage(text="hi"))
+    assert decode(encode(plain)).body == OutboundMessage(text="hi")
 
 
 def test_resolve_learning_rejects_bad_status():

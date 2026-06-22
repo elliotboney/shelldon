@@ -19,10 +19,13 @@ import builtins
 import datetime
 import functools
 import logging
+import shlex
 import signal
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 from shelldon.contracts import ToolCall, ToolResult, ToolTier
 from shelldon.core.memory import DEFAULT_MEMORY_ROOT
@@ -41,6 +44,14 @@ _MAX_READ_BYTES = 64 * 1024
 
 #: Default wall-clock bound for `python_eval` (seconds). Tests inject a tiny value.
 _EVAL_TIMEOUT_S = 2.0
+
+#: Wall-clock bound for the RISKY subprocess/network tools (`run_shell`/`git`/`http_get`).
+#: Best-effort (`subprocess`/`httpx` timeout); hard CPU/mem caps (RLIMIT) are Story 9.5.
+_RISKY_TIMEOUT_S = 20.0
+
+#: Cap on any RISKY tool's returned output (stdout/stderr/body) — keep one big result off
+#: the bus / out of the message list on the 416MB Pi (mirrors `read_file`/`python_eval`).
+_MAX_TOOL_OUTPUT_CHARS = 16 * 1024
 
 #: Cap on the `python_eval` result string so a big computation (e.g. `'x'*10**7`) can't
 #: ship a multi-MB ToolResult across the bus / into the message list on the 416MB Pi
@@ -214,6 +225,81 @@ def _python_eval(code: str, *, timeout_s: float = _EVAL_TIMEOUT_S) -> str:
     return out
 
 
+# --- Story 9.3: RISKY-tier tools (gated by owner approval; run worker-side after a tap) ---
+
+
+def _cap(text: str) -> str:
+    """Truncate any RISKY tool's output to `_MAX_TOOL_OUTPUT_CHARS` (never silently)."""
+    if len(text) > _MAX_TOOL_OUTPUT_CHARS:
+        return text[:_MAX_TOOL_OUTPUT_CHARS] + "\n…[output truncated]"
+    return text
+
+
+def _write_file(path: str, content: str, *, workspace_root: Path, memory_root: Path) -> str:
+    """RISKY: write a text file inside the workspace jail. The FIRST writer tool — the 9.2
+    read-only invariant is lifted ONLY here, and ONLY after owner approval. Reuses the jail +
+    sensitive-path denial; creates parent dirs within the jail."""
+    if len(content) > _MAX_READ_BYTES:
+        # Reject (not truncate — a partial write corrupts the file) to bound Pi disk use.
+        raise ValueError(f"content too large ({len(content)} chars > {_MAX_READ_BYTES} cap)")
+    candidate = _resolve_in_jail(path, workspace_root)
+    _deny_sensitive(candidate, memory_root)
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_text(content, encoding="utf-8")
+    return f"wrote {len(content)} chars to {path}"
+
+
+def _run_subprocess(argv, *, cwd: Path, shell: bool = False) -> str:
+    """Run a subprocess bounded by `_RISKY_TIMEOUT_S` in `cwd`, returning capped combined
+    output + exit code. A timeout raises (→ ToolResult(ok=False)); a non-zero exit is NOT an
+    error (it's normal tool output the model should see)."""
+    proc = subprocess.run(
+        argv, cwd=str(cwd), shell=shell, capture_output=True, text=True,
+        timeout=_RISKY_TIMEOUT_S,
+    )
+    out = (proc.stdout or "") + (proc.stderr or "")
+    return _cap(f"exit {proc.returncode}\n{out}".rstrip())
+
+
+def _run_shell(command: str, *, workspace_root: Path) -> str:
+    """RISKY: run a shell command in the workspace cwd (best-effort time-bounded). Gated by
+    approval — the owner sees the exact command before it runs."""
+    return _run_subprocess(command, cwd=workspace_root, shell=True)
+
+
+def _git(args: str, *, workspace_root: Path) -> str:
+    """RISKY: run `git <args>` in the workspace cwd. `args` is split safely (no shell)."""
+    return _run_subprocess(["git", *shlex.split(args)], cwd=workspace_root, shell=False)
+
+
+def _http_get(url: str) -> str:
+    """RISKY: plain HTTP(S) GET (no credentials — NFR9: credentialed API tools stay
+    broker-side/deferred). `httpx` is already a dep (transport uses it), lazily imported."""
+    if not url.lower().startswith(("http://", "https://")):
+        raise ValueError(f"http_get only supports http(s) URLs, got {url!r}")
+    if urlparse(url).username or urlparse(url).password:
+        # Credentials embedded in the URL would be sent worker-side (NFR9: creds are broker-only).
+        raise ValueError("credentials in the URL are not allowed")
+    import httpx  # lazy: only when this tool actually runs
+
+    resp = httpx.get(url, timeout=_RISKY_TIMEOUT_S, follow_redirects=True)
+    return _cap(f"HTTP {resp.status_code}\n{resp.text}")
+
+
+def summarize_call(call: ToolCall, spec: "ToolSpec") -> str:
+    """A faithful one-line human summary of a pending RISKY call for the approval prompt —
+    the owner must see what they're approving (the actual command/path/url)."""
+    if call.name == "run_shell":
+        return f"run_shell: {call.args.get('command', '')}"
+    if call.name == "git":
+        return f"git {call.args.get('args', '')}"
+    if call.name == "http_get":
+        return f"http_get: {call.args.get('url', '')}"
+    if call.name == "write_file":
+        return f"write_file: {call.args.get('path', '')}"
+    return f"{call.name}: {call.args}"
+
+
 def build_tool_registry(
     workspace_root: Path | None = None, memory_root: Path | None = None
 ) -> dict[str, ToolSpec]:
@@ -264,6 +350,54 @@ def build_tool_registry(
             },
             tier=ToolTier.FREE,
             fn=_python_eval,
+        ),
+        # --- RISKY tier (Story 9.3): each call PAUSES the loop for owner approval ---
+        ToolSpec(
+            name="write_file",
+            description="Write a text file in your workspace (creates/overwrites). Requires owner approval.",
+            params_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path within the workspace."},
+                    "content": {"type": "string", "description": "Text to write."},
+                },
+                "required": ["path", "content"],
+            },
+            tier=ToolTier.RISKY,
+            fn=functools.partial(_write_file, workspace_root=ws, memory_root=mr),
+        ),
+        ToolSpec(
+            name="run_shell",
+            description="Run a shell command in your workspace. Requires owner approval.",
+            params_schema={
+                "type": "object",
+                "properties": {"command": {"type": "string", "description": "The shell command."}},
+                "required": ["command"],
+            },
+            tier=ToolTier.RISKY,
+            fn=functools.partial(_run_shell, workspace_root=ws),
+        ),
+        ToolSpec(
+            name="http_get",
+            description="Fetch an http(s) URL (GET). Requires owner approval.",
+            params_schema={
+                "type": "object",
+                "properties": {"url": {"type": "string", "description": "An http(s) URL."}},
+                "required": ["url"],
+            },
+            tier=ToolTier.RISKY,
+            fn=_http_get,
+        ),
+        ToolSpec(
+            name="git",
+            description="Run a git command in your workspace (e.g. 'status', 'log -1'). Requires owner approval.",
+            params_schema={
+                "type": "object",
+                "properties": {"args": {"type": "string", "description": "Arguments after 'git'."}},
+                "required": ["args"],
+            },
+            tier=ToolTier.RISKY,
+            fn=functools.partial(_git, workspace_root=ws),
         ),
     ]
     return {s.name: s for s in specs}

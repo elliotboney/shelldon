@@ -370,3 +370,46 @@ def test_spawn_failure_records_nothing(sock_path, tmp_path):
     asyncio.run(core._start_turn(prompt))
     assert core.history.recent(10) == []
     core.history.close()
+
+
+# --- Story 9.3: pending_approvals park / take / expire ---
+
+
+def test_park_and_take_approval_round_trip(tmp_path):
+    s = HistoryStore.open(tmp_path / "h.db")
+    s.park_approval("turn-1", b"blobdata", NOW, ttl_seconds=3600)
+    got = s.take_approval("turn-1", NOW)
+    assert got == b"blobdata"
+    # Consumed: a second take returns None (the row was deleted).
+    assert s.take_approval("turn-1", NOW) is None
+    s.close()
+
+
+def test_take_unknown_approval_is_none(tmp_path):
+    s = HistoryStore.open(tmp_path / "h.db")
+    assert s.take_approval("nope", NOW) is None
+    s.close()
+
+
+def test_expired_approval_is_dropped_not_returned(tmp_path):
+    from datetime import timedelta
+
+    s = HistoryStore.open(tmp_path / "h.db")
+    s.park_approval("turn-2", b"x", NOW, ttl_seconds=60)
+    later = NOW + timedelta(seconds=61)  # past the ttl
+    assert s.take_approval("turn-2", later) is None  # expired → never executes (AC4)
+    # And the expired row was deleted (a take at NOW now finds nothing).
+    assert s.take_approval("turn-2", NOW) is None
+    s.close()
+
+
+def test_prune_expired_approvals(tmp_path):
+    from datetime import timedelta
+
+    s = HistoryStore.open(tmp_path / "h.db")
+    s.park_approval("a", b"x", NOW, ttl_seconds=60)
+    s.park_approval("b", b"y", NOW, ttl_seconds=99999)
+    s.prune_expired_approvals(NOW + timedelta(seconds=61))
+    assert s.take_approval("a", NOW) is None  # pruned
+    assert s.take_approval("b", NOW) == b"y"  # survives
+    s.close()
