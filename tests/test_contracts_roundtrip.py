@@ -26,6 +26,7 @@ from shelldon.contracts import (
     Region,
     Remember,
     RequestToolApproval,
+    ProposeTool,
     Result,
     StateSnapshot,
     ToolCall,
@@ -246,6 +247,19 @@ def test_approval_message_fields_are_additive_and_non_breaking():
     plain = Envelope(id="p", kind=MsgKind.OUTBOUND_MSG, src=Actor.CORE, dst=Actor.CHAT_TRANSPORT,
                      body=OutboundMessage(text="hi"))
     assert decode(encode(plain)).body == OutboundMessage(text="hi")
+
+
+def test_propose_tool_round_trips_in_proposed_ops():
+    """Story 9.4: the propose_tool op rides the same closed proposed_ops union and decodes back
+    by tag, carrying its name/code/test (no SCHEMA_VERSION bump — additive on the union)."""
+    op = ProposeTool(name="weather", code="def run(): return 'sun'", test="def test_x(): pass")
+    env = Envelope(
+        id="r", kind=MsgKind.RESULT, src=Actor.WORKER, dst=Actor.CORE,
+        body=Result(ok=True, payload="wrote a tool", proposed_ops=[op]), turn_id="t",
+    )
+    back = decode(encode(env)).body.proposed_ops[0]
+    assert type(back) is ProposeTool
+    assert back.name == "weather" and "def run" in back.code and "def test_x" in back.test
 
 
 def test_resolve_learning_rejects_bad_status():

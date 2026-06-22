@@ -75,6 +75,18 @@ CREATE TABLE IF NOT EXISTS pending_approvals (
     expires_at TEXT NOT NULL,
     state_blob BLOB NOT NULL
 );
+
+-- Story 9.4: parked TOOL PROMOTIONS, parallel to 9.3's pending_approvals (kept SEPARATE so 9.3's
+-- resume table/signatures stay UNTOUCHED). When a self-coded tool passes its gate, core parks a
+-- pending promotion keyed by turn id; the owner's Approve tap promotes the staged module to the
+-- live dir. No blob — the staged files live on disk; only the `tool_name` (a safe module stem)
+-- is needed to promote/discard. A tap dispatches by which table holds the turn id.
+CREATE TABLE IF NOT EXISTS pending_promotions (
+    turn_id    TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    tool_name  TEXT NOT NULL
+);
 """
 
 
@@ -267,6 +279,46 @@ class HistoryStore:
         """Best-effort housekeeping: drop any approvals past their expiry (Story 9.3)."""
         with self._conn:
             self._conn.execute("DELETE FROM pending_approvals WHERE expires_at <= ?", (now.isoformat(),))
+
+    def park_promotion(
+        self, turn_id: str, tool_name: str, now: datetime, ttl_seconds: int = DEFAULT_APPROVAL_TTL_S
+    ) -> None:
+        """Stash a passed self-coded tool awaiting the owner's Approve tap (Story 9.4), keyed by
+        `turn_id`, with `expires_at` = now + ttl. One commit (single writer, AD-5). `INSERT OR
+        REPLACE` so a re-parked turn id overwrites cleanly. Parallel to `park_approval` but holds
+        only the `tool_name` (the staged files are on disk)."""
+        created = now.isoformat()
+        expires = (now + timedelta(seconds=ttl_seconds)).isoformat()
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO pending_promotions (turn_id, created_at, expires_at, tool_name) "
+                "VALUES (?, ?, ?, ?)",
+                (turn_id, created, expires, tool_name),
+            )
+
+    def take_promotion(self, turn_id: str, now: datetime) -> str | None:
+        """Consume a parked promotion (Story 9.4): return its `tool_name` and DELETE the row,
+        atomically in one commit — but ONLY if it hasn't expired. An absent OR expired row returns
+        None (the tool is never promoted, AC3); an expired one is deleted+logged. Mirrors
+        `take_approval`'s read+expiry+delete-in-one-transaction discipline."""
+        now_s = now.isoformat()
+        with self._conn:
+            row = self._conn.execute(
+                "SELECT expires_at, tool_name FROM pending_promotions WHERE turn_id = ?", (turn_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            expired = row["expires_at"] <= now_s
+            self._conn.execute("DELETE FROM pending_promotions WHERE turn_id = ?", (turn_id,))
+        if expired:
+            log.info("take_promotion: turn %s expired (never promoting)", turn_id)
+            return None
+        return row["tool_name"]
+
+    def prune_expired_promotions(self, now: datetime) -> None:
+        """Best-effort housekeeping: drop any promotions past their expiry (Story 9.4)."""
+        with self._conn:
+            self._conn.execute("DELETE FROM pending_promotions WHERE expires_at <= ?", (now.isoformat(),))
 
     def recent(self, n: int = 20) -> list[sqlite3.Row]:
         return _recent(self._conn, n)

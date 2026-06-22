@@ -27,7 +27,7 @@ from shelldon.core.bus.server import bus_socket_path
 from shelldon.core.memory import DEFAULT_MEMORY_ROOT
 from shelldon.core.runtime import Core
 from shelldon.core.vault import ensure_vault
-from shelldon.worker.tools import DEFAULT_WORKSPACE_ROOT
+from shelldon.core.selfcode import DEFAULT_WORKSPACE_ROOT, live_tools_dir, staging_dir
 from shelldon.display.renderer import StubRenderer
 from shelldon.display.service import run_display
 from shelldon.plugins.host import run_plugin_host
@@ -225,8 +225,12 @@ async def run_app(
     ensure_vault(memory_root)
 
     # The FREE-tier file tools (Story 9.2) are jailed to this workspace; create it with
-    # NORMAL perms (NOT 0700 like the vault) so the dropped worker uid can read it.
+    # NORMAL perms (NOT 0700 like the vault) so the dropped worker uid can read it. Story 9.4
+    # adds the live + staging tool dirs under it: core stages/promotes self-coded tools and the
+    # worker imports the live dir at each fork's build_tool_registry.
     os.makedirs(DEFAULT_WORKSPACE_ROOT, exist_ok=True)
+    os.makedirs(live_tools_dir(DEFAULT_WORKSPACE_ROOT), exist_ok=True)
+    os.makedirs(staging_dir(DEFAULT_WORKSPACE_ROOT), exist_ok=True)
 
     if forkserver is None:
         # The forked worker assembles its prompt (Story 4.4) from the SAME memory_root

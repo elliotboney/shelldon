@@ -260,9 +260,26 @@ class RequestToolApproval(msgspec.Struct, frozen=True, tag="request_tool_approva
     messages: tuple[Message, ...] = ()
 
 
-#: The approval op joins the closed `ProposedOp` union (extended here because it references
-#: `ToolCall`/`Message`, defined above). Core dispatches it to the approval-park path.
-ProposedOp = MemoryOp | AddFace | CaptureLearning | ResolveLearning | RequestToolApproval
+class ProposeTool(msgspec.Struct, frozen=True, tag="propose_tool", forbid_unknown_fields=True):
+    """A new FREE-tier tool the model wrote for itself, plus its pytest test (Epic 9, Story 9.4).
+
+    Emitted as a `Result.proposed_op` exactly like `remember`/`add_face`: `code` is the tool
+    module source (defines `run`/`DESCRIPTION`/`PARAMS_SCHEMA`), `test` is a pytest module that
+    imports + exercises it. Core stages both to a workspace staging dir, runs a bounded gate
+    (pytest + an AST import-check), and — only if it passes AND the owner approves — promotes
+    the module to the live tools dir, where the next fresh worker discovers it FREE. NOT a memory
+    write; core routes it to the self-coding stage/gate/promote path, never `apply_memory_op`."""
+
+    name: str
+    code: str
+    test: str
+
+
+#: The approval + propose-tool ops join the closed `ProposedOp` union (extended here because
+#: `RequestToolApproval` references `ToolCall`/`Message`, defined above). Core dispatches each to
+#: its single writer — the approval-park path for `RequestToolApproval`, the self-coding gate for
+#: `ProposeTool`.
+ProposedOp = MemoryOp | AddFace | CaptureLearning | ResolveLearning | RequestToolApproval | ProposeTool
 
 
 class Job(msgspec.Struct, frozen=True, tag="job", forbid_unknown_fields=True):
@@ -482,6 +499,7 @@ __all__ = [
     "ResolveLearning",
     "AddFace",
     "RequestToolApproval",
+    "ProposeTool",
     "ProposedOp",
     "ToolTier",
     "ToolCall",

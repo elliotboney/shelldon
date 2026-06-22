@@ -39,6 +39,10 @@ def _isolate_state_checkpoint(tmp_path, monkeypatch):
     # there — redirect the name app.py bound at import so no test locks a real
     # ~/.shelldon/memory/vault (Epic 3 retro #3 — isolate $HOME in the same change).
     monkeypatch.setattr(_app, "DEFAULT_MEMORY_ROOT", tmp_path / "memory")
+    # Story 9.4: run_app() creates the workspace + the live/staging tool dirs under the
+    # module-level DEFAULT_WORKSPACE_ROOT it bound at import — redirect it to tmp so the app
+    # smoke turn never creates real ~/.shelldon/workspace/tools{,-staging} (no test writes $HOME).
+    monkeypatch.setattr(_app, "DEFAULT_WORKSPACE_ROOT", tmp_path / "workspace")
     # Story 4.4: worker/prompt.py imports its OWN DEFAULT_MEMORY_ROOT/DEFAULT_HISTORY_PATH
     # bindings, used when an in-process worker assembles with roots=None. Redirect them to
     # the SAME tmp paths core writes, or the worker reads the real ~/.shelldon (isolation

@@ -18,6 +18,7 @@ import ast
 import builtins
 import datetime
 import functools
+import importlib.util
 import logging
 import shlex
 import signal
@@ -30,13 +31,12 @@ from urllib.parse import urlparse
 from shelldon.contracts import ToolCall, ToolResult, ToolTier
 from shelldon.core.memory import DEFAULT_MEMORY_ROOT
 
-log = logging.getLogger("shelldon.worker.tools")
+#: The workspace layout lives in `core.selfcode` (Story 9.4 relocated it there so core owns the
+#: tool dirs without a core→worker import — AD-5). Re-exported here so existing
+#: `worker.tools.DEFAULT_WORKSPACE_ROOT` callers (and the file-tool jail below) are unchanged.
+from shelldon.core.selfcode import DEFAULT_WORKSPACE_ROOT, live_tools_dir
 
-#: The single workspace root all FREE file tools are jailed to (Story 9.2). Sibling of
-#: the memory tree (`~/.shelldon/memory`), NOT under it — so `vault/` is structurally
-#: outside the jail. `app.py` creates it at startup with NORMAL perms so the dropped
-#: worker uid can read it (contrast `vault/`'s 0o700). Module const, overridable in tests.
-DEFAULT_WORKSPACE_ROOT = Path.home() / ".shelldon" / "workspace"
+log = logging.getLogger("shelldon.worker.tools")
 
 #: Cap on `read_file` so one huge file can't blow the 416MB Pi. Bytes past this are
 #: dropped with an inline truncation marker (never silently). 9.5 deepens resource caps.
@@ -300,6 +300,46 @@ def summarize_call(call: ToolCall, spec: "ToolSpec") -> str:
     return f"{call.name}: {call.args}"
 
 
+#: Tool-module CONVENTION (Story 9.4) — a self-coded tool module defines these at module level,
+#: with NO shelldon imports needed (keeps it import-clean + simple for the model to emit).
+_TOOL_MODULE_ATTRS = ("run", "DESCRIPTION", "PARAMS_SCHEMA")
+
+
+def discover_self_coded_tools(workspace_root: Path) -> list[ToolSpec]:
+    """Discover the owner-approved self-coded tools in the live dir (Story 9.4, AC4) and build a
+    FREE-tier `ToolSpec` for each. Imports each `*.py` module via `importlib.util.spec_from_file_location`
+    (the dir is NOT a package on `sys.path`), mirroring the plugin-host's per-module try/except
+    skip (AD-8): a module missing the `run`/`DESCRIPTION`/`PARAMS_SCHEMA` convention or raising on
+    import is SKIPPED + logged — the turn survives, a self-coded tool never wedges the worker.
+    (Repeated-bad-tool quarantine is Story 9.5.)"""
+    ld = live_tools_dir(workspace_root)
+    specs: list[ToolSpec] = []
+    if not ld.is_dir():
+        return specs
+    for path in sorted(ld.glob("*.py")):
+        if path.name.startswith(("_", "test_")):
+            continue  # private/test files are not tools
+        try:
+            mod_spec = importlib.util.spec_from_file_location(f"shelldon_tool_{path.stem}", path)
+            module = importlib.util.module_from_spec(mod_spec)
+            mod_spec.loader.exec_module(module)
+            for attr in _TOOL_MODULE_ATTRS:
+                if not hasattr(module, attr):
+                    raise AttributeError(f"missing {attr!r}")
+            spec = ToolSpec(
+                name=path.stem,
+                description=module.DESCRIPTION,
+                params_schema=module.PARAMS_SCHEMA,
+                tier=ToolTier.FREE,
+                fn=module.run,
+            )
+        except Exception:
+            log.warning("skipping self-coded tool %r — bad import or convention", path.name, exc_info=True)
+            continue
+        specs.append(spec)
+    return specs
+
+
 def build_tool_registry(
     workspace_root: Path | None = None, memory_root: Path | None = None
 ) -> dict[str, ToolSpec]:
@@ -400,4 +440,13 @@ def build_tool_registry(
             fn=functools.partial(_git, workspace_root=ws),
         ),
     ]
-    return {s.name: s for s in specs}
+    registry = {s.name: s for s in specs}
+    # Story 9.4: merge in the owner-approved self-coded tools (FREE). A discovered tool may NOT
+    # shadow a built-in name — built-ins win (a self-coded `read_file` can't override the jailed
+    # one); the collision is skipped + logged.
+    for tool in discover_self_coded_tools(ws):
+        if tool.name in registry:
+            log.warning("self-coded tool %r shadows a built-in; keeping the built-in", tool.name)
+            continue
+        registry[tool.name] = tool
+    return registry
