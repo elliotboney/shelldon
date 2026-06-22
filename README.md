@@ -16,6 +16,7 @@ shelldon is a tiny AI pet you **talk to** — a little face on a screen that tal
 - 😊 **Has a face and moods** — an expressive E-Ink face that shifts with how it feels and what's happening
 - 🧠 **Remembers you** — it builds up memory of who you are and what you've talked about
 - 🌱 **Learns over time** — jots down what matters as you talk, then in a *dream cycle* consolidates the durable bits into lasting memory and lets the rest go
+- 🛠️ **Writes its own tools** — missing a capability? it writes a new tool (with a test), runs it past you for one-tap approval, and has that ability for good — [more ↓](#it-writes-its-own-tools)
 - 👋 **Acts on its own** — reaches out with a thought when you've been quiet a while, bounded by a daily budget and battery state so it never spams or overspends
 - 🫧 **Feels alive** — blinks, idles, and drifts in mood between chats, even when you're not around
 - 🪶 **Runs anywhere** — fully in your terminal (zero hardware) *or* on a palm-sized Raspberry Pi with a screen
@@ -52,6 +53,26 @@ It sits at the end of a short but meaningful lineage.
 | **No offline life** | **Resident reflexes** (blink, idle, mood drift) run between turns so the pet never freezes when the LLM is busy |
 
 
+## It writes its own tools
+
+shelldon can **extend itself**. When it hits something it can't do, it writes a brand-new tool — the code *and* a test for it — then grows that capability permanently, gated by your approval.
+
+How a new tool is born:
+
+1. **It proposes.** Mid-conversation the pet writes a small tool module plus a pytest test for it.
+2. **It's gated — automatically.** Before you ever see it, core runs that test in a bounded subprocess and statically rejects any tool that tries to import an LLM SDK or reach into the pet's own brain. A tool that fails its own test is thrown away — you're never asked about broken code.
+3. **You approve.** If it passes, you get a one-tap **Approve / Deny** in Telegram and review the actual code before anything goes live.
+4. **It's live next turn.** On approve, the tool is promoted and the next forked worker discovers it automatically — no restart. From then on the pet just *has* that ability.
+
+Safe by construction:
+
+- **You're the gate.** Nothing untrusted runs unseen — the pet pauses for your approval, and risky built-in actions (file writes, shell, network, git) gate the same way.
+- **Bounded on the hardware.** Self-coded tools run under CPU + memory limits (`RLIMIT`) so a runaway can't OOM the 512MB Pi, and the agentic loop is credit-capped so it can't burn your budget.
+- **Self-healing.** A tool that starts misbehaving is automatically quarantined after repeated failures — it can never wedge the pet.
+- **The brain stays out of core.** A self-coded tool is mechanically barred — by a static import check *and* the CI import-linter — from importing the LLM or the pet's core, the same invariant that protects the whole system.
+
+This is the headline of **Epic 9**, and it isn't just built — it's been **validated live on the Pi**: a real turn where the pet wrote, tested, promoted, and registered a working tool against its live brain, end to end.
+
 ## Philosophy
 
 A few decisions that shape everything:
@@ -66,7 +87,7 @@ A few decisions that shape everything:
 
 ## Status
 
-🟢 **Deployed and running on real hardware.** shelldon lives on a Raspberry Pi Zero 2W as a systemd service — text it from your phone (Telegram), it thinks with a live LLM brain, replies, shows its face on the E-Ink panel, remembers you, and drifts in mood between chats. **Epics 1–8 done** (39 stories, 550 tests); what's left is polish.
+🟢 **Deployed and running on real hardware.** shelldon lives on a Raspberry Pi Zero 2W as a systemd service — text it from your phone (Telegram), it thinks with a live LLM brain, replies, shows its face on the E-Ink panel, remembers you, drifts in mood between chats, and **writes its own tools on request**. **Epics 1–9 done** (45 stories, 745 tests) — including live, tiered self-coding; what's left is polish.
 
 → Full progress, the epic-by-epic breakdown, and the roadmap: **[STATUS.md](STATUS.md)**.
 
