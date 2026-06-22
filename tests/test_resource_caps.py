@@ -43,18 +43,21 @@ def test_run_subprocess_passes_a_preexec_fn(tmp_path, monkeypatch):
 
     captured = {}
 
-    class _R:
+    class _FakePopen:  # Story 9.6 moved _run_subprocess from subprocess.run to Popen
+        pid = 1234
         returncode = 0
-        stdout = "ok"
-        stderr = ""
 
-    def fake_run(argv, **kw):
-        captured.update(kw)
-        return _R()
+        def __init__(self, argv, **kw):
+            captured.update(kw)
 
-    monkeypatch.setattr(tools.subprocess, "run", fake_run)
+        def communicate(self, timeout=None):
+            return ("ok", "")
+
+    monkeypatch.setattr(tools.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(tools.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(tools.os, "killpg", lambda pgid, sig: None)
     tools._run_subprocess(["echo", "hi"], cwd=tmp_path)
-    assert callable(captured.get("preexec_fn"))
+    assert callable(captured.get("preexec_fn"))  # 9.5 RLIMIT preexec still wired
 
 
 async def test_run_gate_passes_a_preexec_fn(tmp_path, monkeypatch):

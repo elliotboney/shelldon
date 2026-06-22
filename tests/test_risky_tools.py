@@ -81,12 +81,13 @@ def test_run_shell_nonzero_exit_is_output_not_error(workspace):
 def test_http_get_returns_status_and_body(monkeypatch):
     import httpx
 
-    class _R:
-        status_code = 200
-        text = "hello world"
+    from shelldon.worker import tools
 
-    monkeypatch.setattr(httpx, "get", lambda *a, **k: _R())
-    out = _http_get("https://example.com")
+    # No real network/DNS: stub the SSRF resolve to a public IP + inject a MockTransport client.
+    monkeypatch.setattr(tools.socket, "getaddrinfo", lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
+    client = httpx.Client(transport=httpx.MockTransport(lambda req: httpx.Response(200, text="hello world")),
+                          follow_redirects=False)
+    out = _http_get("https://example.com", client=client)
     assert "200" in out and "hello world" in out
 
 
