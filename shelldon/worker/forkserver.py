@@ -105,7 +105,7 @@ def _maybe_drop_privileges(worker_uid, worker_gid, *, drop=_real_drop, geteuid=o
 
 async def _os_fork_spawn(socket_path: str, turn_id: str, prompt: str,
                          *, worker_uid=None, worker_gid=None, drop=_real_drop,
-                         memory_root=None, history_path=None):
+                         memory_root=None, history_path=None, resume=None):
     """Real fork seam: fork one worker that runs the turn then _exit()s. Linux-only
     in practice (macOS aborts fork-without-exec).
 
@@ -113,7 +113,8 @@ async def _os_fork_spawn(socket_path: str, turn_id: str, prompt: str,
     parent never elevates. A required-but-failed drop raises inside the try, so
     the `finally: os._exit(0)` exits the child before any turn runs (fail-closed).
     `memory_root`/`history_path` are the read-only roots the worker assembles its
-    prompt from (Story 4.4).
+    prompt from (Story 4.4). `resume` (Story 9.3) continues a paused RISKY turn from
+    the restored state instead of assembling a fresh prompt.
     """
     from shelldon.worker.tools import build_tool_registry
     from shelldon.worker.worker import run_worker
@@ -140,7 +141,7 @@ async def _os_fork_spawn(socket_path: str, turn_id: str, prompt: str,
             _maybe_drop_privileges(worker_uid, worker_gid, drop=drop)
             asyncio.run(run_worker(socket_path, turn_id, prompt,
                                    memory_root=memory_root, history_path=history_path,
-                                   tool_registry=build_tool_registry()))
+                                   tool_registry=build_tool_registry(), resume=resume))
         except BaseException:
             # A failed drop/turn must NOT vanish as exit 0 — exit non-zero so the reaper
             # (and a human reading exit status) can SEE the child failed (Story 5.0).
@@ -196,7 +197,7 @@ async def _os_waitpid_reap(handle, *, waitpid=os.waitpid, kill=os.kill,
 class ForkServer:
     """Warm-fork lifecycle: preload+freeze once, then one worker per turn."""
 
-    def __init__(self, socket_path, *, spawn=None, reap=None,
+    def __init__(self, socket_path, *, spawn=None, reap=None, resume_spawn=None,
                  preload_modules=(), manage_gc=True,
                  worker_uid=None, worker_gid=None, drop_privileges=None,
                  memory_root=None, history_path=None):
@@ -210,6 +211,7 @@ class ForkServer:
         #: An explicit spawn= still wins (test seam); the default routes through
         #: _default_spawn so the configured uid/gid reach the fork child.
         self._spawn = spawn or self._default_spawn
+        self._resume_spawn = resume_spawn or self._default_resume_spawn  # Story 9.3
         self._reap = reap or _os_waitpid_reap
         self._preload_modules = tuple(preload_modules)
         self._manage_gc = manage_gc
@@ -228,6 +230,17 @@ class ForkServer:
                                     drop=self._drop,
                                     memory_root=self._memory_root,
                                     history_path=self._history_path)
+
+    async def _default_resume_spawn(self, socket_path, turn_id, resume):
+        """Default resume spawner (Story 9.3): forks a worker that continues a paused RISKY
+        turn from `resume` (a `ResumeState`) instead of assembling a fresh prompt."""
+        return await _os_fork_spawn(socket_path, turn_id, "",
+                                    worker_uid=self._worker_uid,
+                                    worker_gid=self._worker_gid,
+                                    drop=self._drop,
+                                    memory_root=self._memory_root,
+                                    history_path=self._history_path,
+                                    resume=resume)
 
     async def preload(self) -> None:
         """Warm the libs and freeze them COW-shared, then raise the readiness barrier.
@@ -270,6 +283,28 @@ class ForkServer:
         self.worker_in_flight = True
         try:
             handle = await self._spawn(self.socket_path, turn_id, prompt)
+        except BaseException:
+            self.worker_in_flight = False  # release on failure — never deadlock future turns
+            raise
+        self._inflight = handle
+        return handle
+
+    async def spawn_resume(self, turn_id: str, messages, call, approved: bool):
+        """Fork one worker to RESUME a paused RISKY turn (Story 9.3) from `(messages, call,
+        approved)`. Same ≤1 guard + readiness barrier as `spawn_turn`. Core passes plain
+        contract data (not a worker type), so core stays worker-decoupled; the ResumeState is
+        built here, inside worker/."""
+        from shelldon.worker.worker import ResumeState
+
+        if not self._ready.is_set():
+            raise RuntimeError("ForkServer.preload() must complete before spawn_resume()")
+        if self.worker_in_flight:
+            raise WorkerBusyError(f"a worker is already in flight; refusing resume {turn_id}")
+        self.worker_in_flight = True
+        try:
+            handle = await self._resume_spawn(
+                self.socket_path, turn_id, ResumeState(tuple(messages), call, approved)
+            )
         except BaseException:
             self.worker_in_flight = False  # release on failure — never deadlock future turns
             raise
