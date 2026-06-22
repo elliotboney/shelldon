@@ -7,6 +7,8 @@ the shared `run_transport`. These tests drive the adapter's LOGIC through a fake
 advance (so updates aren't re-fetched). The live bot is exercised on the Pi, not in CI.
 """
 
+import asyncio
+
 import pytest
 
 from shelldon.transport.telegram import TelegramChat, resolve_token
@@ -29,12 +31,15 @@ class _FakeResp:
 
 class _FakeClient:
     """Mimics the bits of httpx.AsyncClient the transport uses: get(getUpdates) returns the
-    next scripted batch; post(sendMessage) records the payload."""
+    next scripted batch; post records the (method, payload). `sendMessage` ok-values can be
+    scripted (`post_oks`) to exercise the markdown→plain fallback."""
 
-    def __init__(self, batches):
+    def __init__(self, batches, post_oks=None):
         self._batches = list(batches)
-        self.sent: list[dict] = []
+        self.sent: list[dict] = []  # sendMessage payloads (back-compat)
+        self.posts: list[tuple[str, dict]] = []  # (telegram method, payload) for every post
         self.get_calls: list[dict] = []
+        self._post_oks = list(post_oks) if post_oks else None
 
     async def get(self, url, params=None):
         self.get_calls.append(params or {})
@@ -42,7 +47,12 @@ class _FakeClient:
         return _FakeResp({"ok": True, "result": result})
 
     async def post(self, url, json=None):
-        self.sent.append(json)
+        method = url.rsplit("/", 1)[-1]
+        self.posts.append((method, json))
+        if method == "sendMessage":
+            self.sent.append(json)
+            ok = self._post_oks.pop(0) if self._post_oks else True
+            return _FakeResp({"ok": ok})
         return _FakeResp({"ok": True})
 
 
@@ -83,7 +93,54 @@ async def test_outbound_sends_to_the_recorded_chat():
     chat = TelegramChat(client, "TOK", allow_all=True)
     chat._chat_id = 99
     await chat.outbound("here is my reply")
-    assert client.sent == [{"chat_id": 99, "text": "here is my reply"}]
+    assert client.sent == [{"chat_id": 99, "text": "here is my reply", "parse_mode": "Markdown"}]
+
+
+# --- Item 4a: render markdown, but never drop a reply on a parse error ---
+
+
+async def test_outbound_sends_with_markdown_when_accepted():
+    client = _FakeClient([])
+    chat = TelegramChat(client, "TOK", allow_all=True)
+    chat._chat_id = 99
+    await chat.outbound("**hi**")
+    sends = [j for m, j in client.posts if m == "sendMessage"]
+    assert len(sends) == 1 and sends[0]["parse_mode"] == "Markdown"
+
+
+async def test_outbound_falls_back_to_plain_when_markdown_fails():
+    # Telegram rejects the markdown parse (ok:false) -> resend WITHOUT parse_mode, never drop.
+    client = _FakeClient([], post_oks=[False, True])
+    chat = TelegramChat(client, "TOK", allow_all=True)
+    chat._chat_id = 99
+    await chat.outbound("oops *unbalanced")
+    sends = [j for m, j in client.posts if m == "sendMessage"]
+    assert len(sends) == 2
+    assert sends[0]["parse_mode"] == "Markdown"
+    assert "parse_mode" not in sends[1]  # plain fallback carries the same text
+
+
+# --- Item 2: show a 'typing…' action while a (slow, LLM) turn is in flight ---
+
+
+async def test_typing_action_sent_while_handling_a_message():
+    client = _FakeClient([[_update(uid=42, chat=99, text="hi")]])
+    chat = TelegramChat(client, "TOK", allowed_users={42}, typing_interval=0.01)
+    assert await _first_n(chat, 1) == ["hi"]
+    await asyncio.sleep(0.02)  # let the typing task fire its first action
+    typing = [j for m, j in client.posts if m == "sendChatAction"]
+    assert typing and typing[0] == {"chat_id": 99, "action": "typing"}
+    chat._stop_typing()  # don't leak the task past the test
+
+
+async def test_outbound_stops_typing_then_replies():
+    client = _FakeClient([[_update(uid=42, chat=99, text="hi")]])
+    chat = TelegramChat(client, "TOK", allowed_users={42}, typing_interval=0.01)
+    await _first_n(chat, 1)
+    assert chat._typing_task is not None  # started on inbound
+    await chat.outbound("done")
+    assert chat._typing_task is None  # stopped when the reply went out
+    assert client.sent[-1]["text"] == "done"
 
 
 async def test_outbound_before_any_inbound_is_a_safe_noop():
