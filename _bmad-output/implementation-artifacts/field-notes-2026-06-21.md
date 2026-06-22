@@ -9,9 +9,9 @@ Severity: 🐛 bug · 😤 annoyance · ✨ nice-to-have · ❓ needs investigat
 
 ---
 
-## 1. 🐛 Robot voice/noise on by default
-Shelldon uses a "robot noise" speech style by default when talking. Should be **off by default**.
-- **Action:** find where the robot-noise/voice style is set as default; flip default to plain. Likely a config/personality default.
+## 1. ✅ DONE (2026-06-21) — Robot noise off by default
+**Not config** — emergent GLM behavior: told it's "a small AI pet," GLM spontaneously added `*beep boop*`/`*whirr*`/`Beep!` to feel "alive" (11 of 21 pet replies in the Pi history). No audio code exists; `PersonalityState` has no voice field. Elliot had told it to stop in-chat and it tried to save a `preferences/no-noises` op — but that predated the 4b deploy so it was **rejected/never persisted** (only `ui-mode.md` survived).
+- **Fix (`worker/prompt.py` SYSTEM_INSTRUCTION):** one line instructing plain natural language, no robotic sound effects or asterisk stage-directions unless asked. Prompt copy → no CI test (live-LLM uptake unverifiable here); verify on the Pi.
 
 ## 2. ✅ DONE (2026-06-21) — Telegram "typing…" indicator
 v1 showed the bot typing; v2 showed nothing → looked dead during the slow LLM turn.
