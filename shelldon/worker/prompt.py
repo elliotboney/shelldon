@@ -46,7 +46,9 @@ SYSTEM_INSTRUCTION = (
     "You are shelldon, a small AI pet with a face on a little screen. Reply to your "
     "owner naturally and briefly, in your own voice. Always say something back first.\n"
     "You MAY also update your own memory by appending ONE fenced ops block AFTER your "
-    "reply — a JSON array of ops. Omit it if there is nothing worth remembering. Example:\n"
+    "reply — a JSON array of ops. Omit it if there is nothing worth remembering. For a "
+    "`remember` op, `collection` MUST be one of: facts, people, preferences, capabilities. "
+    "Example:\n"
     "```ops\n"
     '[{"type":"remember","collection":"facts","name":"favorite-db","content":"BigQuery"}]\n'
     "```\n"
@@ -141,9 +143,9 @@ def gather_context(
         directive = mem.read_directive()
         about = mem.read_about()
         summary = mem.read_summary()  # Story 6.2: the dream's running summary (may be None)
-        # Epic 6 retro: surface the curated facts/+people/ the dream promotes, so a promoted
+        # Epic 6 retro: surface the curated collections the dream promotes, so a promoted
         # fact actually shapes later replies (it was durable-but-invisible before). Bounded.
-        knowledge = _bounded_knowledge(mem.read_collection("facts") + mem.read_collection("people"))
+        knowledge = _bounded_knowledge(mem.read_all_collections())
     except (OSError, UnicodeError) as exc:
         # UnicodeError (a corrupt non-UTF-8 about.md/DIRECTIVE.md/summary.md) subclasses
         # ValueError, not OSError — so it must be listed explicitly here, or a decode error

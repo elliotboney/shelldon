@@ -59,6 +59,22 @@ def test_parse_reply_extracts_ops_and_strips_block():
     assert type(ops[0]) is Remember and ops[0].name == "Alex"
 
 
+def test_parse_reply_extracts_preferences_collection():
+    """Regression (Pi 2026-06-21): GLM filed a remember under `collection:"preferences"`,
+    which used to fail the enum and leave the raw ops block visible at the bottom of the
+    Telegram reply. `preferences`/`capabilities` are valid now → block decodes and is stripped."""
+    reply = (
+        "Got it!\n"
+        "```ops\n"
+        '[{"type":"remember","collection":"preferences","name":"theme","content":"dark mode"}]\n'
+        "```\n"
+    )
+    payload, ops = parse_reply(reply)
+    assert "```ops" not in payload and payload == "Got it!"
+    assert len(ops) == 1
+    assert type(ops[0]) is Remember and ops[0].collection == "preferences"
+
+
 def test_parse_reply_malformed_block_yields_no_ops_unchanged_reply():
     """A malformed ops block must NOT corrupt the reply — the whole text stays the
     payload and no ops are proposed (whole-reject)."""

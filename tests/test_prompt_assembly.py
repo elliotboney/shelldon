@@ -117,6 +117,20 @@ def test_gather_context_surfaces_facts_and_people(tmp_path):
     assert gather_context(memory_root=tmp_path / "none", history_path=tmp_path / "h2.db", owner_message="hi")["knowledge"] == []
 
 
+def test_gather_context_surfaces_preferences_and_capabilities(tmp_path):
+    """gather_context surfaces the whole collection set — a `preferences`/`capabilities`
+    the model curated reaches later prompts the same way facts/people do."""
+    from shelldon.core.memory import CuratedMemory
+    from shelldon.contracts import Remember
+
+    mem = CuratedMemory(tmp_path / "memory")
+    mem.apply_memory_op(Remember(collection="preferences", name="theme", content="dark mode"))
+    mem.apply_memory_op(Remember(collection="capabilities", name="coding", content="can write code"))
+    ctx = gather_context(memory_root=tmp_path / "memory", history_path=tmp_path / "h.db", owner_message="hi")
+    flat = dict(ctx["knowledge"])
+    assert flat["theme"] == "dark mode" and flat["coding"] == "can write code"
+
+
 def test_gather_context_includes_summary(tmp_path):
     """gather_context reads summary.md and returns it for assembly; missing -> None (no raise)."""
     from shelldon.core.memory import CuratedMemory
