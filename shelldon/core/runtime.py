@@ -612,8 +612,11 @@ class Core:
                 else:
                     await self._send_reply(result.payload)  # unchanged plain-reply path
                 await self._push_face(FACE_REPLY)
-                # The real blurb (B.3): hold it on the strip so it lingers, not flashes.
-                await self._push_caption(_caption_for(result.payload), dwell=_CAPTION_DWELL_S)
+                # The screen thought (B.3): the model's distilled THOUGHT line if it wrote one,
+                # else a truncation of the reply. Held on the strip so it lingers, not flashes.
+                blurb = result.blurb.strip()
+                caption = _caption_for(blurb) if blurb else _caption_for(result.payload)
+                await self._push_caption(caption, dwell=_CAPTION_DWELL_S)
             else:
                 await self._degrade()
         except Exception as exc:

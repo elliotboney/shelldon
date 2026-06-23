@@ -322,6 +322,12 @@ class Result(msgspec.Struct, frozen=True, tag="result", forbid_unknown_fields=Tr
     payload: str = ""
     error: str | None = None
     proposed_ops: list[ProposedOp] = msgspec.field(default_factory=list)
+    #: B.3: a short inner THOUGHT the model wrote for the screen's caption strip — distilled
+    #: from the conversation, distinct from `payload` (what it says to the owner). The worker
+    #: parses it from a `THOUGHT:` line and strips that line from `payload`; core shows it on
+    #: the caption, falling back to a truncated `payload` when empty. Additive optional default
+    #: — a reply with no thought line decodes unchanged (AD-13, no version bump).
+    blurb: str = ""
     #: Story 9.5: names of self-coded tools that FAILED this turn (errored on import at
     #: discovery, or raised when called). Core strikes each in the `tool_health` ledger and
     #: quarantines a repeatedly-bad one (AD-8). Additive optional default — a turn with no
