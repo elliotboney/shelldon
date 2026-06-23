@@ -6,7 +6,7 @@ level against the same bus spy the faces tests use."""
 
 from conftest import DummySpawner
 from shelldon.contracts import Actor, Envelope, MsgKind, Region, Result
-from shelldon.core.runtime import _CAPTION_MAX, Core, _caption_for
+from shelldon.core.runtime import _CAPTION_MAX, FACE_REPLY, Core, _caption_for
 
 
 def _core_for_result(sock_path, tmp_path):
@@ -24,11 +24,23 @@ def _core_for_result(sock_path, tmp_path):
     return core
 
 
-def _reply_env(*, payload, blurb):
+def _reply_env(*, payload, blurb, face=""):
     return Envelope(
         id="r", kind=MsgKind.RESULT, src=Actor.WORKER, dst=Actor.CORE,
-        body=Result(ok=True, payload=payload, blurb=blurb), turn_id="t1",
+        body=Result(ok=True, payload=payload, blurb=blurb, face=face), turn_id="t1",
     )
+
+
+def _faces(core) -> list[str]:
+    """Spy on core's bus, recording only FACE-region snapshots."""
+    seen: list[str] = []
+
+    async def fake_deliver(env):
+        if env.kind is MsgKind.STATE_SNAPSHOT and env.body.region is Region.FACE:
+            seen.append(env.body.face)
+
+    core.bus.deliver = fake_deliver
+    return seen
 
 
 def test_caption_for_uses_first_line_trimmed():
@@ -118,3 +130,19 @@ async def test_handle_result_caption_falls_back_to_reply_without_thought(sock_pa
     captions = _captions(core)
     await core._handle_result(_reply_env(payload="Hello there, friend", blurb=""))
     assert captions == ["Hello there, friend"]
+
+
+async def test_handle_result_uses_the_models_reaction_face(sock_path, tmp_path):
+    # The model's chosen expression (B.3) is the reaction face, not the fixed reply face.
+    core = _core_for_result(sock_path, tmp_path)
+    faces = _faces(core)
+    await core._handle_result(_reply_env(payload="Whoa, cool!", blurb="excited!", face="excited"))
+    assert faces == ["excited"]
+
+
+async def test_handle_result_invalid_face_falls_back_to_reply_face(sock_path, tmp_path):
+    # An unknown/garbage FACE must not reach the panel — fall back to the default reply face.
+    core = _core_for_result(sock_path, tmp_path)
+    faces = _faces(core)
+    await core._handle_result(_reply_env(payload="ok", blurb="", face="rm -rf /"))
+    assert faces == [FACE_REPLY]

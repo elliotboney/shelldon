@@ -97,21 +97,27 @@ def _strip_reasoning(text: str) -> str:
     return cleaned.strip() if cleaned != text else text
 
 
-#: B.3: the on-screen THOUGHT line — a single `THOUGHT: <a few words>` line the model adds,
-#: a short distilled thought for the caption strip, separate from what it says to the owner.
-#: Parsed out + stripped from the reply (like the ops block) so it never leaks into the chat.
-_THOUGHT_RE = re.compile(r"^[ \t]*THOUGHT:[ \t]*(.*?)[ \t]*$", re.MULTILINE)
+#: B.3: the on-screen directives the model adds, each a single `KEYWORD: value` line that the
+#: worker pulls out + strips (like the ops block) so they never leak into the chat reply:
+#:   THOUGHT: <a few words>   — a short distilled thought for the caption strip
+#:   FACE: <expression>       — the expression it picks as its reaction to the message
+def _directive_re(keyword: str) -> re.Pattern:
+    return re.compile(rf"^[ \t]*{keyword}:[ \t]*(.*?)[ \t]*$", re.MULTILINE)
 
 
-def _extract_thought(text: str) -> tuple[str, str]:
-    """Pull the first `THOUGHT:` line out of a reply → (reply_without_it, thought). No such
-    line → (text, "") unchanged. Pure; mirrors the ops-block strip."""
-    m = _THOUGHT_RE.search(text)
+_THOUGHT_RE = _directive_re("THOUGHT")
+_FACE_RE = _directive_re("FACE")
+
+
+def _extract_line(text: str, pattern: re.Pattern) -> tuple[str, str]:
+    """Pull the first matching `KEYWORD:` line out → (text_without_it, value). No match →
+    (text, "") unchanged. Pure; mirrors the ops-block strip."""
+    m = pattern.search(text)
     if not m:
         return text, ""
-    thought = m.group(1).strip()
+    value = m.group(1).strip()
     cleaned = (text[: m.start()] + text[m.end():]).strip()
-    return cleaned, thought
+    return cleaned, value
 
 #: Anti-wedge backstop: the worker waits at most this long for the broker's Completion,
 #: then emits a failure Result and exits — so a crashed/absent broker can never leave the
@@ -138,8 +144,8 @@ _COMPLETION_TIMEOUT_S = 25.0
 _RESULT_WRITE_TIMEOUT_S = 5.0
 
 
-def parse_reply(text: str) -> tuple[str, list[ProposedOp], str]:
-    """Split a raw completion into (user-facing payload, proposed_ops, thought).
+def parse_reply(text: str) -> tuple[str, list[ProposedOp], str, str]:
+    """Split a raw completion into (user-facing payload, proposed_ops, thought, face).
 
     No ops block → the whole text is the reply, no ops. EVERY well-formed ```ops block is
     decoded (ops accumulated) and stripped from the reply, so a second block can't leak
@@ -163,8 +169,9 @@ def parse_reply(text: str) -> tuple[str, list[ProposedOp], str]:
         payload = payload[:start] + payload[end:]
     if parsed_spans:
         payload = payload.strip()
-    payload, thought = _extract_thought(payload)
-    return payload, ops, thought
+    payload, thought = _extract_line(payload, _THOUGHT_RE)
+    payload, face = _extract_line(payload, _FACE_RE)
+    return payload, ops, thought, face
 
 
 async def _read_completion(reader, timeout: float) -> Completion:
@@ -202,8 +209,8 @@ async def _single_round_trip(reader, writer, turn_id: str, job_payload: str) -> 
     comp = await _read_completion(reader, _COMPLETION_TIMEOUT_S)
     if not comp.ok:
         return Result(ok=False, error=comp.error)
-    payload, ops, thought = parse_reply(comp.payload)
-    return Result(ok=True, payload=payload, proposed_ops=ops, blurb=thought)
+    payload, ops, thought, face = parse_reply(comp.payload)
+    return Result(ok=True, payload=payload, proposed_ops=ops, blurb=thought, face=face)
 
 
 def _record_tool_failure(failures, registry, tc, tr) -> None:
@@ -264,8 +271,8 @@ async def _agentic_loop(
         if not comp.ok:
             return Result(ok=False, error=comp.error)
         if not comp.tool_calls:
-            payload, ops, thought = parse_reply(comp.payload)
-            return Result(ok=True, payload=payload, proposed_ops=ops, blurb=thought)
+            payload, ops, thought, face = parse_reply(comp.payload)
+            return Result(ok=True, payload=payload, proposed_ops=ops, blurb=thought, face=face)
         if iteration >= _MAX_TOOL_EXECUTIONS:
             log.warning("worker: tool loop exhausted after %d executions", iteration)
             return Result(ok=True, payload="I've used too many steps. Let me try a different approach.")

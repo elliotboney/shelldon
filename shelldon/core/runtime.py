@@ -77,11 +77,17 @@ DEGRADE_TEXT = "…can't think right now…"
 #: The panel auto-shrinks the font, but a hard cap keeps the line readable, not microscopic.
 _CAPTION_MAX = 48
 
-#: How long a reaction's real text (a reply/dream/heartbeat) LINGERS on the caption strip
-#: before the at-rest mood word is allowed to replace it (B.3 review: without this the very
-#: next reflex tick overwrote the reply, so it only flashed). The face still settles to the
-#: mood on its own cadence; only the caption holds the words you just got.
-_CAPTION_DWELL_S = 60.0
+#: How long a REACTION (the model's chosen face + its thought) LINGERS on the screen before
+#: the at-rest mood is allowed to replace it (B.3 review: without this the very next reflex
+#: tick overwrote the reply, so it only flashed). Holds BOTH the face and the caption, so the
+#: deliberate expression + thought settle to the ambient mood together, not on split cadences.
+_REACTION_DWELL_S = 60.0
+
+#: The expressions the model may pick as its reaction face (B.3) — the emotional subset of the
+#: renderer's FACE_ART. The system/lifecycle tokens (thinking/cant-think/low-battery) are
+#: core-driven states, not reactions, so they're not offered; an unknown/absent pick → the
+#: default reply face. Kept here (not imported from display) so core stays display-agnostic.
+_REACTION_FACES = frozenset({"happy", "excited", "curious", "content", "grumpy", "sleepy"})
 
 
 def _caption_for(payload: str) -> str:
@@ -285,9 +291,9 @@ class Core:
         #: The caption text currently on the bottom strip (B.3) — tracked like `_last_face`
         #: so an identical caption doesn't re-push (and re-flash the slow E-Ink panel).
         self._last_caption: str | None = None
-        #: Monotonic deadline until which a reaction's text holds the caption against the
-        #: at-rest mood word (B.3). 0.0 = nothing holding it (settle to mood immediately).
-        self._caption_hold_until = 0.0
+        #: Monotonic deadline until which a reaction (face + thought) holds the screen against
+        #: the at-rest mood (B.3). 0.0 = nothing holding it (settle to mood immediately).
+        self._reaction_hold_until = 0.0
         self._seq = 0
         self._timeout_task: asyncio.Task | None = None
         #: The in-flight worker's reap task (Story 5.0). Held (not just fire-and-forget)
@@ -611,12 +617,14 @@ class Core:
                     await self._send_reply(result.payload, approval_turn_id=env.turn_id)
                 else:
                     await self._send_reply(result.payload)  # unchanged plain-reply path
-                await self._push_face(FACE_REPLY)
+                # The reaction face (B.3): the expression the model picked for THIS message if
+                # it's a valid one, else the default reply face. A deliberate reaction, not mood.
+                await self._push_face(self._reaction_face(result.face))
                 # The screen thought (B.3): the model's distilled THOUGHT line if it wrote one,
                 # else a truncation of the reply. Held on the strip so it lingers, not flashes.
                 blurb = result.blurb.strip()
                 caption = _caption_for(blurb) if blurb else _caption_for(result.payload)
-                await self._push_caption(caption, dwell=_CAPTION_DWELL_S)
+                await self._push_caption(caption, dwell=_REACTION_DWELL_S)
             else:
                 await self._degrade()
         except Exception as exc:
@@ -751,6 +759,12 @@ class Core:
             )
         )
 
+    def _reaction_face(self, face: str) -> str:
+        """The model's chosen reaction expression if it's in the palette, else the default reply
+        face (B.3). Defends the panel from arbitrary model text being drawn as a 'face'. Pure."""
+        token = face.strip().lower()
+        return token if token in _REACTION_FACES else FACE_REPLY
+
     async def _push_caption(self, text: str, *, dwell: float = 0.0) -> None:
         """Push the bottom-strip caption (Region.CAPTION, B.3) — the short 'what I'm doing /
         feeling / just said' line that rides alongside the face. INTERNALLY guarded: it is
@@ -758,11 +772,11 @@ class Core:
         site stay a one-liner (unlike `_push_face`, whose callers guard it). An identical
         caption is skipped to avoid re-flashing the panel.
 
-        `dwell` > 0 marks this a REACTION (a reply/dream): its text holds the strip against the
-        at-rest mood word for that many seconds (set even when the text is unchanged, so a
-        repeated reply still extends the hold)."""
+        `dwell` > 0 marks this a REACTION (a reply/dream): the screen (face + this text) holds
+        against the at-rest mood for that many seconds (set even when the text is unchanged, so
+        a repeated reply still extends the hold)."""
         if dwell > 0:
-            self._caption_hold_until = self._monotonic() + dwell
+            self._reaction_hold_until = self._monotonic() + dwell
         if text == self._last_caption:
             return
         self._last_caption = text
@@ -784,7 +798,7 @@ class Core:
         a failure Result AND on turn timeout."""
         await self._send_reply(DEGRADE_TEXT)
         await self._push_face(FACE_DEGRADED)
-        await self._push_caption(_caption_for(DEGRADE_TEXT), dwell=_CAPTION_DWELL_S)
+        await self._push_caption(_caption_for(DEGRADE_TEXT), dwell=_REACTION_DWELL_S)
         self._record_turn(DEGRADE_TEXT)  # the degrade ack IS the pet's reply this turn
 
     def _record_turn(self, pet_text: str) -> None:
@@ -913,16 +927,16 @@ class Core:
         change to avoid spamming identical snapshots."""
         if not (self.fence.is_idle and self.arbiter.is_idle):
             return
+        # A reaction (the model's face + thought) holds the screen against mood drift until its
+        # dwell elapses, so the deliberate expression + thought linger together, then settle to
+        # the ambient mood as one (B.3). Both pushes dedup, so a settled screen stays quiet.
+        if self._monotonic() < self._reaction_hold_until:
+            return
         m = self.state.state
         token = self.faces.select(m.mood.valence, m.mood.arousal, m.energy)
         if token != self._last_face:
             await self._push_face(token)
-        # The caption settles to the mood word only once a reaction's dwell has elapsed — so a
-        # reply lingers, then drifts back to the mood at rest (B.3). Decoupled from the face's
-        # token-change gate above (else, after the face already settled, the held-back caption
-        # would never get its settling push). `_push_caption` dedups, so this is a no-op once set.
-        if self._monotonic() >= self._caption_hold_until:
-            await self._push_caption(token)
+        await self._push_caption(token)
 
     # --- plugin-affect nudges (Story 7.5; AD-5/AD-1) ---
 

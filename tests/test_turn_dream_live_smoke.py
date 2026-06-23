@@ -56,7 +56,7 @@ async def test_live_turn_elicits_a_memory_op():
         system=SYSTEM_INSTRUCTION,
     )
     reply = await provider.complete(prompt)
-    payload, ops = parse_reply(reply)
+    payload, ops, _, _ = parse_reply(reply)
     print(f"\n[live turn] model={provider._model}\n--- reply ---\n{reply}\n--- parsed: payload={payload!r} ops={ops}")
 
     assert payload.strip(), "the model said nothing back"
@@ -83,7 +83,7 @@ async def test_live_dream_emits_resolve_and_summary(sock_path, tmp_path):
         system=SYSTEM_INSTRUCTION,
     )
     reply = await _glm_provider().complete(prompt)
-    payload, ops = parse_reply(reply)
+    payload, ops, _, _ = parse_reply(reply)
     print(f"\n[live dream]\n--- directive ---\n{directive}\n--- reply ---\n{reply}\n--- parsed: payload={payload!r} ops={ops}")
     core.history.close()
 

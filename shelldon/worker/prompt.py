@@ -53,6 +53,11 @@ SYSTEM_INSTRUCTION = (
     "End your reply with a single line `THOUGHT: <a few words>` — a brief inner thought or "
     "feeling about the conversation to show on your screen (keep it under ~6 words). It is "
     "separate from what you say to your owner, who never sees this line.\n"
+    # B.3: the model picks its own expression as a REACTION to the message (v1 FACE: parity),
+    # rather than the face just tracking ambient mood. Core validates against this palette and
+    # falls back to the default reply face on anything else; the owner never sees this line.
+    "Also add a line `FACE: <one of: happy, excited, curious, content, grumpy, sleepy>` — the "
+    "expression that matches your reaction to this message. The owner never sees this line.\n"
     # Story 9.1/9.2: native function-calling. The model may call registered tools when they
     # help — get_time, plus the FREE read-only/compute pack (read_file, list_dir, python_eval).
     "You have tools you can call when they help — e.g. `get_time` for the current date/time, "
