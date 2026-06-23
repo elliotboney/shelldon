@@ -13,7 +13,7 @@ import os
 import pytest
 
 from conftest import DummySpawner
-from shelldon.contracts import MsgKind
+from shelldon.contracts import MsgKind, Region
 from shelldon.core.faces import (
     DEFAULT_FACES,
     STARTER_NAMES,
@@ -25,12 +25,14 @@ from shelldon.core.runtime import Core
 
 
 def _record_pushes(core) -> list[str]:
-    """Spy on core's bus so face pushes are observable without a running bus
-    (an unregistered DISPLAY just drops the frame). Returns the recorded tokens."""
+    """Spy on core's bus so FACE pushes are observable without a running bus
+    (an unregistered DISPLAY just drops the frame). Returns the recorded tokens.
+    Filters to the FACE region — the bottom CAPTION strip (B.3) is a separate
+    region stream and would otherwise double-count a mood push (same token)."""
     pushed: list[str] = []
 
     async def fake_deliver(env):
-        if env.kind is MsgKind.STATE_SNAPSHOT:
+        if env.kind is MsgKind.STATE_SNAPSHOT and env.body.region is Region.FACE:
             pushed.append(env.body.face)
 
     core.bus.deliver = fake_deliver

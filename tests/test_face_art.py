@@ -5,9 +5,18 @@ The renderer's hardware path (`spidev`/`gpiozero`/`pillow`/the Waveshare driver)
 pet can emit has an expression to draw, the fallback is sane, and the module imports without
 the hardware deps (so `app.py` can reference it on a laptop)."""
 
+from shelldon.contracts import Region, StateSnapshot
 from shelldon.core.faces import DEFAULT_FACES
 from shelldon.core.runtime import FACE_DEGRADED, FACE_REPLY, FACE_THINKING
-from shelldon.display.waveshare import FACE_ART, WaveshareRenderer, face_for
+from shelldon.display.waveshare import (
+    _CANVAS_H,
+    _CANVAS_W,
+    _ZONES,
+    FACE_ART,
+    WaveshareRenderer,
+    _layout,
+    face_for,
+)
 
 
 def test_every_starter_face_token_has_art():
@@ -38,3 +47,41 @@ def test_renderer_constructs_without_hardware_deps():
     # so app.py can reference WaveshareRenderer on a laptop and only the Pi touches hardware.
     r = WaveshareRenderer()
     assert r._epd is None  # panel not initialised until the first render
+
+
+# --- B.3: 3-zone compositing (pure layout + stateful zone accumulation; PIL draw is Pi-gated) ---
+
+
+def test_layout_zones_stack_without_overlap_and_fit_canvas():
+    boxes = _layout()
+    assert set(boxes) == {Region.BATTERY, Region.FACE, Region.CAPTION}
+    # Each box is within the canvas...
+    for x, y, w, h in boxes.values():
+        assert x >= 0 and y >= 0 and x + w <= _CANVAS_W and y + h <= _CANVAS_H and h > 0
+    # ...and the three stack top→bottom with no vertical overlap (battery, face, caption).
+    bx = boxes[Region.BATTERY]
+    fx = boxes[Region.FACE]
+    cx = boxes[Region.CAPTION]
+    assert bx[1] + bx[3] == fx[1]  # battery bottom == face top
+    assert fx[1] + fx[3] == cx[1]  # face bottom == caption top
+    assert cx[1] + cx[3] == _CANVAS_H  # caption sits flush to the bottom edge
+
+
+async def test_render_accumulates_zones_and_ignores_non_composited(monkeypatch):
+    # The panel is one framebuffer, so the renderer is stateful: each snapshot updates ONE
+    # zone slot (the full redraw is Pi-gated, so stub it out here). A region it doesn't
+    # composite (the XP STATUS_BAR widget) is ignored, never stored.
+    r = WaveshareRenderer()
+    monkeypatch.setattr(r, "_draw_blocking", lambda: None)  # skip the PIL/E-Ink path off-Pi
+
+    async def push(region, text):
+        await r.render(StateSnapshot(region=region, seq=1, face=text))
+
+    await push(Region.FACE, "happy")
+    await push(Region.BATTERY, "87%")
+    await push(Region.CAPTION, "on it!")
+    await push(Region.STATUS_BAR, "Lv2 · 120 XP")  # not a composited zone → ignored
+
+    assert r._zones == {Region.FACE: "happy", Region.BATTERY: "87%", Region.CAPTION: "on it!"}
+    assert Region.STATUS_BAR not in r._zones
+    assert Region.STATUS_BAR not in _ZONES
