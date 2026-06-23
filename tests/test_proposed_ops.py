@@ -41,7 +41,7 @@ class _NoopSpawner:
 
 
 def test_parse_reply_plain_text_no_ops():
-    payload, ops, _ = parse_reply("just a normal reply")
+    payload, ops, _, _ = parse_reply("just a normal reply")
     assert payload == "just a normal reply"
     assert ops == []
 
@@ -53,7 +53,7 @@ def test_parse_reply_extracts_ops_and_strips_block():
         '[{"type":"remember","collection":"people","name":"Alex","content":"owner friend"}]\n'
         "```\n"
     )
-    payload, ops, _ = parse_reply(reply)
+    payload, ops, _, _ = parse_reply(reply)
     assert "```ops" not in payload and payload == "Sure, noting that."
     assert len(ops) == 1
     assert type(ops[0]) is Remember and ops[0].name == "Alex"
@@ -69,7 +69,7 @@ def test_parse_reply_extracts_preferences_collection():
         '[{"type":"remember","collection":"preferences","name":"theme","content":"dark mode"}]\n'
         "```\n"
     )
-    payload, ops, _ = parse_reply(reply)
+    payload, ops, _, _ = parse_reply(reply)
     assert "```ops" not in payload and payload == "Got it!"
     assert len(ops) == 1
     assert type(ops[0]) is Remember and ops[0].collection == "preferences"
@@ -79,14 +79,14 @@ def test_parse_reply_malformed_block_yields_no_ops_unchanged_reply():
     """A malformed ops block must NOT corrupt the reply — the whole text stays the
     payload and no ops are proposed (whole-reject)."""
     reply = "Hi.\n```ops\n{not valid json\n```\n"
-    payload, ops, _ = parse_reply(reply)
+    payload, ops, _, _ = parse_reply(reply)
     assert ops == []
     assert payload == reply  # untouched — we couldn't trust the block
 
 
 def test_parse_reply_unknown_op_tag_rejects_whole_block():
     reply = '```ops\n[{"type":"obliterate","x":1}]\n```'
-    payload, ops, _ = parse_reply(reply)
+    payload, ops, _, _ = parse_reply(reply)
     assert ops == []
     assert payload == reply
 
@@ -101,7 +101,7 @@ def test_parse_reply_handles_multiple_blocks_without_leaking():
         '```ops\n[{"type":"log_episode","content":"b"}]\n```\n'
         "end."
     )
-    payload, ops, _ = parse_reply(reply)
+    payload, ops, _, _ = parse_reply(reply)
     assert "```ops" not in payload
     assert payload.startswith("first.") and "middle." in payload and payload.endswith("end.")
     assert [type(o) for o in ops] == [RewriteAbout, LogEpisode]
@@ -112,7 +112,7 @@ def test_parse_reply_handles_multiple_blocks_without_leaking():
 
 def test_parse_reply_extracts_thought_and_strips_it():
     # The THOUGHT line is the screen caption — pulled out + stripped so the owner never sees it.
-    payload, ops, thought = parse_reply("Sure, 5pm works!\nTHOUGHT: glad to help")
+    payload, ops, thought, _ = parse_reply("Sure, 5pm works!\nTHOUGHT: glad to help")
     assert payload == "Sure, 5pm works!"
     assert thought == "glad to help"
     assert "THOUGHT:" not in payload
@@ -124,31 +124,46 @@ def test_parse_reply_thought_coexists_with_ops_block():
         '```ops\n[{"type":"remember","collection":"facts","name":"x","content":"y"}]\n```\n'
         "THOUGHT: filing that away"
     )
-    payload, ops, thought = parse_reply(reply)
+    payload, ops, thought, _ = parse_reply(reply)
     assert payload == "Noted."
     assert thought == "filing that away"
     assert len(ops) == 1 and type(ops[0]) is Remember
 
 
 def test_parse_reply_no_thought_line_is_empty_string():
-    payload, ops, thought = parse_reply("just a normal reply")
+    payload, ops, thought, _ = parse_reply("just a normal reply")
     assert payload == "just a normal reply" and thought == ""
 
 
 def test_parse_reply_strips_orphan_think_tag_off_the_thought():
     # The exact Pi symptom (2026-06-22): GLM merged a stray </think> onto the THOUGHT line.
-    payload, ops, thought = parse_reply("Here you go!\nTHOUGHT: listing my toolbox</think>")
+    payload, ops, thought, _ = parse_reply("Here you go!\nTHOUGHT: listing my toolbox</think>")
     assert thought == "listing my toolbox"
     assert "</think>" not in thought and payload == "Here you go!"
 
 
 def test_parse_reply_strips_whole_reasoning_block_from_reply():
-    payload, ops, thought = parse_reply(
+    payload, ops, thought, _ = parse_reply(
         "<think>let me reason about this carefully</think>\nThe answer is 42.\nTHOUGHT: feeling smart"
     )
     assert payload == "The answer is 42."
     assert "<think>" not in payload and "reason" not in payload
     assert thought == "feeling smart"
+
+
+def test_parse_reply_extracts_face_and_thought_together():
+    # The model picks its reaction FACE + a THOUGHT; both pulled out, neither leaks to chat.
+    payload, ops, thought, face = parse_reply(
+        "Yes! Let's do it.\nFACE: excited\nTHOUGHT: pumped about this"
+    )
+    assert payload == "Yes! Let's do it."
+    assert face == "excited" and thought == "pumped about this"
+    assert "FACE:" not in payload and "THOUGHT:" not in payload
+
+
+def test_parse_reply_no_face_line_is_empty_string():
+    payload, ops, thought, face = parse_reply("just a normal reply")
+    assert face == "" and payload == "just a normal reply"
 
 
 # --- core applies proposed_ops (fenced path) ---
@@ -238,7 +253,7 @@ def test_parse_reply_extracts_add_face_op():
         '"arousal":[0.3,1.0],"energy":[0.5,1.0],"token":":>"}]\n'
         "```"
     )
-    payload, ops, _ = parse_reply(reply)
+    payload, ops, _, _ = parse_reply(reply)
     assert payload == "Adding that face!"
     assert len(ops) == 1 and type(ops[0]) is AddFace
     assert ops[0].name == "proud" and ops[0].token == ":>"
@@ -248,7 +263,7 @@ def test_parse_reply_malformed_add_face_rejects_whole_block():
     """A bad range shape (3 elements) fails the closed schema → whole block rejected,
     reply left intact (Story 4.5 discipline)."""
     reply = '```ops\n[{"type":"add_face","name":"x","valence":[0,0,0],"arousal":[0,1],"energy":[0,1]}]\n```'
-    payload, ops, _ = parse_reply(reply)
+    payload, ops, _, _ = parse_reply(reply)
     assert ops == [] and payload == reply
 
 
@@ -324,14 +339,14 @@ def test_parse_reply_decodes_capture_learning_no_worker_change():
         '[{"type":"capture_learning","observation":"owner codes late","pattern_key":"night-owl"}]\n'
         "```"
     )
-    payload, ops, _ = parse_reply(reply)
+    payload, ops, _, _ = parse_reply(reply)
     assert payload == "Noted."
     assert len(ops) == 1 and type(ops[0]) is CaptureLearning
     assert ops[0].observation == "owner codes late" and ops[0].pattern_key == "night-owl"
 
 
 def test_capture_learning_pattern_key_optional():
-    payload, ops, _ = parse_reply('```ops\n[{"type":"capture_learning","observation":"a stray thought"}]\n```')
+    payload, ops, _, _ = parse_reply('```ops\n[{"type":"capture_learning","observation":"a stray thought"}]\n```')
     assert type(ops[0]) is CaptureLearning and ops[0].pattern_key is None
 
 
@@ -391,7 +406,7 @@ def test_parse_reply_decodes_dream_ops_no_worker_change():
         '{"type":"rewrite_summary","content":"owner shipped Epic 6"}]\n'
         "```"
     )
-    payload, ops, _ = parse_reply(reply)
+    payload, ops, _, _ = parse_reply(reply)
     assert payload == "Tidied up. 💤"
     assert [type(o) for o in ops] == [ResolveLearning, RewriteSummary]
     assert ops[0].id == 4 and ops[0].status == "pruned"

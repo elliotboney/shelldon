@@ -328,6 +328,11 @@ class Result(msgspec.Struct, frozen=True, tag="result", forbid_unknown_fields=Tr
     #: the caption, falling back to a truncated `payload` when empty. Additive optional default
     #: — a reply with no thought line decodes unchanged (AD-13, no version bump).
     blurb: str = ""
+    #: B.3: the expression the model picked AS ITS REACTION to this message (a `FACE:` line the
+    #: worker parses + strips), e.g. "excited". Core validates it against the reaction palette
+    #: and shows it instead of the default reply face — so the face is a deliberate reaction,
+    #: not just ambient mood. Empty/invalid → the default reply face. Additive optional default.
+    face: str = ""
     #: Story 9.5: names of self-coded tools that FAILED this turn (errored on import at
     #: discovery, or raised when called). Core strikes each in the `tool_health` ledger and
     #: quarantines a repeatedly-bad one (AD-8). Additive optional default — a turn with no
