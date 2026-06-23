@@ -70,21 +70,25 @@ async def test_live_self_coding_propose_gate_promote_discover(sock_path, tmp_pat
     h.core.workspace_root = ws  # stage/gate/promote under tmp, never real $HOME
     try:
         h.source.feed(_PROMPT)
-        await _await(lambda: len(h.outbound) >= 1, timeout=_LIVE_TURN_TIMEOUT)
-        reply = h.outbound[0]
+        # TWO replies land: outbound[0] = the model's spoken reply; outbound[1] = the propose
+        # verdict ("…passed its test — add it?" / "…failed its check, tossed it"), sent AFTER the
+        # gate (a real pytest subprocess) runs inline in _handle_result (Story 9.4). Wait for the
+        # verdict so the gate has finished + the promotion is parked-or-discarded before we read.
+        await _await(lambda: len(h.outbound) >= 2, timeout=_LIVE_TURN_TIMEOUT)
+        reply, verdict = h.outbound[0], h.outbound[1]
 
-        # The gate ran inline in _handle_result (Story 9.4); read what core parked.
         row = h.core.history._conn.execute(
             "SELECT turn_id, tool_name FROM pending_promotions"
         ).fetchone()
         staging = selfcode.staging_dir(ws)
         staged = sorted(p.name for p in staging.glob("*.py")) if staging.exists() else []
-        print(f"\n[propose] reply={reply!r}\nparked={dict(row) if row else None}\nstaged={staged}")
+        print(f"\n[propose] reply={reply!r}\n[gate verdict] {verdict!r}\n"
+              f"parked={dict(row) if row else None}\nstaged={staged}")
 
         assert reply and reply != DEGRADE_TEXT, "the turn degraded — the live chain failed (FINDING)"
         assert row is not None, (
-            "no promotion parked — the live model did NOT emit a propose_tool that PASSED the gate "
-            "(either no propose_tool op, or its test failed) (FINDING)"
+            "no promotion parked — the live model emitted a propose_tool but the gate FAILED "
+            f"(its pytest test didn't pass / import-check rejected). Gate verdict: {verdict!r} (FINDING)"
         )
         turn_id, stem = row["turn_id"], row["tool_name"]
 
