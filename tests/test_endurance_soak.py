@@ -160,7 +160,10 @@ async def test_in_process_core_does_not_accumulate(sock_path):
         # reap reached its finally, but the done-callback discard can lag a tick — a
         # short poll confirms the _bg set fully drains over the whole run.
         await _await(lambda: len(h.core._bg) == 0, timeout=5.0)
-        assert h.core._seq == 2 * SOAK_TURNS  # thinking + reply face per turn, exactly
+        # thinking + reply FACE per turn, plus the thinking ("…") + reply CAPTION strip per
+        # turn (B.3) — 4 region pushes per turn, exactly (the reply caption always differs
+        # from "…", so neither dedups). Still bounded + N-linear, the property under test.
+        assert h.core._seq == 4 * SOAK_TURNS
         # No monotonic Python-heap growth in core/bus/runtime (AC1, in-process half).
         # N-independent: test-side O(N) retention is cleared each turn (above), so a
         # breach means real accumulation, not bookkeeping.

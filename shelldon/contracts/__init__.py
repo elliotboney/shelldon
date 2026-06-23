@@ -51,6 +51,13 @@ class Region(StrEnum):
     #: widget region (e.g. the XP status-bar strip, Story 7.3) — the host rejects two
     #: plugins claiming the same region at load (AD-5: no two writers per region).
     STATUS_BAR = "status-bar"
+    #: The bottom caption strip (B.3) — core-owned like FACE. The short "what I'm doing /
+    #: feeling / just said" line that rides ALONGSIDE the face: it updates on every reply,
+    #: dream, heartbeat, degrade and mood drift (the v1 desk-pet feel). Sole writer = core.
+    CAPTION = "caption"
+    #: The top-right battery widget (B.3) — claimed by the PiSugar plugin: charge % + a
+    #: charging glyph. Plugin-claimed + single-writer, exactly like STATUS_BAR.
+    BATTERY = "battery"
 
 
 class EventKind(StrEnum):

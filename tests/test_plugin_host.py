@@ -99,12 +99,13 @@ def test_duplicate_subscription_is_NOT_a_conflict():
 # --- AC2: discovery from the plugins package ------------------------------------
 
 def test_real_plugins_package_discovers_the_shipped_plugins():
-    # The shipped, on-by-default plugins: the XP widget (7.3) + the two sensing plugins
-    # (7.4, which idle with no hardware source). Infra modules expose no MANIFEST.
+    # The shipped, on-by-default plugins: the XP widget (7.3), the two sensing plugins
+    # (7.4, which idle with no hardware source), and the PiSugar battery widget (B.3, which
+    # idles when no PiSugar server answers). Infra modules expose no MANIFEST.
     import shelldon.plugins as pkg
 
     found = discover_plugins(pkg)
-    assert {p.manifest.name for p in found} == {"xp", "sensing-button", "sensing-ble"}
+    assert {p.manifest.name for p in found} == {"xp", "sensing-button", "sensing-ble", "battery"}
 
 
 def test_discovers_a_real_plugin_module_from_a_package(tmp_path):
