@@ -82,6 +82,22 @@ _OPS_BLOCK_RE = re.compile(r"```ops[ \t]*\n(.*?)```", re.DOTALL)
 #: 3.1/3.3/4.2 whole-reject discipline).
 _OPS_DECODER = msgspec.json.Decoder(list[ProposedOp])
 
+#: B.3: the on-screen THOUGHT line — a single `THOUGHT: <a few words>` line the model adds,
+#: a short distilled thought for the caption strip, separate from what it says to the owner.
+#: Parsed out + stripped from the reply (like the ops block) so it never leaks into the chat.
+_THOUGHT_RE = re.compile(r"^[ \t]*THOUGHT:[ \t]*(.*?)[ \t]*$", re.MULTILINE)
+
+
+def _extract_thought(text: str) -> tuple[str, str]:
+    """Pull the first `THOUGHT:` line out of a reply → (reply_without_it, thought). No such
+    line → (text, "") unchanged. Pure; mirrors the ops-block strip."""
+    m = _THOUGHT_RE.search(text)
+    if not m:
+        return text, ""
+    thought = m.group(1).strip()
+    cleaned = (text[: m.start()] + text[m.end():]).strip()
+    return cleaned, thought
+
 #: Anti-wedge backstop: the worker waits at most this long for the broker's Completion,
 #: then emits a failure Result and exits — so a crashed/absent broker can never leave the
 #: worker blocked forever (which would never reap → stick the ≤1 bound, AD-9).
@@ -107,14 +123,15 @@ _COMPLETION_TIMEOUT_S = 25.0
 _RESULT_WRITE_TIMEOUT_S = 5.0
 
 
-def parse_reply(text: str) -> tuple[str, list[ProposedOp]]:
-    """Split a raw completion into (user-facing payload, proposed_ops).
+def parse_reply(text: str) -> tuple[str, list[ProposedOp], str]:
+    """Split a raw completion into (user-facing payload, proposed_ops, thought).
 
     No ops block → the whole text is the reply, no ops. EVERY well-formed ```ops block is
     decoded (ops accumulated) and stripped from the reply, so a second block can't leak
     into the user-facing text. A malformed block is left in place with NO ops from it (the
     reply is never corrupted by a bad block, and a bad block stays visible — never silently
-    swallowed)."""
+    swallowed). The `THOUGHT:` line (B.3) is likewise pulled out + stripped → the screen
+    caption, never leaking into the chat reply."""
     ops: list = []
     parsed_spans: list[tuple[int, int]] = []
     for m in _OPS_BLOCK_RE.finditer(text):
@@ -124,12 +141,13 @@ def parse_reply(text: str) -> tuple[str, list[ProposedOp]]:
             log.warning("worker: ignoring malformed ops block (%s)", exc)
             continue  # leave the untrusted block in the text rather than strip it blindly
         parsed_spans.append((m.start(), m.end()))
-    if not parsed_spans:
-        return text, ops
     payload = text
     for start, end in reversed(parsed_spans):  # reverse so earlier indices stay valid
         payload = payload[:start] + payload[end:]
-    return payload.strip(), ops
+    if parsed_spans:
+        payload = payload.strip()
+    payload, thought = _extract_thought(payload)
+    return payload, ops, thought
 
 
 async def _read_completion(reader, timeout: float) -> Completion:
@@ -167,8 +185,8 @@ async def _single_round_trip(reader, writer, turn_id: str, job_payload: str) -> 
     comp = await _read_completion(reader, _COMPLETION_TIMEOUT_S)
     if not comp.ok:
         return Result(ok=False, error=comp.error)
-    payload, ops = parse_reply(comp.payload)
-    return Result(ok=True, payload=payload, proposed_ops=ops)
+    payload, ops, thought = parse_reply(comp.payload)
+    return Result(ok=True, payload=payload, proposed_ops=ops, blurb=thought)
 
 
 def _record_tool_failure(failures, registry, tc, tr) -> None:
@@ -229,8 +247,8 @@ async def _agentic_loop(
         if not comp.ok:
             return Result(ok=False, error=comp.error)
         if not comp.tool_calls:
-            payload, ops = parse_reply(comp.payload)
-            return Result(ok=True, payload=payload, proposed_ops=ops)
+            payload, ops, thought = parse_reply(comp.payload)
+            return Result(ok=True, payload=payload, proposed_ops=ops, blurb=thought)
         if iteration >= _MAX_TOOL_EXECUTIONS:
             log.warning("worker: tool loop exhausted after %d executions", iteration)
             return Result(ok=True, payload="I've used too many steps. Let me try a different approach.")

@@ -47,6 +47,12 @@ SYSTEM_INSTRUCTION = (
     "owner naturally and briefly, in your own voice. Always say something back first. "
     "Write in plain, natural language — do NOT add robotic sound effects (no '*beep boop*', "
     "'*whirr*', 'Beep!') or asterisk stage-directions unless your owner explicitly asks.\n"
+    # B.3: a short inner THOUGHT for the e-ink caption strip — a distilled feeling/reflection
+    # about the conversation, SEPARATE from the spoken reply. The worker strips this line from
+    # what the owner sees; absent → the screen falls back to a truncation of the reply.
+    "End your reply with a single line `THOUGHT: <a few words>` — a brief inner thought or "
+    "feeling about the conversation to show on your screen (keep it under ~6 words). It is "
+    "separate from what you say to your owner, who never sees this line.\n"
     # Story 9.1/9.2: native function-calling. The model may call registered tools when they
     # help — get_time, plus the FREE read-only/compute pack (read_file, list_dir, python_eval).
     "You have tools you can call when they help — e.g. `get_time` for the current date/time, "
