@@ -77,6 +77,12 @@ DEGRADE_TEXT = "…can't think right now…"
 #: The panel auto-shrinks the font, but a hard cap keeps the line readable, not microscopic.
 _CAPTION_MAX = 48
 
+#: How long a reaction's real text (a reply/dream/heartbeat) LINGERS on the caption strip
+#: before the at-rest mood word is allowed to replace it (B.3 review: without this the very
+#: next reflex tick overwrote the reply, so it only flashed). The face still settles to the
+#: mood on its own cadence; only the caption holds the words you just got.
+_CAPTION_DWELL_S = 60.0
+
 
 def _caption_for(payload: str) -> str:
     """The bottom-strip caption (B.3) for a reply/dream: the first line of the REAL text,
@@ -279,6 +285,9 @@ class Core:
         #: The caption text currently on the bottom strip (B.3) — tracked like `_last_face`
         #: so an identical caption doesn't re-push (and re-flash the slow E-Ink panel).
         self._last_caption: str | None = None
+        #: Monotonic deadline until which a reaction's text holds the caption against the
+        #: at-rest mood word (B.3). 0.0 = nothing holding it (settle to mood immediately).
+        self._caption_hold_until = 0.0
         self._seq = 0
         self._timeout_task: asyncio.Task | None = None
         #: The in-flight worker's reap task (Story 5.0). Held (not just fire-and-forget)
@@ -603,7 +612,8 @@ class Core:
                 else:
                     await self._send_reply(result.payload)  # unchanged plain-reply path
                 await self._push_face(FACE_REPLY)
-                await self._push_caption(_caption_for(result.payload))  # the real blurb (B.3)
+                # The real blurb (B.3): hold it on the strip so it lingers, not flashes.
+                await self._push_caption(_caption_for(result.payload), dwell=_CAPTION_DWELL_S)
             else:
                 await self._degrade()
         except Exception as exc:
@@ -738,12 +748,18 @@ class Core:
             )
         )
 
-    async def _push_caption(self, text: str) -> None:
+    async def _push_caption(self, text: str, *, dwell: float = 0.0) -> None:
         """Push the bottom-strip caption (Region.CAPTION, B.3) — the short 'what I'm doing /
         feeling / just said' line that rides alongside the face. INTERNALLY guarded: it is
         purely cosmetic, so a bus hiccup here must never abort a turn, which lets every call
         site stay a one-liner (unlike `_push_face`, whose callers guard it). An identical
-        caption is skipped to avoid re-flashing the panel."""
+        caption is skipped to avoid re-flashing the panel.
+
+        `dwell` > 0 marks this a REACTION (a reply/dream): its text holds the strip against the
+        at-rest mood word for that many seconds (set even when the text is unchanged, so a
+        repeated reply still extends the hold)."""
+        if dwell > 0:
+            self._caption_hold_until = self._monotonic() + dwell
         if text == self._last_caption:
             return
         self._last_caption = text
@@ -765,7 +781,7 @@ class Core:
         a failure Result AND on turn timeout."""
         await self._send_reply(DEGRADE_TEXT)
         await self._push_face(FACE_DEGRADED)
-        await self._push_caption(_caption_for(DEGRADE_TEXT))
+        await self._push_caption(_caption_for(DEGRADE_TEXT), dwell=_CAPTION_DWELL_S)
         self._record_turn(DEGRADE_TEXT)  # the degrade ack IS the pet's reply this turn
 
     def _record_turn(self, pet_text: str) -> None:
@@ -898,7 +914,12 @@ class Core:
         token = self.faces.select(m.mood.valence, m.mood.arousal, m.energy)
         if token != self._last_face:
             await self._push_face(token)
-            await self._push_caption(token)  # at rest the caption shows the mood word (B.3)
+        # The caption settles to the mood word only once a reaction's dwell has elapsed — so a
+        # reply lingers, then drifts back to the mood at rest (B.3). Decoupled from the face's
+        # token-change gate above (else, after the face already settled, the held-back caption
+        # would never get its settling push). `_push_caption` dedups, so this is a no-op once set.
+        if self._monotonic() >= self._caption_hold_until:
+            await self._push_caption(token)
 
     # --- plugin-affect nudges (Story 7.5; AD-5/AD-1) ---
 
