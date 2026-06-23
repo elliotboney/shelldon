@@ -19,9 +19,12 @@ import builtins
 import datetime
 import functools
 import importlib.util
+import ipaddress
 import logging
+import os
 import shlex
 import signal
+import socket
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -53,6 +56,10 @@ _RISKY_TIMEOUT_S = 20.0
 #: Cap on any RISKY tool's returned output (stdout/stderr/body) — keep one big result off
 #: the bus / out of the message list on the 416MB Pi (mirrors `read_file`/`python_eval`).
 _MAX_TOOL_OUTPUT_CHARS = 16 * 1024
+
+#: Max redirect hops `http_get` follows (Story 9.6). Each hop's host is re-validated; the body
+#: is never auto-fetched across an unvalidated redirect (the SSRF surface).
+_MAX_REDIRECTS = 5
 
 #: Cap on the `python_eval` result string so a big computation (e.g. `'x'*10**7`) can't
 #: ship a multi-MB ToolResult across the bus / into the message list on the 416MB Pi
@@ -163,15 +170,33 @@ def _resolve_in_jail(path: str, workspace_root: Path) -> Path:
     return candidate
 
 
+#: Credential-shaped file suffixes refused regardless of tier (Story 9.6 AC4 broadens 9.2's
+#: `.env` rule). Case-insensitive.
+_CREDENTIAL_SUFFIXES = frozenset({
+    ".pem", ".key", ".crt", ".cer", ".p12", ".pfx", ".htpasswd", ".keystore", ".jks", ".ppk",
+})
+
+#: Private-key file prefix — `id_rsa`/`id_ed25519`/`id_ecdsa_sk`/`id_ed448`/any custom `id_*` key
+#: (review fix: the SSH convention is `id_<type>`, so match the whole `id_` prefix, not 4 stems).
+_CREDENTIAL_NAME_PREFIXES = ("id_",)
+
+
 def _deny_sensitive(candidate: Path, memory_root: Path) -> None:
-    """Defense in depth (AC4): refuse the secrets tree and credential-shaped files even
-    if they somehow sit inside the jail (uid-drop is a no-op on the non-root Pi). `vault/`
-    is at `<memory_root>/vault`; `.env`/`*.env` are credential files."""
+    """Defense in depth (9.2 AC4 + 9.6 AC4): refuse the secrets tree and credential-shaped files
+    even if they sit inside the jail (uid-drop is a no-op on the non-root Pi). `vault/` is at
+    `<memory_root>/vault`; the credential set covers `.env`/`*.env`/`.env.*`, common key/cert
+    suffixes, and `id_rsa`-style private keys (all case-insensitive)."""
     vault = (Path(memory_root) / "vault").resolve()
     if candidate == vault or candidate.is_relative_to(vault):
         raise ValueError(f"access denied: {candidate} is in the vault")
-    if candidate.name.lower() == ".env" or candidate.suffix.lower() == ".env":
+    name = candidate.name.casefold()
+    suffix = candidate.suffix.casefold()
+    if name == ".env" or suffix == ".env" or name.startswith(".env."):  # .env / x.env / .env.bak/.local
         raise ValueError(f"access denied: {candidate.name} is a credential file")
+    if suffix in _CREDENTIAL_SUFFIXES:
+        raise ValueError(f"access denied: {candidate.name} is a credential file")
+    if any(name.startswith(p) for p in _CREDENTIAL_NAME_PREFIXES):
+        raise ValueError(f"access denied: {candidate.name} is a private key file")
 
 
 def _read_file(path: str, *, workspace_root: Path, memory_root: Path) -> str:
@@ -254,17 +279,51 @@ def _write_file(path: str, content: str, *, workspace_root: Path, memory_root: P
     return f"wrote {len(content)} chars to {path}"
 
 
+def _kill_pgroup(pgid) -> None:
+    """SIGKILL a whole process group, swallowing the already-gone race (Story 9.6 AC2)."""
+    if pgid is None:
+        return
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
 def _run_subprocess(argv, *, cwd: Path, shell: bool = False) -> str:
     """Run a subprocess bounded by `_RISKY_TIMEOUT_S` in `cwd`, returning capped combined
     output + exit code. A timeout raises (→ ToolResult(ok=False)); a non-zero exit is NOT an
-    error (it's normal tool output the model should see). Story 9.5: a `preexec_fn` sets
-    RLIMIT_AS/RLIMIT_CPU in the child so a spawned process can't escape the worker's caps."""
-    proc = subprocess.run(
-        argv, cwd=str(cwd), shell=shell, capture_output=True, text=True,
-        timeout=_RISKY_TIMEOUT_S, preexec_fn=resource_cap_preexec(),
+    error (it's normal tool output the model should see).
+
+    Story 9.5: a `preexec_fn` sets RLIMIT_AS/RLIMIT_CPU in the child so a spawned process can't
+    escape the worker's caps. Story 9.6 (AC2): `start_new_session=True` puts the child in its OWN
+    process group; on timeout AND on normal exit the WHOLE group is SIGKILLed (`os.killpg`) so a
+    backgrounded child (`cmd &`, `disown`, a daemon) can't outlive the turn."""
+    proc = subprocess.Popen(
+        argv, cwd=str(cwd), shell=shell,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True, preexec_fn=resource_cap_preexec(),
     )
-    out = (proc.stdout or "") + (proc.stderr or "")
-    return _cap(f"exit {proc.returncode}\n{out}".rstrip())
+    try:
+        pgid = os.getpgid(proc.pid)  # capture while alive (a zombie's pgid is unreadable once reaped)
+    except OSError:
+        pgid = None
+    try:
+        out, err = proc.communicate(timeout=_RISKY_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        # SIGKILL the group, then the leader, then a NO-timeout reap (review fix): a second
+        # `communicate(timeout=1)` could raise a fresh TimeoutExpired that masks the real one —
+        # after SIGKILL the leader dies promptly, so an unbounded `wait()` returns at once.
+        _kill_pgroup(pgid)
+        try:
+            proc.kill()
+        except (ProcessLookupError, OSError):
+            pass
+        proc.wait()  # reap the (now-killed) leader
+        raise  # the ORIGINAL timeout → ToolResult(ok=False), matching the 9.3 behavior
+    finally:
+        _kill_pgroup(pgid)  # reap any orphaned backgrounded children, even on a clean exit
+    combined = (out or "") + (err or "")
+    return _cap(f"exit {proc.returncode}\n{combined}".rstrip())
 
 
 def _run_shell(command: str, *, workspace_root: Path) -> str:
@@ -273,23 +332,135 @@ def _run_shell(command: str, *, workspace_root: Path) -> str:
     return _run_subprocess(command, cwd=workspace_root, shell=True)
 
 
+#: Closed allowlist of git subcommands the pet may run (Story 9.6 AC3) — read + local-history
+#: verbs + the obvious sync verbs the owner approves per-call. NOT here (rejected): `clone`,
+#: `submodule`, `daemon`, `archive`, `bundle`, `filter-branch`, anything that fetches/executes
+#: arbitrary remote content.
+#: Closed allowlist of git subcommands the pet may run (Story 9.6 AC3) — read + local-history
+#: verbs + the obvious sync verbs the owner approves per-call. `config` is deliberately EXCLUDED
+#: (review): `git config core.sshCommand=…` persists a hook that turns a later approved
+#: `fetch`/`commit` into code-exec — exactly the escalation AC3 blocks via the `-c` global flag.
+_GIT_ALLOWED_SUBCOMMANDS = frozenset({
+    "status", "log", "diff", "show", "add", "commit", "branch", "checkout", "switch",
+    "restore", "stash", "init", "fetch", "pull", "push", "remote", "tag", "rev-parse",
+    "reset", "mv", "rm",
+})
+
+#: Benign info flags that take NO subcommand (so `git --version` is allowed).
+_GIT_BENIGN_NO_SUBCOMMAND = frozenset({"--version", "--help", "-v", "-h"})
+
+#: Flags dangerous ANYWHERE in the args (review fix — not just as global flags): the remote-command
+#: / exec specifiers (turn fetch/push into exec) AND the repo-redirect / config-injection long flags
+#: (`git status --git-dir=/etc` post-subcommand would otherwise escape the jail). The SHORT `-c`/`-C`
+#: forms stay GLOBAL-only (benign post-subcommand: `git commit -c <commit>`, `git log -C`).
+_GIT_EXEC_FLAGS = ("--upload-pack", "--receive-pack", "--exec", "--namespace",
+                   "--git-dir", "--work-tree", "--exec-path", "--config-env")
+
+
 def _git(args: str, *, workspace_root: Path) -> str:
-    """RISKY: run `git <args>` in the workspace cwd. `args` is split safely (no shell)."""
-    return _run_subprocess(["git", *shlex.split(args)], cwd=workspace_root, shell=False)
+    """RISKY: run `git <args>` in the workspace cwd. `args` is split safely (no shell). Story 9.6
+    (AC3): the subcommand must be in `_GIT_ALLOWED_SUBCOMMANDS`; the exec/pack/repo-redirect
+    specifiers are rejected anywhere; the `-c`/`-C` config-injection/chdir SHORT flags are rejected
+    as GLOBAL flags — so an approved git call can't become code-exec or escape the jail."""
+    parts = shlex.split(args)
+    if not parts:
+        raise ValueError("git: no command given")
+    subcommand = None
+    for tok in parts:
+        if any(tok == p or tok.startswith(p + "=") for p in _GIT_EXEC_FLAGS):
+            raise ValueError(f"git: flag {tok!r} is not allowed")
+        if subcommand is None and tok.startswith("-"):
+            # a GLOBAL flag (precedes the subcommand) — block config-injection / chdir short forms
+            if tok.startswith(("-c", "-C")):
+                raise ValueError(f"git: global flag {tok!r} is not allowed")
+            continue  # other benign global flag (--version, --no-pager, …)
+        if subcommand is None:
+            subcommand = tok
+    if subcommand is None:
+        # Only flags — allow exclusively the benign info flags (`git --version`).
+        if not all(tok in _GIT_BENIGN_NO_SUBCOMMAND for tok in parts):
+            raise ValueError(f"git: no allowed subcommand in {args!r}")
+    elif subcommand not in _GIT_ALLOWED_SUBCOMMANDS:
+        raise ValueError(f"git: subcommand {subcommand!r} is not allowed")
+    return _run_subprocess(["git", *parts], cwd=workspace_root, shell=False)
 
 
-def _http_get(url: str) -> str:
-    """RISKY: plain HTTP(S) GET (no credentials — NFR9: credentialed API tools stay
-    broker-side/deferred). `httpx` is already a dep (transport uses it), lazily imported."""
+def _assert_url_shape(url: str) -> None:
+    """http(s)-only + no URL-embedded credentials (NFR9 — creds are broker-only). Story 9.3 guards,
+    re-applied to each redirect hop in 9.6."""
     if not url.lower().startswith(("http://", "https://")):
         raise ValueError(f"http_get only supports http(s) URLs, got {url!r}")
-    if urlparse(url).username or urlparse(url).password:
-        # Credentials embedded in the URL would be sent worker-side (NFR9: creds are broker-only).
+    parsed = urlparse(url)
+    if parsed.username or parsed.password:
         raise ValueError("credentials in the URL are not allowed")
+
+
+def _assert_host_allowed(url: str, *, is_redirect: bool) -> None:
+    """SSRF guard (Story 9.6 AC1): resolve the URL's host to its IP(s) and reject internal targets.
+    Loopback / link-local (incl. the `169.254.169.254` cloud-metadata IP) / unspecified are blocked
+    on EVERY hop; private + reserved ranges are blocked only on a REDIRECT hop (the owner explicitly
+    approved the initial URL's host, so a LAN fetch they typed is allowed — a *redirect* into
+    internal space is the attack). Resolving (not string-matching) defeats `evil.com → 10.0.0.1`.
+    Fails CLOSED — an unresolvable host raises (this is a security boundary)."""
+    host = urlparse(url).hostname
+    if not host:
+        raise ValueError(f"http_get: no host in {url!r}")
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror as exc:
+        raise ValueError(f"http_get: cannot resolve host {host!r} ({exc})") from exc
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_multicast:
+            raise ValueError(f"http_get: blocked host {host} ({ip}) — loopback/link-local/metadata")
+        if is_redirect and (ip.is_private or ip.is_reserved):
+            raise ValueError(f"http_get: blocked redirect to internal host {host} ({ip})")
+
+
+def _read_capped(resp) -> str:
+    """Stream a response body up to `_MAX_TOOL_OUTPUT_CHARS` bytes, then stop (Story 9.6 AC1) —
+    so a multi-MB response never fully buffers into RAM on the 416MB Pi."""
+    chunks: list[bytes] = []
+    total = 0
+    truncated = False
+    for chunk in resp.iter_bytes():
+        chunks.append(chunk)
+        total += len(chunk)
+        if total >= _MAX_TOOL_OUTPUT_CHARS:
+            truncated = True
+            break
+    raw = b"".join(chunks)[:_MAX_TOOL_OUTPUT_CHARS]
+    text = raw.decode("utf-8", errors="replace")
+    if truncated:
+        text += "\n…[output truncated]"
+    return text
+
+
+def _http_get(url: str, *, client=None) -> str:
+    """RISKY: plain HTTP(S) GET (no credentials — NFR9). Story 9.6: follows redirects MANUALLY,
+    re-validating each hop's host against the SSRF guard, and STREAMS the body with a byte cap.
+    `httpx` is lazily imported (transitive dep). `client` is a test seam (inject a MockTransport
+    client); production builds its own non-redirecting client."""
+    _assert_url_shape(url)
+    _assert_host_allowed(url, is_redirect=False)
     import httpx  # lazy: only when this tool actually runs
 
-    resp = httpx.get(url, timeout=_RISKY_TIMEOUT_S, follow_redirects=True)
-    return _cap(f"HTTP {resp.status_code}\n{resp.text}")
+    own = client is None
+    if own:
+        client = httpx.Client(follow_redirects=False, timeout=_RISKY_TIMEOUT_S)
+    try:
+        for _hop in range(_MAX_REDIRECTS + 1):
+            with client.stream("GET", url) as resp:
+                if resp.is_redirect and resp.headers.get("location"):
+                    url = str(resp.url.join(resp.headers["location"]))
+                    _assert_url_shape(url)
+                    _assert_host_allowed(url, is_redirect=True)
+                    continue
+                return _cap(f"HTTP {resp.status_code}\n{_read_capped(resp)}")
+        raise ValueError(f"http_get: too many redirects (>{_MAX_REDIRECTS})")
+    finally:
+        if own:
+            client.close()
 
 
 def summarize_call(call: ToolCall, spec: "ToolSpec") -> str:
