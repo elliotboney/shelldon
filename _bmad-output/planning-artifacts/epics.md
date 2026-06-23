@@ -859,6 +859,24 @@ So that live self-coding is safe to leave running on the Pi.
 **When** it runs
 **Then** `python_eval`/`run_shell` are CPU/time/memory-bounded (the 416MB Pi must not OOM) and the loop is cost-tier/credit gated (Story 5.2 reuse) so a runaway loop can't burn the budget
 
+### Story 9.6: Tool-policy hardening
+
+> Scheduled at the Epic 9 retrospective (2026-06-22) — the network/shell POLICY defers 9.5 explicitly left out of scope (each its own surface, all behind the 9.3 owner-approval gate). Detailed in `deferred-work.md` (9.2/9.3 review sections).
+
+As the owner,
+I want the RISKY network/shell tools to refuse the dangerous-but-plausible commands I might wave through,
+So that one careless Approve tap can't exfiltrate data or reach internal services.
+
+**Acceptance Criteria:**
+
+**Given** the RISKY tools (`http_get`, `run_shell`, `git`) and the file-jail
+**When** a tool runs after approval
+**Then** `http_get` blocks SSRF on redirect targets (no cloud-metadata / localhost / private-range hosts) and streams with a pre-read byte cap (no full-body buffer → no OOM); `run_shell` runs in its own process group (`start_new_session=True`) and cleans up orphaned `&`/daemonized children on timeout; `git` is gated by a safe-subcommand allowlist (status/log/diff/add/commit/push — not `clone`/`--upload-pack`/`-c core.sshCommand`); and `_deny_sensitive`'s credential blocklist is broadened (`.pem`/`.key`/`id_rsa`/`.env.bak` and friends)
+
+**Given** these are defense-in-depth behind owner-approval
+**When** the hardening lands
+**Then** the spine invariants hold (import-linter 3 KEPT, no new deps, fail-soft) and the owner-approval gate remains the primary control — these raise the floor, they don't replace the tap
+
 ---
 
 ## Deferred / Icebox
