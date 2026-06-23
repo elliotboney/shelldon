@@ -135,6 +135,22 @@ def test_parse_reply_no_thought_line_is_empty_string():
     assert payload == "just a normal reply" and thought == ""
 
 
+def test_parse_reply_strips_orphan_think_tag_off_the_thought():
+    # The exact Pi symptom (2026-06-22): GLM merged a stray </think> onto the THOUGHT line.
+    payload, ops, thought = parse_reply("Here you go!\nTHOUGHT: listing my toolbox</think>")
+    assert thought == "listing my toolbox"
+    assert "</think>" not in thought and payload == "Here you go!"
+
+
+def test_parse_reply_strips_whole_reasoning_block_from_reply():
+    payload, ops, thought = parse_reply(
+        "<think>let me reason about this carefully</think>\nThe answer is 42.\nTHOUGHT: feeling smart"
+    )
+    assert payload == "The answer is 42."
+    assert "<think>" not in payload and "reason" not in payload
+    assert thought == "feeling smart"
+
+
 # --- core applies proposed_ops (fenced path) ---
 
 
