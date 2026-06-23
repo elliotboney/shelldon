@@ -52,3 +52,31 @@ async def test_idle_mood_drift_pushes_a_caption(sock_path, tmp_path):
     await core._maybe_push_mood_face()
     assert captions == ["grumpy"]
     assert core._last_caption == "grumpy"
+
+
+async def test_reply_caption_lingers_then_settles_to_mood(sock_path, tmp_path):
+    # A reply's real text must LINGER (not flash) — the mood word may only replace it once
+    # the dwell has elapsed (B.3 review). Drive an injected monotonic clock past the dwell.
+    clock = [0.0]
+    core = Core(
+        sock_path,
+        DummySpawner(),
+        checkpoint_path=tmp_path / "state.json",
+        faces_path=tmp_path / "faces.toml",
+        monotonic=lambda: clock[0],
+    )
+    captions = _captions(core)
+    core.state.apply_patch({"mood.valence": -0.6, "energy": 0.6})  # mood would drift → grumpy
+
+    await core._push_caption("reminding you at 5pm", dwell=60.0)  # a reply lands at t=0
+    assert captions == ["reminding you at 5pm"]
+
+    clock[0] = 10.0  # a reflex tick mid-dwell must NOT overwrite the reply
+    await core._maybe_push_mood_face()
+    assert core._last_caption == "reminding you at 5pm"
+    assert "grumpy" not in captions
+
+    clock[0] = 61.0  # past the dwell — now it settles to the mood word
+    await core._maybe_push_mood_face()
+    assert core._last_caption == "grumpy"
+    assert captions == ["reminding you at 5pm", "grumpy"]
