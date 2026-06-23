@@ -3,9 +3,10 @@ them in `build_tool_registry`, and runs them through `execute_tool` — with the
 discipline (a malformed live module never wedges the worker) and built-ins winning any name clash.
 """
 
-from shelldon.contracts import ToolCall, ToolTier
+from shelldon.contracts import ToolCall, ToolResult, ToolTier
 from shelldon.core.selfcode import live_tools_dir
-from shelldon.worker.tools import build_tool_registry, discover_self_coded_tools, execute_tool
+from shelldon.worker.tools import ToolSpec, build_tool_registry, discover_self_coded_tools, execute_tool
+from shelldon.worker.worker import _record_tool_failure
 
 _GOOD_TOOL = (
     "DESCRIPTION = 'shout a word'\n"
@@ -67,3 +68,40 @@ def test_test_and_private_files_are_not_tools(tmp_path):
     _live(tmp_path, "test_shout", _GOOD_TOOL)
     _live(tmp_path, "_helper", _GOOD_TOOL)
     assert discover_self_coded_tools(tmp_path) == []
+
+
+# --- Story 9.5: skip-surfacing + self_coded flag + run-failure attribution ---
+
+
+def test_discovered_tool_is_marked_self_coded(tmp_path):
+    _live(tmp_path, "shout", _GOOD_TOOL)
+    specs = discover_self_coded_tools(tmp_path)
+    assert specs[0].self_coded is True
+
+
+def test_discovery_surfaces_skipped_names(tmp_path):
+    _live(tmp_path, "broken", "this is not valid python !!!\n")
+    _live(tmp_path, "shout", _GOOD_TOOL)
+    skipped = []
+    specs = discover_self_coded_tools(tmp_path, skipped=skipped)
+    assert [s.name for s in specs] == ["shout"]
+    assert skipped == ["broken"]  # the bad import is reported (→ core quarantine ledger)
+
+
+def test_build_registry_collects_import_failures(tmp_path):
+    _live(tmp_path, "broken", "this is not valid python !!!\n")
+    fails = []
+    build_tool_registry(workspace_root=tmp_path, memory_root=tmp_path / "memory", import_failures=fails)
+    assert "broken" in fails
+
+
+def test_record_tool_failure_attributes_only_self_coded():
+    reg = {
+        "sc": ToolSpec("sc", "", {}, ToolTier.FREE, lambda: "x", self_coded=True),
+        "bi": ToolSpec("bi", "", {}, ToolTier.FREE, lambda: "x"),  # built-in
+    }
+    failures: set[str] = set()
+    _record_tool_failure(failures, reg, ToolCall(id="1", name="sc"), ToolResult(id="1", ok=False))
+    _record_tool_failure(failures, reg, ToolCall(id="2", name="bi"), ToolResult(id="2", ok=False))  # built-in
+    _record_tool_failure(failures, reg, ToolCall(id="3", name="sc"), ToolResult(id="3", ok=True))  # ok run
+    assert failures == {"sc"}  # only the self-coded FAILURE strikes

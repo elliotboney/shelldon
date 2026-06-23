@@ -87,6 +87,17 @@ CREATE TABLE IF NOT EXISTS pending_promotions (
     expires_at TEXT NOT NULL,
     tool_name  TEXT NOT NULL
 );
+
+-- Story 9.5: the self-coded-tool health ledger (AD-8 quarantine). The worker reports a
+-- self-coded tool that errored on import/run on its Result; core increments `strikes` here
+-- (additive CREATE-IF-NOT-EXISTS, atomic UPSERT like `learnings`). At the strike threshold
+-- core moves the live module to tools-quarantine/ — so a repeatedly-bad tool never wedges or
+-- log-spams the worker. Keyed by the tool's safe module stem.
+CREATE TABLE IF NOT EXISTS tool_health (
+    name      TEXT PRIMARY KEY,
+    strikes   INTEGER NOT NULL DEFAULT 0,
+    last_seen TEXT NOT NULL
+);
 """
 
 
@@ -315,10 +326,37 @@ class HistoryStore:
             return None
         return row["tool_name"]
 
-    def prune_expired_promotions(self, now: datetime) -> None:
-        """Best-effort housekeeping: drop any promotions past their expiry (Story 9.4)."""
+    def prune_expired_promotions(self, now: datetime) -> list[str]:
+        """Drop any promotions past their expiry (Story 9.4) and RETURN their `tool_name`s so the
+        caller can discard the staged files on disk (Story 9.5 review — deleting the DB row alone
+        leaks the staged `<stem>.py`/`test_<stem>.py` pair, since the files live in tools-staging/).
+        sqlite-only here (no filesystem — that's core/selfcode's job); core/runtime does the discard."""
+        now_s = now.isoformat()
         with self._conn:
-            self._conn.execute("DELETE FROM pending_promotions WHERE expires_at <= ?", (now.isoformat(),))
+            rows = self._conn.execute(
+                "SELECT tool_name FROM pending_promotions WHERE expires_at <= ?", (now_s,)
+            ).fetchall()
+            self._conn.execute("DELETE FROM pending_promotions WHERE expires_at <= ?", (now_s,))
+        return [r["tool_name"] for r in rows]
+
+    def record_tool_failure(self, name: str, now: datetime) -> int:
+        """Record a self-coded tool failure (Story 9.5, AD-8) — single writer, one commit, ONE
+        atomic UPSERT (mirrors `capture_learning`): a first failure inserts `strikes=1`, a repeat
+        increments. Returns the new strike count so the caller can quarantine at the threshold."""
+        ts = now.isoformat()
+        with self._conn:  # UPSERT then read in ONE transaction (no RETURNING — portable to older sqlite)
+            self._conn.execute(
+                "INSERT INTO tool_health (name, strikes, last_seen) VALUES (?, 1, ?) "
+                "ON CONFLICT(name) DO UPDATE SET strikes = strikes + 1, last_seen = excluded.last_seen",
+                (name, ts),
+            )
+            row = self._conn.execute("SELECT strikes FROM tool_health WHERE name = ?", (name,)).fetchone()
+        return row["strikes"]
+
+    def tool_strikes(self, name: str) -> int:
+        """The current strike count for `name` (0 if absent) — a CORE read for tests/observability."""
+        row = self._conn.execute("SELECT strikes FROM tool_health WHERE name = ?", (name,)).fetchone()
+        return row["strikes"] if row is not None else 0
 
     def recent(self, n: int = 20) -> list[sqlite3.Row]:
         return _recent(self._conn, n)

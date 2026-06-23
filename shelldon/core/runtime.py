@@ -156,6 +156,16 @@ MAX_PROPOSED_OPS = 16
 #: 6-iteration cap, with headroom. A hard cap is Story 9.5.
 _APPROVAL_MESSAGES_WARN = 16
 
+#: Story 9.5: how many failures (import/run) a self-coded tool may accrue before core moves it to
+#: `tools-quarantine/` (AD-8). Generous — a transient one-off failure shouldn't banish a tool; a
+#: repeatedly-broken one stops log-spamming + wasting calls each fork.
+_QUARANTINE_STRIKE_THRESHOLD = 3
+
+#: Story 9.5: cadence of the housekeeping `prune` job that drops expired parked approvals (9.3) +
+#: promotions (9.4) — their `prune_expired_*` methods had no call site. Hourly is ample (rows are
+#: also consumed/expired passively on tap); a REFLEX-tier job (no LLM, touches only sqlite).
+DEFAULT_PRUNE_INTERVAL = 3600.0
+
 #: Story 9.4: how much of a failed gate's pytest output to show the owner in the reply — enough
 #: to see what broke, short enough for a chat message (the full capped output is logged).
 _GATE_REPLY_OUTPUT_CHARS = 500
@@ -307,12 +317,26 @@ class Core:
         self.scheduler.register(
             Job("checkpoint", Interval(self.checkpoint_interval), CostTier.REFLEX, self._run_checkpoint_job)
         )
+        #: Story 9.5: the housekeeping prune job — drops expired parked approvals (9.3) + promotions
+        #: (9.4). REFLEX-tier (no LLM); the scheduler guards a bad tick like the other reflex jobs.
+        self.scheduler.register(
+            Job("prune", Interval(DEFAULT_PRUNE_INTERVAL), CostTier.REFLEX, self._run_prune_job)
+        )
         #: The proactive musing (Story 5.4, CAP-4) — the first self-initiated turn job. An
         #: Idle cadence fires it once per idle stretch after `proactive_idle_interval`s of
         #: owner silence; its prompt is BUILT at dispatch from live mood (no static text),
         #: and it records a synthetic owner-side marker (no real owner message). It rides the
         #: 5.2 cooldown/budget gate + the 5.3 battery gate unchanged (non-essential → eased
         #: off first on battery). The scheduler's idle signal is fed in `_scheduler_loop`.
+        #:
+        #: Story 9.5 (AC3 credit gating): `cost=1` (the default) is INTENTIONAL. A proactive turn
+        #: is a self-initiated MUSING built from live mood (`build_proactive_prompt`) — it checks in,
+        #: it doesn't run a tool task — so it virtually never invokes the loop. The hard runaway-spend
+        #: bound does NOT rely on this cost: `_MAX_TOOL_EXECUTIONS` (worker) caps model-calls PER TURN
+        #: regardless of cost, so worst-case self-driven spend = daily_turn_budget × that ceiling no
+        #: matter what any turn's cost is. The `cost` weight rations TURNS, not calls; weighting
+        #: proactive at 6 would gut its frequency (~2/day) for a worst case the ceiling already bounds.
+        #: (The dream is `cost=3` because it's a deliberately heavier review, not because of tools.)
         self.scheduler.register(
             Job(
                 "proactive",
@@ -455,6 +479,19 @@ class Core:
             f"I wrote a tool `{stem}` and it passed its test — add it?", approval_turn_id=turn_id
         )
 
+    def _handle_tool_failures(self, names: tuple[str, ...]) -> None:
+        """Strike each self-coded tool that failed this turn (Story 9.5, AC1) and quarantine one
+        that crosses the threshold — core is the sole writer of the tool dirs (AD-5). Fail-soft:
+        a sqlite/file error logs and is skipped, never crashes the turn loop (best-effort, like
+        `_record_turn`/`_apply_proposed_ops`). A quarantined tool stops the next fork discovering it."""
+        for name in names:
+            try:
+                strikes = self.history.record_tool_failure(name, datetime.now(UTC))
+                if strikes >= _QUARANTINE_STRIKE_THRESHOLD:
+                    selfcode.quarantine(name, workspace_root=self.workspace_root)
+            except Exception as exc:
+                log.warning("tool-health update for %r failed (%s); skipping", name, exc)
+
     async def _handle_approval_decision(self, approval_turn_id: str, approved: bool) -> None:
         """Owner tapped Approve/Deny. TWO parked-kinds share the turn-id keyspace: a Story 9.4
         tool PROMOTION (a file move + reply, no worker/slot needed) and a Story 9.3 RISKY-call
@@ -560,9 +597,19 @@ class Core:
             # in that sense; it stages + gates + (on pass) parks a promotion + asks the owner.
             # Awaited inline: single-owner, and the gate is bounded (a timeout is a fail), so a
             # brief wait before the slot frees below is acceptable and keeps the flow deterministic.
-            propose = next((o for o in result.proposed_ops if isinstance(o, ProposeTool)), None)
-            if propose is not None:
-                await self._handle_propose_tool(propose, env.turn_id)
+            # Story 9.5: search WITHIN the MAX_PROPOSED_OPS-capped slice (the same bound
+            # `_apply_proposed_ops` applies) so a ProposeTool buried past the cap can't sneak the
+            # gate; warn if a turn proposes more than one tool (only the first is handled — by design).
+            capped = result.proposed_ops[:MAX_PROPOSED_OPS]
+            proposes = [o for o in capped if isinstance(o, ProposeTool)]
+            if len(proposes) > 1:
+                log.warning("turn proposed %d tools; handling only the first", len(proposes))
+            if proposes:
+                await self._handle_propose_tool(proposes[0], env.turn_id)
+        # Story 9.5: strike + maybe-quarantine any self-coded tool that failed this turn — runs
+        # whether or not the turn ultimately succeeded (a tool that crashed is worth a strike).
+        if result.tool_failures:
+            self._handle_tool_failures(result.tool_failures)
         await self._await_reap()  # release the fork-server guard BEFORE the arbiter slot (AC1)
         folded = self.arbiter.complete()  # ALWAYS runs — guaranteed slot release
         if result.ok:
@@ -746,6 +793,17 @@ class Core:
     def _build_dream_prompt(self) -> str:
         """Thin delegator to `TurnDispatcher.build_dream_prompt` (Story 7.0 extract)."""
         return self._dispatcher.build_dream_prompt()
+
+    async def _run_prune_job(self) -> None:
+        """Drop expired parked approvals (Story 9.3) + promotions (Story 9.4) — REFLEX-tier
+        housekeeping (the `prune_expired_*` methods finally get a call site, Story 9.5). The
+        scheduler guards it: a transient sqlite error logs + retries next tick."""
+        now = datetime.now(UTC)
+        self.history.prune_expired_approvals(now)  # state_blob is in-DB — pruning the row fully cleans it
+        # An expired promotion leaves its staged files on disk (Story 9.5 review): discard each
+        # pruned tool's staged pair so tools-staging/ doesn't leak (core is the sole writer, AD-5).
+        for stem in self.history.prune_expired_promotions(now):
+            selfcode.discard(stem, workspace_root=self.workspace_root)
 
     async def _run_checkpoint_job(self) -> None:
         """The periodic checkpoint flush (Story 3.1, NFR7) as a reflex-tier job — the

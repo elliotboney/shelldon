@@ -450,9 +450,21 @@ def test_prune_expired_promotions(tmp_path):
     s = HistoryStore.open(tmp_path / "h.db")
     s.park_promotion("a", "tool-a", NOW, ttl_seconds=60)
     s.park_promotion("b", "tool-b", NOW, ttl_seconds=99999)
-    s.prune_expired_promotions(NOW + timedelta(seconds=61))
+    pruned = s.prune_expired_promotions(NOW + timedelta(seconds=61))
+    assert pruned == ["tool-a"]  # returns the pruned tool names so the caller discards staged files
     assert s.take_promotion("a", NOW) is None  # pruned
     assert s.take_promotion("b", NOW) == "tool-b"  # survives
+    s.close()
+
+
+def test_tool_health_record_and_increment(tmp_path):
+    s = HistoryStore.open(tmp_path / "h.db")
+    assert s.tool_strikes("foo") == 0  # absent → 0
+    assert s.record_tool_failure("foo", NOW) == 1  # first failure
+    assert s.record_tool_failure("foo", NOW) == 2  # increments
+    assert s.tool_strikes("foo") == 2
+    assert s.record_tool_failure("bar", NOW) == 1  # independent per tool
+    assert s.tool_strikes("foo") == 2
     s.close()
 
 

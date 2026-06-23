@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 
 from shelldon.contracts import Actor, Envelope, MsgKind, ProposeTool, Result
 from shelldon.core.runtime import Core
-from shelldon.core.selfcode import live_tools_dir, staging_dir
+from shelldon.core.selfcode import live_tools_dir, quarantine_dir, staging_dir
 
 _GOOD_CODE = (
     "DESCRIPTION = 'add two ints'\n"
@@ -63,6 +63,11 @@ def _open_turn(core, turn_id):
 def _result_env(turn_id, ops):
     return Envelope(id="r", kind=MsgKind.RESULT, src=Actor.WORKER, dst=Actor.CORE,
                     body=Result(ok=True, payload="wrote a tool", proposed_ops=ops), turn_id=turn_id)
+
+
+def _failures_env(turn_id, names):
+    return Envelope(id="r", kind=MsgKind.RESULT, src=Actor.WORKER, dst=Actor.CORE,
+                    body=Result(ok=True, payload="ok", tool_failures=names), turn_id=turn_id)
 
 
 async def test_propose_passes_gate_parks_and_tags_reply(sock_path, tmp_path):
@@ -152,6 +157,57 @@ async def test_failed_promote_discards_staged_files(sock_path, tmp_path, monkeyp
         assert "couldn't add" in sent[-1][0].lower()
         assert not (staging_dir(tmp_path / "workspace") / "adder.py").exists()  # discarded, not orphaned
         assert not (live_tools_dir(tmp_path / "workspace") / "adder.py").exists()
+    finally:
+        core._cleanup()
+
+
+async def test_repeated_tool_failures_quarantine(sock_path, tmp_path):
+    """Story 9.5 AC1: a self-coded tool reported failing N times is quarantined by core (the live
+    module is moved out of discovery's reach); under the threshold it stays live."""
+    core = _core(sock_path, tmp_path)
+    try:
+        _capture_replies(core)
+        ld = live_tools_dir(tmp_path / "workspace")
+        ld.mkdir(parents=True)
+        (ld / "badtool.py").write_text("DESCRIPTION='x'\nPARAMS_SCHEMA={}\ndef run():\n    raise ValueError()\n")
+
+        # Two strikes — still live (threshold is 3).
+        for i in range(2):
+            _open_turn(core, f"tf{i}")
+            await core._handle_result(_failures_env(f"tf{i}", ("badtool",)))
+        assert (ld / "badtool.py").exists()
+        assert core.history.tool_strikes("badtool") == 2
+
+        # Third strike — quarantined.
+        _open_turn(core, "tf2")
+        await core._handle_result(_failures_env("tf2", ("badtool",)))
+        assert not (ld / "badtool.py").exists()
+        assert (quarantine_dir(tmp_path / "workspace") / "badtool.py").exists()
+    finally:
+        core._cleanup()
+
+
+async def test_prune_job_drops_expired(sock_path, tmp_path):
+    """Story 9.5 AC4: the housekeeping prune job clears expired parked approvals + promotions
+    (their prune_expired_* methods finally get a call site)."""
+    core = _core(sock_path, tmp_path)
+    try:
+        old = datetime(2020, 1, 1, tzinfo=UTC)  # already past any ttl
+        core.history.park_approval("a", b"x", old, ttl_seconds=60)
+        # Stage a real pair for the promotion so we can assert the prune discards it (review fix).
+        from shelldon.core import selfcode
+        module_path, test_path = selfcode.stage("p", "x=1\n", "def test():\n    pass\n",
+                                                workspace_root=tmp_path / "workspace")
+        core.history.park_promotion("pturn", "p", old, ttl_seconds=60)
+        assert core.history._conn.execute("SELECT count(*) FROM pending_approvals").fetchone()[0] == 1
+        assert core.history._conn.execute("SELECT count(*) FROM pending_promotions").fetchone()[0] == 1
+
+        await core._run_prune_job()
+
+        assert core.history._conn.execute("SELECT count(*) FROM pending_approvals").fetchone()[0] == 0
+        assert core.history._conn.execute("SELECT count(*) FROM pending_promotions").fetchone()[0] == 0
+        # The expired promotion's staged files were discarded, not leaked on disk.
+        assert not module_path.exists() and not test_path.exists()
     finally:
         core._cleanup()
 
