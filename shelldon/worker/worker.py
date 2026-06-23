@@ -82,6 +82,21 @@ _OPS_BLOCK_RE = re.compile(r"```ops[ \t]*\n(.*?)```", re.DOTALL)
 #: 3.1/3.3/4.2 whole-reject discipline).
 _OPS_DECODER = msgspec.json.Decoder(list[ProposedOp])
 
+#: Reasoning-model hygiene: GLM (glm-4.x) wraps its chain-of-thought in `<think>…</think>`.
+#: Strip whole blocks AND any orphan tag (a stray `</think>` GLM sometimes merges onto a line)
+#: so the private reasoning never leaks into the owner's reply OR the screen thought.
+_REASONING_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+_ORPHAN_THINK_RE = re.compile(r"</?think>", re.IGNORECASE)
+
+
+def _strip_reasoning(text: str) -> str:
+    """Remove `<think>…</think>` reasoning + orphan tags. Returns the text UNCHANGED (no
+    re-strip) when there was nothing to remove, so a tag-free reply is byte-for-byte
+    preserved (the existing whole-reject/passthrough behavior). Pure."""
+    cleaned = _ORPHAN_THINK_RE.sub("", _REASONING_RE.sub("", text))
+    return cleaned.strip() if cleaned != text else text
+
+
 #: B.3: the on-screen THOUGHT line — a single `THOUGHT: <a few words>` line the model adds,
 #: a short distilled thought for the caption strip, separate from what it says to the owner.
 #: Parsed out + stripped from the reply (like the ops block) so it never leaks into the chat.
@@ -131,7 +146,9 @@ def parse_reply(text: str) -> tuple[str, list[ProposedOp], str]:
     into the user-facing text. A malformed block is left in place with NO ops from it (the
     reply is never corrupted by a bad block, and a bad block stays visible — never silently
     swallowed). The `THOUGHT:` line (B.3) is likewise pulled out + stripped → the screen
-    caption, never leaking into the chat reply."""
+    caption, never leaking into the chat reply. Reasoning tags are stripped first so neither
+    the reply nor the thought carries a `<think>`/`</think>` leak."""
+    text = _strip_reasoning(text)
     ops: list = []
     parsed_spans: list[tuple[int, int]] = []
     for m in _OPS_BLOCK_RE.finditer(text):
