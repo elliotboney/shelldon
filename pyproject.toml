@@ -1,6 +1,6 @@
 [project]
 name = "shelldon"
-version = "0.1.0"
+version = "1.0.0"
 description = "An E-Ink AI pet for the Raspberry Pi Zero 2W — chat-first, remote-LLM brain."
 readme = "README.md"
 requires-python = ">=3.13,<3.14"     # pinned to the Pi OS target (3.13.x)
