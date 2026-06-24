@@ -119,6 +119,40 @@ class Daily(Cadence):
         return last_run is None or last_run.date() < now.date()
 
 
+class QuietHours(Cadence):
+    """Wraps an inner cadence and SUPPRESSES it during a daily quiet window `[start, end)` in the
+    owner's LOCAL time (the injected clock is tz-aware UTC; `.astimezone()` converts to the system
+    zone, the same 'owner's day' choice `budget._local_date` makes). Outside the window it delegates
+    to the inner cadence unchanged; inside, it is never due. Scopes quiet hours to the proactive
+    check-in only (the dream's own cadence is left untouched — dreams SHOULD run overnight).
+
+    A window that crosses midnight (`start > end`, e.g. 22:00–07:00) is handled. `scale` (battery
+    backoff) passes through to the inner cadence."""
+
+    def __init__(self, inner: Cadence, start: time, end: time) -> None:
+        # tz-aware bounds can't be compared to the tz-naive local time below (TypeError every tick,
+        # before the per-job guard → silences the whole tick); reject at construction (fail fast).
+        if start.tzinfo is not None or end.tzinfo is not None:
+            raise ValueError("quiet-hours bounds must be tz-naive (interpreted as owner-local)")
+        # start == end is ambiguous (empty window? all-day?) — reject; disable quiet hours instead.
+        if start == end:
+            raise ValueError("quiet-hours start and end must differ (disable quiet hours to allow 24/7)")
+        self.inner = inner
+        self.start = start
+        self.end = end
+
+    def _in_quiet(self, local_t: time) -> bool:
+        if self.start < self.end:  # same-day window, e.g. 01:00–06:00
+            return self.start <= local_t < self.end
+        return local_t >= self.start or local_t < self.end  # crosses midnight, e.g. 22:00–07:00
+
+    def is_due(self, now, last_run, last_interaction, scale=1.0):
+        local_t = now.astimezone().timetz().replace(tzinfo=None)  # owner-local wall time
+        if self._in_quiet(local_t):
+            return False
+        return self.inner.is_due(now, last_run, last_interaction, scale)
+
+
 class Job:
     """A registered unit of self-driven life: a `name`, a `cadence` (when), a
     `cost_tier` (how expensive), and the tier-specific payload —

@@ -25,7 +25,7 @@ from shelldon.broker.chain import build_chain
 from shelldon.broker.service import run_broker
 from shelldon.core.bus.server import bus_socket_path
 from shelldon.core.memory import DEFAULT_MEMORY_ROOT
-from shelldon.core.runtime import Core
+from shelldon.core.runtime import Core, parse_quiet_hours
 from shelldon.core.vault import ensure_vault
 from shelldon.core.selfcode import DEFAULT_WORKSPACE_ROOT, live_tools_dir, staging_dir
 from shelldon.display.renderer import StubRenderer
@@ -240,7 +240,11 @@ async def run_app(
         )
     await forkserver.preload()
 
-    core = Core(socket_path, forkserver, memory_root=memory_root, **(core_kwargs or {}))
+    # Proactive quiet hours: owner-local window read from SHELLDON_QUIET_HOURS (default 22:00–07:00,
+    # "off" to disable). An explicit core_kwargs value (the test smoke) takes precedence over env.
+    core_kwargs = dict(core_kwargs or {})
+    core_kwargs.setdefault("quiet_hours", parse_quiet_hours(env.get("SHELLDON_QUIET_HOURS")))
+    core = Core(socket_path, forkserver, memory_root=memory_root, **core_kwargs)
     chain = chain if chain is not None else build_chain(env)
     renderer = renderer if renderer is not None else _default_renderer(env)
     launch = launch_actors or launch_multiprocess

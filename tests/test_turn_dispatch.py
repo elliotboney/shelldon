@@ -11,12 +11,12 @@ directly — deterministic, no bus round-trip. The full turn machinery has its o
 """
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 
 import pytest
 
-from shelldon.core.runtime import Core
-from shelldon.core.scheduler import CostTier, Idle, Interval, Job
+from shelldon.core.runtime import DEFAULT_QUIET_HOURS, Core, parse_quiet_hours
+from shelldon.core.scheduler import CostTier, Idle, Interval, Job, QuietHours
 
 
 def _today_local() -> str:
@@ -260,12 +260,39 @@ async def test_proactive_job_is_registered_in_core(sock_path, tmp_path):
     assert any(j.name == "proactive" for j in core.scheduler.jobs)
 
 
+# --- Proactive quiet hours: suppress overnight, env-overridable ---
+
+
+def test_parse_quiet_hours_default_off_and_custom():
+    assert parse_quiet_hours(None) == DEFAULT_QUIET_HOURS          # unset -> default window
+    assert parse_quiet_hours("22:00-07:00") == (time(22, 0), time(7, 0))
+    assert parse_quiet_hours("23:30-06:15") == (time(23, 30), time(6, 15))
+    for off in ("off", "OFF", "none", "disabled", "", "  "):
+        assert parse_quiet_hours(off) is None                       # explicitly disabled -> 24/7
+    # An unparseable value falls back to the default (a typo must not silently enable 24/7 pinging).
+    assert parse_quiet_hours("garbage") == DEFAULT_QUIET_HOURS
+    assert parse_quiet_hours("22:00-22:00") == DEFAULT_QUIET_HOURS  # start == end -> invalid -> default
+
+
+def test_core_wraps_proactive_in_quiet_hours_by_default(sock_path, tmp_path):
+    core = Core(sock_path, _RecordingSpawner(), checkpoint_path=tmp_path / "state.json")
+    proactive = next(j for j in core.scheduler.jobs if j.name == "proactive")
+    assert isinstance(proactive.cadence, QuietHours)
+    assert proactive.cadence.start == DEFAULT_QUIET_HOURS[0]
+
+
+def test_core_quiet_hours_none_leaves_proactive_unwrapped(sock_path, tmp_path):
+    core = Core(sock_path, _RecordingSpawner(), checkpoint_path=tmp_path / "state.json", quiet_hours=None)
+    proactive = next(j for j in core.scheduler.jobs if j.name == "proactive")
+    assert isinstance(proactive.cadence, Interval)  # no quiet hours -> the bare periodic cadence
+
+
 async def test_proactive_does_not_fire_on_the_first_tick_after_boot(sock_path, tmp_path):
     """Boot-defer: the periodic proactive (Interval) is due on a None last_run, which would fire
     it before the transports connect (reply dropped) and on every crash-loop restart. Core seeds
     last_run at construction, so the first tick after boot does NOT initiate a turn."""
     spawner = _RecordingSpawner()
-    core = Core(sock_path, spawner, checkpoint_path=tmp_path / "state.json", proactive_interval=1.0)
+    core = Core(sock_path, spawner, checkpoint_path=tmp_path / "state.json", proactive_interval=1.0, quiet_hours=None)
     try:
         await core.scheduler.tick(last_interaction=datetime.now(UTC) - timedelta(seconds=1000))
         assert spawner.spawns == []                         # nothing fired immediately on boot
@@ -278,7 +305,7 @@ async def test_proactive_turn_initiates_with_no_owner_input(sock_path, tmp_path)
     """CAP-4: owner idle past the threshold ⇒ the scheduler initiates a turn with NO
     INBOUND_MSG ever delivered — a spawn happens and budget is spent on pure initiative."""
     spawner = _RecordingSpawner()
-    core = Core(sock_path, spawner, checkpoint_path=tmp_path / "state.json", proactive_interval=1.0)
+    core = Core(sock_path, spawner, checkpoint_path=tmp_path / "state.json", proactive_interval=1.0, quiet_hours=None)
     # Core seeds proactive's last_run to boot time (defer the first periodic fire past startup);
     # backdate it past the interval so this tick is due and the periodic check-in fires.
     core.scheduler.mark_ran("proactive", datetime.now(UTC) - timedelta(seconds=10))
@@ -296,7 +323,7 @@ async def test_proactive_turn_not_initiated_within_cooldown(sock_path, tmp_path)
     """AC2: when the cooldown is unsatisfied the proactive trigger does NOT initiate, and a
     reflex job still runs (aliveness carries on)."""
     spawner = _RecordingSpawner()
-    core = Core(sock_path, spawner, checkpoint_path=tmp_path / "state.json", proactive_interval=1.0)
+    core = Core(sock_path, spawner, checkpoint_path=tmp_path / "state.json", proactive_interval=1.0, quiet_hours=None)
     core.scheduler.mark_ran("proactive", datetime.now(UTC) - timedelta(seconds=10))  # due this tick
     core.state.apply_patch({  # a scheduler turn just happened -> inside the 30-min cooldown
         "budget.date": _today_local(), "budget.turns_used": 1,

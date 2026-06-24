@@ -24,6 +24,7 @@ import asyncio
 import logging
 import time
 from datetime import UTC, datetime
+from datetime import time as dt_time
 
 import msgspec
 from uuid import uuid4
@@ -57,7 +58,7 @@ from shelldon.core.budget import BudgetGate
 from shelldon.core.dispatch import TurnDispatcher
 from shelldon.core.power import BackoffPolicy, PowerState
 from shelldon.core.reactions import compute_nudge_patch
-from shelldon.core.scheduler import CostTier, Idle, Interval, Job, Scheduler
+from shelldon.core.scheduler import CostTier, Idle, Interval, Job, QuietHours, Scheduler
 from shelldon.core.state import DEFAULT_CHECKPOINT_PATH, PersistentState
 from shelldon.core.turn import TurnFence
 
@@ -152,6 +153,35 @@ DEFAULT_LOW_CHARGE_THRESHOLD = 0.20
 #: it on battery, and the PERSISTED cooldown/budget bound boot/crash-loop re-fires. Injectable.
 DEFAULT_PROACTIVE_INTERVAL = 14400.0
 
+#: Default quiet-hours window (owner-local) during which the periodic proactive check-in is
+#: suppressed — no unprompted pings overnight (owner decision). Overridable via the
+#: `SHELLDON_QUIET_HOURS` env var (see `parse_quiet_hours`); set it to "off" to disable.
+#: Only the proactive job is gated — the dream cadence is untouched (dreams run overnight).
+DEFAULT_QUIET_HOURS = (dt_time(22, 0), dt_time(7, 0))
+
+
+def parse_quiet_hours(raw: str | None) -> tuple[dt_time, dt_time] | None:
+    """Parse `SHELLDON_QUIET_HOURS` into a `(start, end)` owner-local window, or `None` to disable.
+
+    Accepts ``"HH:MM-HH:MM"`` (e.g. ``"22:00-07:00"``, midnight-crossing allowed); ``""`` /
+    ``"off"`` / ``"none"`` / ``"disabled"`` disable quiet hours entirely (24/7 proactive). An UNSET
+    (None) value yields the default window. An unparseable value logs a warning and falls back to
+    the default — a typo must never silently switch overnight pinging on."""
+    if raw is None:
+        return DEFAULT_QUIET_HOURS
+    s = raw.strip().lower()
+    if s in ("", "off", "none", "disabled", "false", "0"):
+        return None
+    try:
+        start_s, end_s = s.split("-")
+        start, end = dt_time.fromisoformat(start_s.strip()), dt_time.fromisoformat(end_s.strip())
+        if start.tzinfo is not None or end.tzinfo is not None or start == end:
+            raise ValueError("bounds must be tz-naive and differ")
+        return (start, end)
+    except (ValueError, AttributeError) as exc:
+        log.warning("invalid SHELLDON_QUIET_HOURS %r (%s); using default %s", raw, exc, DEFAULT_QUIET_HOURS)
+        return DEFAULT_QUIET_HOURS
+
 #: Recorded as the owner-side of a proactive turn's history row (Story 5.4) — the pet spoke
 #: with no real owner message, so the directive is NOT stored as if the owner typed it; this
 #: marker preserves continuity (the next turn knows it reached out) without that pollution.
@@ -228,6 +258,7 @@ class Core:
         low_scale: float = DEFAULT_LOW_SCALE,
         low_charge_threshold: float = DEFAULT_LOW_CHARGE_THRESHOLD,
         proactive_interval: float = DEFAULT_PROACTIVE_INTERVAL,
+        quiet_hours: tuple[dt_time, dt_time] | None = DEFAULT_QUIET_HOURS,
         dream_idle_interval: float = DEFAULT_DREAM_IDLE_INTERVAL,
         nudge_cooldown: float = DEFAULT_NUDGE_COOLDOWN,
         monotonic=None,
@@ -257,6 +288,7 @@ class Core:
         self.reflex_interval = reflex_interval
         self.scheduler_interval = scheduler_interval
         self.proactive_interval = proactive_interval
+        self.quiet_hours = quiet_hours
         self.dream_idle_interval = dream_idle_interval
         self.nudge_cooldown = nudge_cooldown
         #: Monotonic clock for the per-kind nudge cooldown (Story 7.5). Injectable so the
@@ -375,10 +407,15 @@ class Core:
         #: matter what any turn's cost is. The `cost` weight rations TURNS, not calls; weighting
         #: proactive at 6 would gut its frequency (~2/day) for a worst case the ceiling already bounds.
         #: (The dream is `cost=3` because it's a deliberately heavier review, not because of tools.)
+        #: The proactive cadence: a periodic Interval, wrapped in QuietHours so it stays silent
+        #: overnight (owner-local window, default 22:00–07:00; `None` = no quiet hours / 24/7).
+        proactive_cadence = Interval(self.proactive_interval)
+        if self.quiet_hours is not None:
+            proactive_cadence = QuietHours(proactive_cadence, *self.quiet_hours)
         self.scheduler.register(
             Job(
                 "proactive",
-                Interval(self.proactive_interval),
+                proactive_cadence,
                 CostTier.TURN,
                 prompt_builder=self._dispatcher.build_proactive_prompt,
                 history_owner_text=PROACTIVE_OWNER_MARKER,
