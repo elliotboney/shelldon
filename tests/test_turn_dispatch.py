@@ -264,7 +264,7 @@ async def test_proactive_turn_initiates_with_no_owner_input(sock_path, tmp_path)
     """CAP-4: owner idle past the threshold ⇒ the scheduler initiates a turn with NO
     INBOUND_MSG ever delivered — a spawn happens and budget is spent on pure initiative."""
     spawner = _RecordingSpawner()
-    core = Core(sock_path, spawner, checkpoint_path=tmp_path / "state.json", proactive_idle_interval=1.0)
+    core = Core(sock_path, spawner, checkpoint_path=tmp_path / "state.json", proactive_interval=1.0)
     long_ago = datetime.now(UTC) - timedelta(seconds=1000)  # owner idle well past 1s
     try:
         await core.scheduler.tick(last_interaction=long_ago)
@@ -279,7 +279,7 @@ async def test_proactive_turn_not_initiated_within_cooldown(sock_path, tmp_path)
     """AC2: when the cooldown is unsatisfied the proactive trigger does NOT initiate, and a
     reflex job still runs (aliveness carries on)."""
     spawner = _RecordingSpawner()
-    core = Core(sock_path, spawner, checkpoint_path=tmp_path / "state.json", proactive_idle_interval=1.0)
+    core = Core(sock_path, spawner, checkpoint_path=tmp_path / "state.json", proactive_interval=1.0)
     core.state.apply_patch({  # a scheduler turn just happened -> inside the 30-min cooldown
         "budget.date": _today_local(), "budget.turns_used": 1,
         "budget.last_turn_at": datetime.now(UTC).isoformat(),
@@ -344,9 +344,12 @@ async def test_dream_fires_via_scheduler_tick_on_its_idle_cadence(sock_path, tmp
     spawner = _RecordingSpawner()
     core = Core(
         sock_path, spawner, checkpoint_path=tmp_path / "state.json",
-        dream_idle_interval=1.0, proactive_idle_interval=1e9,  # only the dream is due
+        dream_idle_interval=1.0, proactive_interval=1e9,  # only the dream is due
     )
     core.history.capture_learning("owner codes late", "night-owl", datetime.now(UTC))
+    # The proactive job is now an Interval cadence (due on its first run, last_run None); mark it
+    # just-run so only the dream's Idle cadence is due on this tick.
+    core.scheduler._last_run["proactive"] = datetime.now(UTC)
     long_ago = datetime.now(UTC) - timedelta(seconds=1000)
     try:
         await core.scheduler.tick(last_interaction=long_ago)
