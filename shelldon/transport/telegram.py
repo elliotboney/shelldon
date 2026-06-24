@@ -259,11 +259,7 @@ async def run_telegram_transport(
 
     own = client is None
     if own:
-        # `local_address="0.0.0.0"` forces IPv4: some hosts (a Tailscale-MagicDNS Pi with no IPv6
-        # egress) resolve api.telegram.org to an AAAA record that then can't be reached, stalling
-        # the client. Binding the source to the IPv4 wildcard makes httpx never attempt IPv6.
-        transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0")
-        client = httpx.AsyncClient(timeout=httpx.Timeout(_POLL_TIMEOUT + 10), transport=transport)
+        client = httpx.AsyncClient(timeout=httpx.Timeout(_POLL_TIMEOUT + 10))
     chat = TelegramChat(client, token, allowed_users=allowed_users, allow_all=allow_all)
     # set_commands is cosmetic (the slash-command menu) and MUST NOT gate the poll loop that
     # receives messages — fire it fully in the background so a slow/hung Bot-API call here can
