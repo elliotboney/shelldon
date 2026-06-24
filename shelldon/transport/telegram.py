@@ -86,6 +86,8 @@ class TelegramChat:
         its chat for replies) and ack it via the offset so it's never re-fetched. A transient
         API/network error backs off and retries — the adapter never dies on one bad poll."""
         offset = 0
+        log.info("telegram: poll loop started")
+        first = True
         while True:
             try:
                 resp = await self._client.get(
@@ -93,6 +95,9 @@ class TelegramChat:
                 )
                 resp.raise_for_status()
                 updates = resp.json().get("result", [])
+                if first:
+                    log.info("telegram: first poll OK (%d update(s) waiting)", len(updates))
+                    first = False
             except Exception as exc:
                 log.warning("telegram getUpdates failed (%s); backing off", exc)
                 await asyncio.sleep(self._error_backoff)
@@ -254,9 +259,18 @@ async def run_telegram_transport(
 
     own = client is None
     if own:
-        client = httpx.AsyncClient(timeout=httpx.Timeout(_POLL_TIMEOUT + 10))
+        # `local_address="0.0.0.0"` forces IPv4: some hosts (a Tailscale-MagicDNS Pi with no IPv6
+        # egress) resolve api.telegram.org to an AAAA record that then can't be reached, stalling
+        # the client. Binding the source to the IPv4 wildcard makes httpx never attempt IPv6.
+        transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0")
+        client = httpx.AsyncClient(timeout=httpx.Timeout(_POLL_TIMEOUT + 10), transport=transport)
     chat = TelegramChat(client, token, allowed_users=allowed_users, allow_all=allow_all)
-    await chat.set_commands()  # Story 9.3: register the slash-command set on startup
+    # set_commands is cosmetic (slash-command menu) and MUST NOT gate the poll loop that receives
+    # messages: bound it so a slow/hung Bot-API call can't wedge inbound forever (Story 9.3).
+    try:
+        await asyncio.wait_for(chat.set_commands(), timeout=10)
+    except Exception as exc:
+        log.warning("telegram set_commands skipped (%s); continuing to poll", exc)
     try:
         await run_transport(
             socket_path, chat.inbound(), chat.outbound, on_approval_request=chat.send_approval
