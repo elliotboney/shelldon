@@ -6,6 +6,10 @@
 
 > An E-Ink AI pet for the Raspberry Pi Zero 2W — chat-first, remote-LLM brain, a face that lives on your desk.
 
+<p align="center">
+  <strong>📖 <a href="https://github.com/elliotboney/shelldon/wiki">Read the Wiki</a></strong> — architecture, how it works, and how to run it on real hardware.
+</p>
+
 ## What is it?
 
 shelldon is a tiny AI pet you **talk to** — a little face on a screen that talks back. Think Tamagotchi, but the brain is a real AI.
