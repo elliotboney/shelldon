@@ -1,5 +1,11 @@
 <p align="center">
-  <img src="docs/logo_v10.png" alt="shelldon" width="320">
+  <img src="docs/logo_v10.png" alt="shelldon" width="300">
+</p>
+
+<p align="center">
+  <img src="docs/shelldon_pic.png" alt="shelldon running on a Raspberry Pi Zero 2W — the E-Ink face, battery, and an on-screen thought" width="520">
+  <br>
+  <em>The real thing: the reacting face, the battery widget, and an on-screen caption — live on the panel.</em>
 </p>
 
 # shelldon
