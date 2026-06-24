@@ -143,21 +143,32 @@ async def launch_in_process(core, socket_path, chain, renderer, inbound, outboun
         await core.bus.stop()
 
 
+def _init_child_logging() -> None:  # pragma: no cover - runs in a child process
+    """Each spawn child is a FRESH interpreter that never ran `main()`, so its root logger
+    defaults to WARNING and every actor's INFO line (telegram poll-loop, display, broker) is
+    silently dropped. Mirror main()'s basicConfig so child INFO logs reach the journal."""
+    logging.basicConfig(level=logging.INFO)
+
+
 def _broker_proc(socket_path, env) -> None:  # pragma: no cover - runs in a child process (Linux/deploy)
+    _init_child_logging()
     asyncio.run(run_broker(socket_path, build_chain(env)))
 
 
 def _display_proc(socket_path) -> None:  # pragma: no cover - runs in a child process
     # The display child builds its renderer from env (like the broker child builds its chain):
     # the real Waveshare panel on the Pi (SHELLDON_DISPLAY=waveshare), else the stub.
+    _init_child_logging()
     asyncio.run(run_display(socket_path, _default_renderer(os.environ)))
 
 
 def _transport_proc(socket_path) -> None:  # pragma: no cover - runs in a child process
+    _init_child_logging()
     asyncio.run(_transport_actor(socket_path, env=os.environ))  # telegram or CLI, per env
 
 
 def _plugin_host_proc(socket_path) -> None:  # pragma: no cover - runs in a child process
+    _init_child_logging()
     asyncio.run(run_plugin_host(socket_path))  # Story 7.1 — loads plugins/ (empty in 7.1)
 
 
