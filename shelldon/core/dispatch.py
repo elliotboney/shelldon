@@ -108,6 +108,10 @@ class TurnDispatcher:
         except Exception:
             self.arbiter.reset()
             raise
+        log.info(
+            "turn job %r admitted (cost=%d, %d/%d used today) — starting a self-driven turn",
+            job.name, job.cost, self.state.state.budget.turns_used, self._budget.daily_turn_budget,
+        )
         await self._start_turn(prompt, record_owner_text=job.history_owner_text)
 
     def resolve_job_prompt(self, job: Job) -> str | None:

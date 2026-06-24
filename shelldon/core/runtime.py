@@ -144,12 +144,13 @@ DEFAULT_EASED_SCALE = 3.0
 DEFAULT_LOW_SCALE = 6.0
 DEFAULT_LOW_CHARGE_THRESHOLD = 0.20
 
-#: Default owner-idle threshold (seconds) before the pet speaks up on its own (Story 5.4;
-#: owner decision = 1 hr, injectable/configurable). The proactive job is an Idle-cadence
-#: turn job — it fires once per idle stretch, then stays quiet until the owner interacts
-#: again. The 5.2 cooldown (30 min) + daily budget (12) still bound its frequency, and the
-#: 5.3 battery backoff stretches this threshold on battery.
-DEFAULT_PROACTIVE_IDLE_INTERVAL = 3600.0
+#: Default period (seconds) of the proactive check-in (Story 5.4; owner decision = recurring
+#: "every few hours regardless of replies"). The proactive job is an Interval-cadence turn job —
+#: it fires every `proactive_interval`s since its OWN last run, independent of owner activity (a
+#: steady drumbeat, not a fire-once-per-idle ping). The 5.2 cooldown (30 min) + daily budget (12)
+#: still bound its frequency (4 hr → ~6/day, well under the cap), the 5.3 battery backoff stretches
+#: it on battery, and the PERSISTED cooldown/budget bound boot/crash-loop re-fires. Injectable.
+DEFAULT_PROACTIVE_INTERVAL = 14400.0
 
 #: Recorded as the owner-side of a proactive turn's history row (Story 5.4) — the pet spoke
 #: with no real owner message, so the directive is NOT stored as if the owner typed it; this
@@ -226,7 +227,7 @@ class Core:
         eased_scale: float = DEFAULT_EASED_SCALE,
         low_scale: float = DEFAULT_LOW_SCALE,
         low_charge_threshold: float = DEFAULT_LOW_CHARGE_THRESHOLD,
-        proactive_idle_interval: float = DEFAULT_PROACTIVE_IDLE_INTERVAL,
+        proactive_interval: float = DEFAULT_PROACTIVE_INTERVAL,
         dream_idle_interval: float = DEFAULT_DREAM_IDLE_INTERVAL,
         nudge_cooldown: float = DEFAULT_NUDGE_COOLDOWN,
         monotonic=None,
@@ -242,8 +243,8 @@ class Core:
             raise ValueError(f"reflex_interval must be positive, got {reflex_interval!r}")
         if scheduler_interval <= 0:
             raise ValueError(f"scheduler_interval must be positive, got {scheduler_interval!r}")
-        if proactive_idle_interval <= 0:
-            raise ValueError(f"proactive_idle_interval must be positive, got {proactive_idle_interval!r}")
+        if proactive_interval <= 0:
+            raise ValueError(f"proactive_interval must be positive, got {proactive_interval!r}")
         if dream_idle_interval <= 0:
             raise ValueError(f"dream_idle_interval must be positive, got {dream_idle_interval!r}")
         self.bus = BusServer(socket_path=socket_path)
@@ -255,7 +256,7 @@ class Core:
         self.checkpoint_interval = checkpoint_interval
         self.reflex_interval = reflex_interval
         self.scheduler_interval = scheduler_interval
-        self.proactive_idle_interval = proactive_idle_interval
+        self.proactive_interval = proactive_interval
         self.dream_idle_interval = dream_idle_interval
         self.nudge_cooldown = nudge_cooldown
         #: Monotonic clock for the per-kind nudge cooldown (Story 7.5). Injectable so the
@@ -358,11 +359,13 @@ class Core:
             Job("prune", Interval(DEFAULT_PRUNE_INTERVAL), CostTier.REFLEX, self._run_prune_job)
         )
         #: The proactive musing (Story 5.4, CAP-4) — the first self-initiated turn job. An
-        #: Idle cadence fires it once per idle stretch after `proactive_idle_interval`s of
-        #: owner silence; its prompt is BUILT at dispatch from live mood (no static text),
-        #: and it records a synthetic owner-side marker (no real owner message). It rides the
-        #: 5.2 cooldown/budget gate + the 5.3 battery gate unchanged (non-essential → eased
-        #: off first on battery). The scheduler's idle signal is fed in `_scheduler_loop`.
+        #: Interval cadence fires it every `proactive_interval`s since its OWN last run — a
+        #: steady periodic check-in INDEPENDENT of owner activity (owner decision: recurring
+        #: "every few hours regardless of replies", not the original fire-once-per-idle-stretch).
+        #: Its prompt is BUILT at dispatch from live mood (no static text), and it records a
+        #: synthetic owner-side marker (no real owner message). It rides the 5.2 cooldown/budget
+        #: gate + the 5.3 battery gate unchanged (non-essential → eased off first on battery); the
+        #: PERSISTED cooldown/budget also bound boot/crash-loop re-fires across restarts.
         #:
         #: Story 9.5 (AC3 credit gating): `cost=1` (the default) is INTENTIONAL. A proactive turn
         #: is a self-initiated MUSING built from live mood (`build_proactive_prompt`) — it checks in,
@@ -375,7 +378,7 @@ class Core:
         self.scheduler.register(
             Job(
                 "proactive",
-                Idle(self.proactive_idle_interval),
+                Interval(self.proactive_interval),
                 CostTier.TURN,
                 prompt_builder=self._dispatcher.build_proactive_prompt,
                 history_owner_text=PROACTIVE_OWNER_MARKER,
@@ -718,6 +721,7 @@ class Core:
     # --- emit helpers (core ORIGINATES traffic via bus.deliver) ---
 
     async def _send_reply(self, text: str, *, approval_turn_id: str | None = None) -> None:
+        log.info("reply → owner (%d chars%s)", len(text), ", approval" if approval_turn_id else "")
         await self.bus.deliver(
             Envelope(
                 id=uuid4().hex,
