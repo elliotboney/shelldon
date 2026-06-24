@@ -265,12 +265,11 @@ async def run_telegram_transport(
         transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0")
         client = httpx.AsyncClient(timeout=httpx.Timeout(_POLL_TIMEOUT + 10), transport=transport)
     chat = TelegramChat(client, token, allowed_users=allowed_users, allow_all=allow_all)
-    # set_commands is cosmetic (slash-command menu) and MUST NOT gate the poll loop that receives
-    # messages: bound it so a slow/hung Bot-API call can't wedge inbound forever (Story 9.3).
-    try:
-        await asyncio.wait_for(chat.set_commands(), timeout=10)
-    except Exception as exc:
-        log.warning("telegram set_commands skipped (%s); continuing to poll", exc)
+    # set_commands is cosmetic (the slash-command menu) and MUST NOT gate the poll loop that
+    # receives messages — fire it fully in the background so a slow/hung Bot-API call here can
+    # never delay or wedge inbound (Story 9.3). The reference is held so it isn't GC'd mid-flight.
+    commands_task = asyncio.create_task(chat.set_commands())
+    log.info("telegram: connecting to bus + starting poll loop")
     try:
         await run_transport(
             socket_path, chat.inbound(), chat.outbound, on_approval_request=chat.send_approval
