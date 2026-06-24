@@ -384,6 +384,12 @@ class Core:
                 history_owner_text=PROACTIVE_OWNER_MARKER,
             )
         )
+        #: Defer the FIRST periodic proactive check-in by one interval: Interval is due on a None
+        #: last_run, so without this the musing fires on the very first tick — before the transport/
+        #: display bus clients have connected — spending a turn whose reply is dropped into the void
+        #: (and re-firing on every crash-loop restart). Seeding last_run = boot time waits a full
+        #: period, by which point the transports are up and the owner has likely interacted.
+        self.scheduler.mark_ran("proactive", datetime.now(UTC))
         #: The dream cycle (Story 6.2, AD-15/CAP-11) — a proactive-turn VARIANT: an Idle turn
         #: job (longer 6h cadence), heavier `cost=3`, that reviews the pending learnings 6.1
         #: captured and proposes promotions/prunes + a running summary. Its prompt is BUILT at

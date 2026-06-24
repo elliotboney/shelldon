@@ -208,6 +208,13 @@ class Scheduler:
     def jobs(self) -> list[Job]:
         return list(self._jobs)
 
+    def mark_ran(self, name: str, when: datetime) -> None:
+        """Seed a job's `last_run` without executing it — so an Interval job's FIRST fire is one
+        full period after `when` instead of immediately (Interval is due on a None `last_run`).
+        Used at composition to defer the periodic proactive check-in past boot, so its reply
+        isn't generated (spending budget) and dropped before the transports have connected."""
+        self._last_run[name] = when
+
     def due(self, now: datetime, last_interaction: datetime | None = None, scale: float = 1.0) -> list[Job]:
         """The jobs due at `now` given the idle signal and the battery stretch `scale`
         (Story 5.3) — pure, no side effects (it does NOT advance `last_run`). Callers tick
