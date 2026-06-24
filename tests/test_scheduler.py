@@ -14,7 +14,7 @@ from datetime import UTC, datetime, time
 import pytest
 
 from shelldon.core.power import BackoffPolicy, PowerState
-from shelldon.core.scheduler import CostTier, Daily, Idle, Interval, Job, Scheduler
+from shelldon.core.scheduler import CostTier, Daily, Idle, Interval, Job, QuietHours, Scheduler
 
 
 def _at(hour: int, minute: int = 0, day: int = 17) -> datetime:
@@ -215,6 +215,53 @@ def test_daily_rejects_a_tz_aware_trigger_time():
     every tick — reject it at construction (fail fast)."""
     with pytest.raises(ValueError):
         Daily(time(3, 0, tzinfo=UTC))
+
+
+# --- QuietHours wrapper: suppress the inner cadence during an owner-local window ---
+
+
+def test_quiet_hours_window_membership_same_day_and_midnight_wrap():
+    """`_in_quiet` is pure (tz-free) — covers the midnight-crossing window + inclusive-start,
+    exclusive-end boundaries, and a same-day window."""
+    wrap = QuietHours(Interval(1.0), time(22, 0), time(7, 0))  # crosses midnight
+    assert wrap._in_quiet(time(23, 0)) is True
+    assert wrap._in_quiet(time(2, 0)) is True
+    assert wrap._in_quiet(time(22, 0)) is True   # start inclusive
+    assert wrap._in_quiet(time(7, 0)) is False   # end exclusive
+    assert wrap._in_quiet(time(12, 0)) is False
+    same = QuietHours(Interval(1.0), time(1, 0), time(6, 0))  # same-day window
+    assert same._in_quiet(time(3, 0)) is True
+    assert same._in_quiet(time(0, 30)) is False
+    assert same._in_quiet(time(6, 0)) is False   # end exclusive
+
+
+def test_quiet_hours_suppresses_inside_window():
+    """Inside the quiet window the wrapper is never due, even though the inner Interval IS due
+    (None last_run). The window is derived from the clock's own owner-local time, so the test is
+    timezone-independent (offsets are whole-minute, so the :00 second is always inside [:00, :01))."""
+    now = _at(12, 34)
+    lt = now.astimezone().timetz().replace(tzinfo=None)
+    q = QuietHours(Interval(1.0), time(lt.hour, lt.minute, 0), time(lt.hour, lt.minute, 1))
+    assert q.is_due(now, None, None) is False
+
+
+def test_quiet_hours_delegates_outside_window():
+    """Outside the quiet window the wrapper defers entirely to the inner cadence: due when the
+    inner is due, NOT due when the inner just ran. Window placed at second 30 — excludes the
+    clock's :00 second regardless of timezone."""
+    now = _at(12, 34)
+    lt = now.astimezone().timetz().replace(tzinfo=None)
+    out = QuietHours(Interval(1.0), time(lt.hour, lt.minute, 30), time(lt.hour, lt.minute, 31))
+    assert out.is_due(now, None, None) is True            # inner Interval due (None last_run) -> due
+    quiet_off_inner_cold = QuietHours(Interval(300.0), time(lt.hour, lt.minute, 30), time(lt.hour, lt.minute, 31))
+    assert quiet_off_inner_cold.is_due(now, now, None) is False  # inner just ran -> delegated not-due
+
+
+def test_quiet_hours_rejects_bad_bounds():
+    with pytest.raises(ValueError):
+        QuietHours(Interval(1.0), time(22, 0, tzinfo=UTC), time(7, 0))  # tz-aware bound
+    with pytest.raises(ValueError):
+        QuietHours(Interval(1.0), time(8, 0), time(8, 0))               # start == end
 
 
 # --- Registration + the due() set from a fixed clock (AC1) ---
