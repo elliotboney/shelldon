@@ -27,7 +27,17 @@ import unicodedata
 from importlib import resources
 from pathlib import Path
 
-from shelldon.contracts import LogEpisode, MemoryOp, Remember, RewriteAbout, RewriteSummary
+from shelldon.contracts import (
+    LogEpisode,
+    MemoryOp,
+    Remember,
+    RewriteAbout,
+    RewriteIdentity,
+    RewriteInstructions,
+    RewriteSoul,
+    RewriteSummary,
+    RewriteUser,
+)
 
 log = logging.getLogger("shelldon.core.memory")
 
@@ -44,8 +54,21 @@ DEFAULT_MEMORY_ROOT = Path.home() / ".shelldon" / "memory"
 _PERSONA_PKG = "shelldon.persona"
 _PERSONA_SEED_FILES = ("BOT_INSTRUCTIONS.md", "SOUL.md", "IDENTITY.md", "USER.md")
 
-#: The owner's authoritative doc — read as authoritative, NEVER written by the bot.
+#: Story 10.3 — the self-initiated-turn prompt templates (proactive musing + dream cycle),
+#: shipped in the same `shelldon.persona` package and seeded copy-if-absent alongside the
+#: persona files. UNLIKE the persona files they are NOT bot-rewritable (no `rewrite_*` op
+#: targets them) — they are prompt policy the owner may hand-edit, read at dispatch by
+#: `core/dispatch.py` and filled by the pure `core/proactive.py` builders.
+_PROMPT_TEMPLATE_SEED_FILES = ("HEARTBEAT.md", "DREAM.md")
+
+#: The owner's authoritative doc — written ONLY via the owner-approval gate (Story 10.2),
+#: never autonomously (it is not a MemoryOp).
 _DIRECTIVE_NAME = "DIRECTIVE.md"
+
+#: Story 10.2 — the protocol markers a `rewrite_instructions` MUST keep, or `parse_reply` breaks.
+#: `THOUGHT:`/`FACE:` are the caption/face directive lines the worker parses+strips; the ```ops
+#: fence is how memory-ops travel. A rewrite dropping any of these is rejected (validate-on-apply).
+_REQUIRED_INSTRUCTION_MARKERS = ("THOUGHT:", "FACE:", "```ops")
 
 #: The closed set of `Remember` target collections (mirrors the contract Literal).
 _COLLECTIONS = ("facts", "people", "preferences", "capabilities")
@@ -107,7 +130,7 @@ class CuratedMemory:
         a missing template or write error logs and is swallowed — construction NEVER raises
         (this runs at core boot AND per fork worker; a failed seed just degrades that section
         later). Only ADDS absent files, so core stays the sole writer of present files (AD-5)."""
-        for name in _PERSONA_SEED_FILES:
+        for name in _PERSONA_SEED_FILES + _PROMPT_TEMPLATE_SEED_FILES:
             dest = self._root / name
             if dest.exists():
                 continue
@@ -130,7 +153,18 @@ class CuratedMemory:
             self._apply_log_episode(op)
         elif isinstance(op, RewriteSummary):
             self._apply_rewrite_summary(op)
+        elif isinstance(op, RewriteSoul):
+            self._apply_rewrite_persona(op.content, "SOUL.md", "rewrite_soul")
+        elif isinstance(op, RewriteIdentity):
+            self._apply_rewrite_persona(op.content, "IDENTITY.md", "rewrite_identity")
+        elif isinstance(op, RewriteUser):
+            self._apply_rewrite_persona(op.content, "USER.md", "rewrite_user")
+        elif isinstance(op, RewriteInstructions):
+            self._apply_rewrite_instructions(op)
         else:
+            # NB: `RewriteDirective` is intentionally NOT a MemoryOp — it has no autonomous apply
+            # path; core gates it through owner approval (Story 10.2). If one reaches here it is
+            # rejected, defense-in-depth against an accidental autonomous directive write.
             raise ValueError(f"unknown memory-op {type(op).__name__!r} (not a closed MemoryOp)")
 
     def _apply_rewrite_about(self, op: RewriteAbout) -> None:
@@ -144,6 +178,38 @@ class CuratedMemory:
         if not op.content.strip():
             raise ValueError("rewrite_summary: content must be non-empty")
         _atomic_write_text(self._root / "summary.md", op.content)
+
+    def _apply_rewrite_persona(self, content: str, filename: str, op_name: str) -> None:
+        """Story 10.2 — replace a bot-owned persona file (SOUL/IDENTITY/USER) atomically. Mirrors
+        `_apply_rewrite_about`: reject empty content, then temp+fsync+replace. Core sole writer (AD-5)."""
+        if not content.strip():
+            raise ValueError(f"{op_name}: content must be non-empty")
+        _atomic_write_text(self._root / filename, content)
+
+    def _apply_rewrite_instructions(self, op: RewriteInstructions) -> None:
+        """Story 10.2 — replace `BOT_INSTRUCTIONS.md` with a VALIDATE-ON-APPLY guardrail: reject a
+        rewrite that drops any required protocol marker (`THOUGHT:`/`FACE:`/the ops fence), so the
+        bot can re-voice its character but cannot break the contract `parse_reply` depends on. A
+        rejected rewrite is a no-op (raises; the caller logs + skips), leaving the prior file intact.
+        The pristine repo seed (`shelldon/persona/`) is the always-available recovery."""
+        if not op.content.strip():
+            raise ValueError("rewrite_instructions: content must be non-empty")
+        missing = [m for m in _REQUIRED_INSTRUCTION_MARKERS if m not in op.content]
+        if missing:
+            raise ValueError(
+                f"rewrite_instructions: drops required protocol marker(s) {missing} — refusing "
+                "(would break parse_reply); keep THOUGHT:/FACE:/the ops fence"
+            )
+        _atomic_write_text(self._root / "BOT_INSTRUCTIONS.md", op.content)
+
+    def _apply_rewrite_directive(self, content: str) -> None:
+        """Story 10.2 — write the owner's `DIRECTIVE.md`. CRITICAL: reachable ONLY from core's
+        owner-approval branch (`runtime._handle_approval_decision`), NEVER from `apply_memory_op`
+        dispatch — `RewriteDirective` is not a `MemoryOp`. The owner stays the single AUTHORITY on
+        the constitution (an unapproved change can never land); core is the single WRITER (AD-5)."""
+        if not content.strip():
+            raise ValueError("rewrite_directive: content must be non-empty")
+        _atomic_write_text(self._root / _DIRECTIVE_NAME, content)
 
     def _apply_remember(self, op: Remember) -> None:
         if op.collection not in _COLLECTIONS:
@@ -208,6 +274,27 @@ class CuratedMemory:
         the onboarding (10.4) is the mechanism that creates it. Injected after SOUL; omitted while empty."""
         path = self._root / "USER.md"
         return path.read_text() if path.is_file() else None
+
+    def read_heartbeat(self) -> str | None:
+        """The proactive self-prompt template `HEARTBEAT.md` (Story 10.3), or `None` if absent.
+        Read at dispatch and filled by the pure `build_proactive_prompt`. No write path (not a
+        rewrite-op target); the owner may hand-edit. Fail-soft: absent or unreadable → `None` →
+        builder fallback."""
+        path = self._root / "HEARTBEAT.md"
+        try:
+            return path.read_text() if path.is_file() else None
+        except (OSError, UnicodeDecodeError):
+            return None
+
+    def read_dream(self) -> str | None:
+        """The dream-cycle prompt template `DREAM.md` (Story 10.3), or `None` if absent. Read at
+        dispatch and filled by `build_dream_prompt`. No write path; the owner may hand-edit.
+        Fail-soft: absent or unreadable → `None` → builder fallback."""
+        path = self._root / "DREAM.md"
+        try:
+            return path.read_text() if path.is_file() else None
+        except (OSError, UnicodeDecodeError):
+            return None
 
     def read_collection(self, collection: str) -> list[tuple[str, str]]:
         """The `(name, content)` pairs of a curated collection (`facts`/`people`), sorted by

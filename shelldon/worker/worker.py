@@ -75,7 +75,13 @@ _MAX_TOOL_EXECUTIONS = 6
 #: The reply→ops wire format: a single fenced ```ops block holding a JSON array of
 #: tagged memory-ops. 4.5 owns this PARSE; Story 4.4 owns the prompt that elicits it
 #: (the format may be co-adjusted there). A reply with no such block is a plain reply.
-_OPS_BLOCK_RE = re.compile(r"```ops[ \t]*\n(.*?)```", re.DOTALL)
+#: The closing fence MUST be at line-start (`\n` before it). Story 10.2: this defends against
+#: fence NESTING — an op whose JSON `content` itself contains a literal "```ops" (a
+#: `rewrite_instructions` carrying the protocol example) would otherwise close the block early at
+#: the inner backticks. Valid JSON escapes every real newline inside a string value, so an embedded
+#: fence is always mid-line and can't match `\n```` — only the true closing fence (on its own line)
+#: does. Multi-block support (findall) is unchanged: each block still closes on its own line.
+_OPS_BLOCK_RE = re.compile(r"```ops[ \t]*\n(.*?)\n```", re.DOTALL)
 
 #: Decoder for the ops block payload — a closed list of the ProposedOp union (memory-ops
 #: + the face op, Story 3.4). A malformed or unknown op fails the WHOLE block (the

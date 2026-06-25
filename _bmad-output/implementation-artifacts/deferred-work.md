@@ -4,6 +4,18 @@ This file tracks work intentionally deferred from reviews, with reasons for why 
 
 ---
 
+## Deferred from: code review of 10-3-proactive-dream-prompts-to-files-and-autonomous-edit (2026-06-25)
+
+- **`_FALLBACK_DREAM` inner `except Exception` returns unformatted `{lines}`** — only fires if `_FALLBACK_DREAM.format(lines=lines)` raises, which can't happen with the current constant. Trigger: if `_FALLBACK_DREAM` is ever edited and the `{lines}` placeholder is removed.
+- **`_current_turn_is_owner = False` in `Core.__init__` conflates "no turn" with "unattended turn"** — only read during a turn in practice; Optional[bool] would add noise with no real protection. Trigger: if code ever reads this flag outside an open turn.
+- **Log messages differ between RTA and directive second-park warning branches** — directive message is actually more specific. Trigger: future log-harmonization pass.
+- **AC3 dream spec text says "byte-identical" but AC5 requires growth** — spec defect; implementation is correct. Should be corrected in a spec cleanup pass for future readers.
+- **`needs_approval` dual-scan across `_handle_result` + `_apply_proposed_ops`** — latent fragility: `_handle_result` checks `directive is not None` and `_apply_proposed_ops` also gates it; the two must stay in sync. Trigger: any change to the approval-parking or `needs_approval` logic.
+- **AC6 test bypasses dispatch path** — no `pending_learnings` / `build_dream_prompt` / `dispatch_turn_job` in the 10.3 dream test; only `_apply_proposed_ops → apply_memory_op` proven. Full dispatch integration is optional `-m live` smoke territory.
+- **No test asserting HEARTBEAT/DREAM absent from rewritable op set** — structural guarantee (no op type exists). Trigger: if a future story adds a `rewrite_heartbeat` or `rewrite_dream` op and forgets to gate it.
+
+---
+
 ## Deferred from: code review of 10-1-persona-files-seed-and-prompt-read (2026-06-25)
 
 - **Persona read accessors (`read_instructions/soul/identity/user`) use `.read_text()` without `encoding="utf-8"`** — pre-existing pattern across the whole file (`read_about`, `read_summary`, `read_directive` are identical). New accessors mirror `read_about` exactly per spec. No real risk (Pi is UTF-8 locale; BOT_INSTRUCTIONS.md is ASCII-safe). Trigger: a future encoding-hygiene pass that adds `encoding="utf-8"` to ALL read_text() calls in `core/memory.py` uniformly.
@@ -326,3 +338,9 @@ All five items are pre-existing issues in `faces.py` or `worker/worker.py` — n
 - **`_read_capped` peak-RAM may exceed the byte cap by one server chunk** [`shelldon/worker/tools.py:_read_capped`] — the break fires after a chunk pushes `total >= _MAX_TOOL_OUTPUT_CHARS`; peak in-memory allocation is `cap + max_chunk_size`. On a server sending large chunks (e.g. 1MB), up to ~2MB could accumulate before break. Not fixable without controlling httpx's internal chunk granularity. Trigger: if large-body fetches cause OOM on the Pi in practice.
 - **`authorized_keys`, `known_hosts`, `.netrc` not in `_deny_sensitive` blocklist** [`shelldon/worker/tools.py:_deny_sensitive`] — pre-existing omission not introduced by 9.6; AC4 defines a specific scope (`.pem`/`.key`/`id_*`/`.env.*`) that doesn't include SSH auth files or `.netrc`. These are readable via `read_file` if inside the workspace jail. Trigger: next touch of `_deny_sensitive` or if credential-exposure concerns broaden.
 - **SIGKILL on clean-exit process group may affect synchronous child processes** [`shelldon/worker/tools.py:_run_subprocess`] — `finally: _kill_pgroup(pgid)` runs on every exit path (specified in AC2 for orphan cleanup). Git hooks and any synchronous child that has not yet exited when `communicate()` returns (e.g., a slow hook) would be SIGKILLed. In practice, git hooks complete before `communicate()` returns. Trigger: if hooks or expected child processes are silently killed in real usage.
+
+
+## Deferred from: code review of 10-2-bot-write-ops-awareness-and-gated-directive (2026-06-25)
+
+- **Guardrail checks opening ```ops fence token only, not closing** [`shelldon/core/memory.py:_apply_rewrite_instructions`] — `_REQUIRED_INSTRUCTION_MARKERS` includes `` "```ops" `` (opening fence) but not the closing `` "```" ``; a rewrite with `\`\`\`ops` but no closing fence satisfies the check yet produces a malformed ops section. Spec explicitly requires substring check for the opening token only; working as designed. Trigger: if a model produces a dangling ops section that causes parse_reply to misbehave.
+- **Proactive-unattended directive drop has no explicit dedicated test** [`tests/test_persona_ops.py`] — AC6 says both dream and proactive turns drop `rewrite_directive`; the test only names "dream". Same `_current_turn_is_owner = False` code path (set via `_start_turn` with record_owner_text=PROACTIVE_OWNER_MARKER) handles both. Trigger: if AC6 coverage is ever audited for completeness.
