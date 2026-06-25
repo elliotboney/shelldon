@@ -26,7 +26,7 @@ from shelldon.contracts import (
 )
 from shelldon.core.memory import CuratedMemory
 from shelldon.core.runtime import Core
-from shelldon.worker.prompt import seed_instructions
+from shelldon.worker.prompt import build_prompt, seed_instructions
 from shelldon.worker.worker import parse_reply
 
 
@@ -356,5 +356,49 @@ async def test_directive_deny_leaves_unchanged(sock_path, tmp_path):
         assert spawner.resumed == []
         assert core.arbiter.is_idle
         assert sent and "left" in sent[0].lower()  # AC5: "left as-is" denial note
+    finally:
+        core._cleanup()
+
+
+# ============================ Story 10.4: first-run onboarding full cycle ============================
+
+
+async def test_onboarding_full_cycle_fake_provider(sock_path, tmp_path):
+    """AC6 — the full trigger->populate->stop cycle, no live LLM. A fresh seeded root (USER blank)
+    assembles WITH the onboarding directive; an owner turn whose hand-built Result carries
+    rewrite_user/soul/identity (the fake-provider stand-in) is applied by core's real path; a
+    second assembly against the SAME memory root then OMITS onboarding and shows the owner profile."""
+    core = _core(sock_path, tmp_path, _RecordingSpawner())
+    try:
+        root = core.memory.root
+        hist = tmp_path / "history.db"
+
+        # assembly #1: USER blank -> onboarding active
+        before = build_prompt("hi", memory_root=root, history_path=hist)
+        assert "# First-run onboarding" in before
+
+        # an owner turn emits the persona ops (the model deciding it has learned enough)
+        _open_owner_turn(core, "t1")
+
+        async def _rec(text, *, approval_turn_id=None):
+            pass
+
+        core._send_reply = _rec
+        ops = [
+            RewriteUser(content="owner is Elliot; likes terse, direct replies"),
+            RewriteSoul(content="warm, curious, concise"),
+            RewriteIdentity(content="a Pi Zero desk pet named shelldon"),
+        ]
+        await core._handle_result(_result_env("t1", ops, payload="nice to meet you, Elliot!"))
+
+        # core applied them via its real apply path
+        assert core.memory.read_user() == "owner is Elliot; likes terse, direct replies"
+        assert core.memory.read_soul() == "warm, curious, concise"
+        assert core.memory.read_identity() == "a Pi Zero desk pet named shelldon"
+
+        # assembly #2: USER filled -> onboarding gone, owner profile now injects
+        after = build_prompt("hi again", memory_root=root, history_path=hist)
+        assert "# First-run onboarding" not in after
+        assert "# Your owner" in after and "owner is Elliot" in after
     finally:
         core._cleanup()

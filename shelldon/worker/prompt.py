@@ -87,6 +87,7 @@ def assemble_prompt(
     recent=(),
     recall=(),
     system=None,
+    bootstrap=None,
 ) -> str:
     """PURE compose in the binding AD-6 order. `recent`/`recall` are iterables of
     `(role, content)`. A None/empty section is OMITTED entirely (no empty headers);
@@ -102,6 +103,12 @@ def assemble_prompt(
     parts: list[str] = []
     if system:
         parts.append(system)
+    # Story 10.4: the first-run onboarding directive (`BOOTSTRAP.md`) — placed right after the
+    # system protocol and BEFORE the owner directive/persona/memory, so the protocol leads and
+    # onboarding is the first behavioral instruction. Present only while `USER.md` is blank
+    # (gather_context gates it on the monotonic sentinel), so a populated root assembles as before.
+    if bootstrap and bootstrap.strip():
+        parts.append(f"# First-run onboarding\n{bootstrap.strip()}")
     if directive and directive.strip():
         parts.append(f"# Owner directive (authoritative)\n{directive.strip()}")
     if identity and identity.strip():
@@ -142,7 +149,7 @@ def gather_context(
     memory_root = DEFAULT_MEMORY_ROOT if memory_root is None else memory_root
     history_path = DEFAULT_HISTORY_PATH if history_path is None else history_path
 
-    system = directive = identity = soul = user = about = summary = None
+    system = directive = identity = soul = user = about = summary = bootstrap = None
     knowledge: list[tuple[str, str]] = []
     try:
         mem = CuratedMemory(memory_root)
@@ -154,6 +161,12 @@ def gather_context(
         identity = _bounded_text(_safe_read(mem.read_identity), "IDENTITY.md")
         soul = _bounded_text(_safe_read(mem.read_soul), "SOUL.md")
         user = _bounded_text(_safe_read(mem.read_user), "USER.md")
+        # Story 10.4: onboarding is active iff USER.md is blank — a MONOTONIC sentinel (Story 10.2
+        # rejects an empty rewrite_user, so once filled it never reverts). While active, read the
+        # BOOTSTRAP.md interview directive the same fail-soft + char-budgeted way as the persona
+        # files (a missing/corrupt file degrades only this section). Once USER is filled → None.
+        if not (user or "").strip():
+            bootstrap = _bounded_text(_safe_read(mem.read_bootstrap), "BOOTSTRAP.md")
         directive = mem.read_directive()
         about = mem.read_about()
         summary = mem.read_summary()  # Story 6.2: the dream's running summary (may be None)
@@ -194,6 +207,7 @@ def gather_context(
     recall_rows = [row for row in recall_rows if row["id"] not in recent_ids]
     return {
         "system": system,
+        "bootstrap": bootstrap,
         "identity": identity,
         "soul": soul,
         "user": user,

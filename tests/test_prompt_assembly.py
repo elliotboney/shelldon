@@ -9,10 +9,11 @@ from datetime import UTC, datetime
 
 from shelldon.core.history import HistoryStore
 from shelldon.core.memory import CuratedMemory
-from shelldon.contracts import RewriteAbout, RewriteSummary
+from shelldon.contracts import RewriteAbout, RewriteSummary, RewriteUser
 from shelldon.worker.prompt import (
     _fts_query,
     assemble_prompt,
+    build_prompt,
     gather_context,
     seed_instructions,
 )
@@ -70,22 +71,26 @@ def test_empty_persona_sections_omitted():
     assert "# Your owner" not in out
 
 
-def test_golden_day_one_no_op_equals_prior_hardcoded(tmp_path):
+def test_golden_day_one_system_seed_plus_onboarding(tmp_path):
     """AC7 — the prompt assembled from SEED files (BOT_INSTRUCTIONS verbatim + empty
-    SOUL/IDENTITY/USER) is byte-identical to the prior hardcoded-constant prompt for the
-    same inputs. Moving the constant to a file changes nothing observable on day one.
+    SOUL/IDENTITY/USER) carries the verbatim system seed, the empty persona omitted, plus
+    (Story 10.4) the first-run onboarding directive — since USER.md ships blank, onboarding is
+    active on a freshly-seeded root.
 
-    `gather_context` over a freshly-seeded root yields `system`==BOT_INSTRUCTIONS, empty
-    persona (omitted), so the assembled prompt == `assemble_prompt(msg, system=seed_text)`."""
+    `gather_context` over a freshly-seeded root yields `system`==BOT_INSTRUCTIONS, empty persona
+    (omitted), and a non-None `bootstrap`, so the assembled prompt ==
+    `assemble_prompt(msg, system=seed_text, bootstrap=bootstrap_seed)`."""
     msg = "hello shelldon"
     ctx = gather_context(tmp_path / "memory", tmp_path / "h.db", msg)
     assembled = assemble_prompt(msg, **ctx)
-    # The prior behavior: a single system block (the BOT_INSTRUCTIONS seed) + the owner message.
-    expected = assemble_prompt(msg, system=seed_instructions())
+    # System seed + onboarding directive (10.4: blank USER -> onboarding) + the owner message.
+    expected = assemble_prompt(msg, system=seed_instructions(), bootstrap=ctx["bootstrap"])
     assert assembled == expected
-    # And the system block IS the verbatim repo seed.
+    # The system block IS the verbatim repo seed, and onboarding is present (USER blank).
     assert ctx["system"] == seed_instructions()
+    assert ctx["bootstrap"] is not None
     assert assembled.startswith(seed_instructions())
+    assert "# First-run onboarding" in assembled
     assert assembled.rstrip().endswith(msg)
 
 
@@ -315,3 +320,77 @@ def test_gather_reads_seeded_memory(tmp_path):
     ctx = gather_context(mem_root, tmp_path / "history.db", "hi", recent_n=5, recall_k=5)
     assert "Elliot" in ctx["about"]
     assert ctx["directive"] == "be kind"
+
+
+# --- Story 10.4: first-run onboarding (BOOTSTRAP.md injected while USER.md is blank) ---
+
+
+def test_assemble_onboarding_after_system_before_directive():
+    """AC4 — the pure assembler places the onboarding section right after the system block and
+    BEFORE directive/persona, with the owner message still last."""
+    out = assemble_prompt(
+        "hi",
+        system="SYS",
+        bootstrap="get to know your owner",
+        directive="obey the owner",
+        identity="i am shelldon",
+    )
+    i_sys = out.index("SYS")
+    i_boot = out.index("get to know your owner")
+    i_dir = out.index("obey the owner")
+    i_now = out.index("hi")
+    assert i_sys < i_boot < i_dir < i_now
+    assert "# First-run onboarding" in out
+    assert out.rstrip().endswith("hi")
+
+
+def test_assemble_blank_bootstrap_omitted():
+    """AC4 — a None/blank bootstrap is omitted entirely (no empty header)."""
+    assert "# First-run onboarding" not in assemble_prompt("hi", system="SYS", bootstrap=None)
+    assert "# First-run onboarding" not in assemble_prompt("hi", system="SYS", bootstrap="   ")
+
+
+def test_onboarding_active_while_user_blank(tmp_path):
+    """AC2 — a fresh seeded root (USER.md blank) -> gather returns a non-None bootstrap and
+    build_prompt injects the onboarding section, positioned after system and before the owner msg."""
+    root = tmp_path / "memory"
+    ctx = gather_context(root, tmp_path / "h.db", "hi")
+    assert ctx["bootstrap"] is not None and "rewrite_user" in ctx["bootstrap"]
+
+    out = build_prompt("hi there", memory_root=root, history_path=tmp_path / "h.db")
+    assert "# First-run onboarding" in out
+    i_sys = out.index(seed_instructions())
+    i_boot = out.index("# First-run onboarding")
+    i_now = out.index("hi there")
+    assert i_sys < i_boot < i_now
+
+
+def test_onboarding_stops_once_user_filled(tmp_path):
+    """AC3 — once core applies a rewrite_user (USER.md non-blank, the monotonic sentinel) gather
+    returns bootstrap=None, build_prompt OMITS onboarding, and the populated `# Your owner` appears."""
+    root = tmp_path / "memory"
+    CuratedMemory(root).apply_memory_op(RewriteUser(content="owner is Elliot, likes terse replies"))
+
+    ctx = gather_context(root, tmp_path / "h.db", "hi")
+    assert ctx["bootstrap"] is None
+    assert ctx["user"] == "owner is Elliot, likes terse replies"
+
+    out = build_prompt("hi", memory_root=root, history_path=tmp_path / "h.db")
+    assert "# First-run onboarding" not in out
+    assert "# Your owner" in out and "owner is Elliot" in out
+
+
+def test_onboarding_fail_soft_when_bootstrap_corrupt(tmp_path):
+    """AC5 — USER still blank but BOOTSTRAP.md is corrupt (non-UTF-8) -> read fails soft to None, the
+    onboarding section is omitted, the turn proceeds as a normal turn, never raises. (Corruption, not
+    deletion, because gather_context re-seeds an absent file on construction — a present-but-corrupt
+    file is never overwritten, so it exercises the worker's fail-soft read.)"""
+    root = tmp_path / "memory"
+    CuratedMemory(root)  # seed first
+    (root / "BOOTSTRAP.md").write_bytes(b"\xff\xfe bad bytes")  # present but undecodable
+
+    ctx = gather_context(root, tmp_path / "h.db", "hi")
+    assert ctx["bootstrap"] is None  # corrupt -> None, not a raise
+    out = build_prompt("hello", memory_root=root, history_path=tmp_path / "h.db")
+    assert "# First-run onboarding" not in out
+    assert out.rstrip().endswith("hello")

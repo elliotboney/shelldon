@@ -59,7 +59,9 @@ _PERSONA_SEED_FILES = ("BOT_INSTRUCTIONS.md", "SOUL.md", "IDENTITY.md", "USER.md
 #: persona files. UNLIKE the persona files they are NOT bot-rewritable (no `rewrite_*` op
 #: targets them) — they are prompt policy the owner may hand-edit, read at dispatch by
 #: `core/dispatch.py` and filled by the pure `core/proactive.py` builders.
-_PROMPT_TEMPLATE_SEED_FILES = ("HEARTBEAT.md", "DREAM.md")
+#: Story 10.4 — `BOOTSTRAP.md` is the first-run interview directive the WORKER injects while
+#: `USER.md` is blank; also a read-only, owner-editable prompt template (not a rewrite target).
+_PROMPT_TEMPLATE_SEED_FILES = ("HEARTBEAT.md", "DREAM.md", "BOOTSTRAP.md")
 
 #: The owner's authoritative doc — written ONLY via the owner-approval gate (Story 10.2),
 #: never autonomously (it is not a MemoryOp).
@@ -291,6 +293,17 @@ class CuratedMemory:
         dispatch and filled by `build_dream_prompt`. No write path; the owner may hand-edit.
         Fail-soft: absent or unreadable → `None` → builder fallback."""
         path = self._root / "DREAM.md"
+        try:
+            return path.read_text() if path.is_file() else None
+        except (OSError, UnicodeDecodeError):
+            return None
+
+    def read_bootstrap(self) -> str | None:
+        """The first-run interview directive `BOOTSTRAP.md` (Story 10.4), or `None` if absent. The
+        WORKER reads it and injects it while `USER.md` is blank, then stops once onboarding fills the
+        owner profile. No write path (not a rewrite-op target); the owner may hand-edit. Fail-soft:
+        absent or unreadable → `None` → onboarding section omitted, the turn proceeds normally."""
+        path = self._root / "BOOTSTRAP.md"
         try:
             return path.read_text() if path.is_file() else None
         except (OSError, UnicodeDecodeError):

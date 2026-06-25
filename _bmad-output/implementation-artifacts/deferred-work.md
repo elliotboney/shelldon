@@ -4,6 +4,13 @@ This file tracks work intentionally deferred from reviews, with reasons for why 
 
 ---
 
+## Deferred from: code review of 10-4-first-run-onboarding (2026-06-25)
+
+- **Proactive/dream turns inject BOOTSTRAP while USER blank** — spec §Dev Notes explicitly accepts this as "harmless, not worth special-casing." A dedicated test documenting the behavior could be added for clarity, but the design is intentional. Trigger: if a proactive-during-onboarding confusion report surfaces from real use.
+- **`read_user`/`read_soul`/`read_identity` missing `try/except` guard** — pre-existing inconsistency vs. `read_heartbeat`/`read_dream`/`read_bootstrap` (all have `OSError/UnicodeDecodeError → None`). Currently safe because `_safe_read` wraps all calls in `gather_context`. Trigger: next substantive change to persona accessor pattern in `core/memory.py`.
+
+---
+
 ## Deferred from: code review of 10-3-proactive-dream-prompts-to-files-and-autonomous-edit (2026-06-25)
 
 - **`_FALLBACK_DREAM` inner `except Exception` returns unformatted `{lines}`** — only fires if `_FALLBACK_DREAM.format(lines=lines)` raises, which can't happen with the current constant. Trigger: if `_FALLBACK_DREAM` is ever edited and the `{lines}` placeholder is removed.
