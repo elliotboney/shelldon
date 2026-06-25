@@ -84,6 +84,27 @@ def test_read_prompt_template_none_when_absent(tmp_path):
     assert mem.read_dream() is None
 
 
+def test_seed_bootstrap_on_absent_and_skip_present(tmp_path):
+    """Story 10.4 (AC1): BOOTSTRAP.md seeds copy-if-absent alongside the other prompt templates,
+    carries the warm interview directive, and a present (owner hand-edited) copy is never overwritten."""
+    root = tmp_path / "memory"
+    mem = CuratedMemory(root)  # empty root -> seeded
+    assert (root / "BOOTSTRAP.md").is_file()
+    assert "rewrite_user" in mem.read_bootstrap()  # the seed instructs saving the owner profile
+    # a present file (owner hand-edit) is left untouched on re-construction
+    (root / "BOOTSTRAP.md").write_text("OWNER BOOTSTRAP")
+    CuratedMemory(root)
+    assert mem.read_bootstrap() == "OWNER BOOTSTRAP"
+
+
+def test_read_bootstrap_none_when_absent(tmp_path):
+    """Story 10.4 (AC5): an absent BOOTSTRAP.md reads None (is_file guard) -> onboarding section is
+    omitted, the turn proceeds, never raises. Delete on the SAME instance (construction re-seeds)."""
+    mem = CuratedMemory(tmp_path / "memory")
+    (mem.root / "BOOTSTRAP.md").unlink()
+    assert mem.read_bootstrap() is None
+
+
 def test_read_persona_accessor_none_when_file_absent(tmp_path):
     """An accessor returns None for an absent file (the is_file guard, mirroring read_about) —
     so a failed/missing seed degrades the section, never raises. Delete after seeding, then read
