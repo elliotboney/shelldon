@@ -134,10 +134,55 @@ class RewriteSummary(msgspec.Struct, frozen=True, tag="rewrite_summary", forbid_
     content: str
 
 
+#: --- Story 10.2: the bot evolves its OWN persona files (mirror `RewriteAbout`) ---
+#: SOUL/IDENTITY/USER/BOT_INSTRUCTIONS are bot-owned curated files (Story 10.1); the bot
+#: rewrites them through the single-writer op path (AD-5), autonomously — same as `rewrite_about`.
+
+
+class RewriteSoul(msgspec.Struct, frozen=True, tag="rewrite_soul", forbid_unknown_fields=True):
+    """Replace the bot-owned `SOUL.md` (voice/values) with a freshly curated doc (Story 10.2)."""
+
+    content: str
+
+
+class RewriteIdentity(msgspec.Struct, frozen=True, tag="rewrite_identity", forbid_unknown_fields=True):
+    """Replace the bot-owned `IDENTITY.md` (who/hardware/mission) (Story 10.2)."""
+
+    content: str
+
+
+class RewriteUser(msgspec.Struct, frozen=True, tag="rewrite_user", forbid_unknown_fields=True):
+    """Replace the bot-owned `USER.md` (owner profile) (Story 10.2)."""
+
+    content: str
+
+
+class RewriteInstructions(msgspec.Struct, frozen=True, tag="rewrite_instructions", forbid_unknown_fields=True):
+    """Replace the bot-owned `BOT_INSTRUCTIONS.md` — the system instruction incl. the machine
+    protocol (Story 10.2). Core applies it through a VALIDATE-ON-APPLY guardrail that rejects a
+    rewrite dropping the required protocol markers (`THOUGHT:`/`FACE:`/the ops fence), so the bot
+    can re-voice its character but cannot break the contract `parse_reply` depends on."""
+
+    content: str
+
+
+class RewriteDirective(msgspec.Struct, frozen=True, tag="rewrite_directive", forbid_unknown_fields=True):
+    """A PROPOSED change to the owner's authoritative `DIRECTIVE.md` (Story 10.2). DELIBERATELY
+    NOT a `MemoryOp` — it has NO autonomous apply path. Core intercepts it in `_apply_proposed_ops`,
+    parks an owner approval (reusing the 9.3 plumbing), and applies it ONLY on the owner's Approve
+    (core sole writer, AD-5; single-authority on the constitution). Dropped on unattended/dream turns."""
+
+    content: str
+
+
 #: The closed memory-op union — the curated-memory ops core applies via
 #: `CuratedMemory.apply_memory_op`. `capture_learning`/`resolve_learning` (AD-6) are SEPARATE
-#: ops — they write sqlite, not the markdown tree — so they are NOT in this union.
-MemoryOp = Remember | RewriteAbout | LogEpisode | RewriteSummary
+#: ops — they write sqlite, not the markdown tree — so they are NOT in this union. `RewriteDirective`
+#: is also NOT here (Story 10.2): it is owner-approval-gated, never autonomously applied.
+MemoryOp = (
+    Remember | RewriteAbout | LogEpisode | RewriteSummary
+    | RewriteSoul | RewriteIdentity | RewriteUser | RewriteInstructions
+)
 
 
 class CaptureLearning(msgspec.Struct, frozen=True, tag="capture_learning", forbid_unknown_fields=True):
@@ -286,7 +331,12 @@ class ProposeTool(msgspec.Struct, frozen=True, tag="propose_tool", forbid_unknow
 #: `RequestToolApproval` references `ToolCall`/`Message`, defined above). Core dispatches each to
 #: its single writer — the approval-park path for `RequestToolApproval`, the self-coding gate for
 #: `ProposeTool`.
-ProposedOp = MemoryOp | AddFace | CaptureLearning | ResolveLearning | RequestToolApproval | ProposeTool
+#: `RewriteDirective` (Story 10.2) is in `ProposedOp` (the bot MAY propose it) but NOT in `MemoryOp`
+#: (core never applies it autonomously) — it is intercepted + owner-approval-gated in `_apply_proposed_ops`.
+ProposedOp = (
+    MemoryOp | AddFace | CaptureLearning | ResolveLearning | RequestToolApproval | ProposeTool
+    | RewriteDirective
+)
 
 
 class Job(msgspec.Struct, frozen=True, tag="job", forbid_unknown_fields=True):
@@ -517,6 +567,11 @@ __all__ = [
     "RewriteAbout",
     "LogEpisode",
     "RewriteSummary",
+    "RewriteSoul",
+    "RewriteIdentity",
+    "RewriteUser",
+    "RewriteInstructions",
+    "RewriteDirective",
     "MemoryOp",
     "CaptureLearning",
     "ResolveLearning",

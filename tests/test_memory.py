@@ -61,6 +61,29 @@ def test_seed_persona_is_idempotent_across_constructions(tmp_path):
     assert (root / "BOT_INSTRUCTIONS.md").read_text() == "EDITED"
 
 
+def test_seed_prompt_templates_on_absent_and_skip_present(tmp_path):
+    """Story 10.3: HEARTBEAT.md/DREAM.md seed copy-if-absent alongside the persona files, and a
+    present one is never overwritten. They are read accessors with no write path (owner-editable)."""
+    root = tmp_path / "memory"
+    mem = CuratedMemory(root)  # empty root -> both seeded
+    assert (root / "HEARTBEAT.md").is_file() and (root / "DREAM.md").is_file()
+    assert "{feeling}" in mem.read_heartbeat()  # the seed carries the fill placeholder
+    assert "{lines}" in mem.read_dream()
+    # a present file (owner hand-edit) is left untouched on re-construction
+    (root / "HEARTBEAT.md").write_text("OWNER HEARTBEAT")
+    CuratedMemory(root)
+    assert mem.read_heartbeat() == "OWNER HEARTBEAT"
+
+
+def test_read_prompt_template_none_when_absent(tmp_path):
+    """An absent HEARTBEAT/DREAM reads None (the is_file guard) -> the builder falls back, never raises."""
+    mem = CuratedMemory(tmp_path / "memory")
+    (mem.root / "HEARTBEAT.md").unlink()
+    (mem.root / "DREAM.md").unlink()
+    assert mem.read_heartbeat() is None
+    assert mem.read_dream() is None
+
+
 def test_read_persona_accessor_none_when_file_absent(tmp_path):
     """An accessor returns None for an absent file (the is_file guard, mirroring read_about) —
     so a failed/missing seed degrades the section, never raises. Delete after seeding, then read

@@ -1,4 +1,4 @@
-"""core/proactive — the self-initiated-turn prompt policies (Story 5.4 / 6.2, AD-1).
+"""core/proactive — the self-initiated-turn prompt policies (Story 5.4 / 6.2 / 10.3, AD-1).
 
 Pure functions that build the directive placed in the worker's owner-message slot when the
 pet acts *on its own* — no owner message to reply to. Two self-initiated turns share this
@@ -6,65 +6,95 @@ module: the **proactive musing** (5.4 — speak up, mood-tinted) and the **dream
 review pending learnings, promote/prune, summarize). Both framings are parenthetical
 SELF-PROMPTS so the worker knows it is initiating, not replying.
 
-The *policy* (what the directive says) lives here as pure, deterministic functions; the
-*driver* (when to fire, where to read state) lives in the scheduler/runtime. Pure, no I/O,
-no clock, never raises — mirrors `core/reflexes.py`. Extracting the dream directive here (it
-was inline in `runtime.py`) is the Epic 6 retro's safe slice of the `runtime.py` coupling
-reduction (the fuller dispatch/scheduler extract awaits Epic 7).
+Story 10.3 moved the prompt PROSE out of this module into editable seed files
+(`HEARTBEAT.md` / `DREAM.md`, seeded into the memory worktree by `core/memory.py` and read at
+dispatch by `core/dispatch.py`). The *policy* here stays pure: each builder takes the loaded
+template TEXT as an argument and fills it (`{feeling}` for the musing, `{lines}` for the dream).
+The file READ lives in the driver (`core/dispatch.py`, which already reads state/history) — NOT
+here. A missing/blank/malformed template degrades to a terse built-in fallback (logged) so a
+self-initiated turn never fails.
 
-LLM-free (AD-1): imports only stdlib.
+Pure: no clock, no file I/O, never raises — mirrors `core/reflexes.py`. LLM-free (AD-1):
+imports only stdlib.
 """
 
-#: The single tunable point. `{feeling}` is filled when a feeling is known; when it is
-#: not, the whole sentence is dropped so we never emit "You're feeling ." or the literal
-#: "None". Open-ended on purpose: "share whatever's on your mind" — the thought/observation/
-#: hello cue keeps it from collapsing into a forced question.
-_FEELING_SENTENCE = " You're feeling {feeling}."
+import logging
 
-_DIRECTIVE = (
+log = logging.getLogger("shelldon.core.proactive")
+
+#: `HEARTBEAT.md` packs the directive body (with `{feeling_sentence}`) and the optional feeling
+#: fragment (with `{feeling}`) in ONE file, split by a `\n---\n` sentinel — so ALL LLM-facing
+#: prose lives in the worktree, none hardcoded (Story 10.3). `build_proactive_prompt` partitions
+#: on this, fills the fragment when a feeling is known, then folds it into the body.
+_HEARTBEAT_SENTINEL = "\n---\n"
+
+#: Terse degrade fallbacks — used ONLY when the seed file is missing/blank/malformed (logged).
+#: NOT the real copy (that lives in the seed files); a safety net so a self-initiated turn never
+#: dies on a bad template (fail-soft, AD-1/4.1).
+_FALLBACK_PROACTIVE = (
     "(Self-prompt: there's no owner message to reply to right now — you're speaking up on "
-    "your own.{feeling_sentence} Share whatever's on your mind: a passing thought, "
-    "something you noticed, or just a hello. It doesn't have to be a question.)"
+    "your own. Share whatever's on your mind; it doesn't have to be a question.)"
 )
-
-
-def build_proactive_prompt(feeling: str | None) -> str:
-    """Build the open-ended proactive self-prompt directive.
-
-    When `feeling` is a non-empty string it is woven in ("You're feeling {feeling}.");
-    when it is None or blank/whitespace-only, a feeling-agnostic directive is returned with
-    no dangling "feeling ." fragment and never the literal "None". Pure and deterministic.
-    """
-    feeling_sentence = ""
-    if feeling and feeling.strip():
-        feeling_sentence = _FEELING_SENTENCE.format(feeling=feeling.strip())
-    return _DIRECTIVE.format(feeling_sentence=feeling_sentence)
-
-
-#: The dream directive (Story 6.2). Promotion targets are both surfaced by the 4.4 assembly
-#: (after the Epic 6 retro facts/ fix): a specific owner fact -> `remember` into facts/, broad
-#: self-knowledge -> `rewrite_about`. The driver (runtime) reads the pending learnings.
-_DREAM_DIRECTIVE = (
-    "(Dream-time reflection: no owner message to reply to. Below are things you've noticed "
-    "and jotted down. Decide which are durable enough to keep: for each one worth remembering, "
-    "save it — a specific fact about the owner with a `remember` op (collection facts), or "
-    "broader self-knowledge with `rewrite_about` — AND mark it resolved with `resolve_learning` "
-    'status "promoted"; for the rest, mark them `resolve_learning` status "pruned". Then refresh '
-    "a short running summary of recent conversation with `rewrite_summary` so your memory stays "
-    "compact. Finally, reply with a brief note that you tidied up.)\n\n"
+_FALLBACK_DREAM = (
+    "(Dream-time reflection: no owner message to reply to. For each pending learning below, "
+    "save the durable ones (`remember` / `rewrite_about`) and mark each `resolve_learning` "
+    '"promoted", else "pruned"; refresh `rewrite_summary`. Then reply with a brief note.)\n\n'
     "# Pending learnings\n{lines}"
 )
 
 
-def build_dream_prompt(pending: list[tuple[int, str, int]]) -> str:
-    """Build the dream directive from the pending learnings (Story 6.2). Each item is
-    `(id, observation, recurrence_count)`; the LLM resolves each by the baked `id`. Returns
-    `""` when nothing is pending (→ the dispatch skips, no dream, no spend). An observation's
-    newlines are flattened so each learning stays ONE line (the id<->text association can't
-    scramble). Pure, deterministic, never raises."""
+def build_proactive_prompt(feeling: str | None, template: str | None = None) -> str:
+    """Build the open-ended proactive self-prompt from `template` (the `HEARTBEAT.md` text).
+
+    `template` carries the directive body + the optional feeling fragment, split by the
+    `\\n---\\n` sentinel. A known `feeling` is woven in ("You're feeling {feeling}."); None or
+    blank/whitespace-only drops the whole sentence (never "feeling ." or the literal "None").
+    A missing/blank/malformed `template` degrades to `_FALLBACK_PROACTIVE` (logged). Pure,
+    deterministic, never raises."""
+    if not template or not template.strip():
+        log.warning("HEARTBEAT template missing/blank — using fallback proactive directive")
+        return _FALLBACK_PROACTIVE
+    body, sep, frag = template.partition(_HEARTBEAT_SENTINEL)
+    feeling_sentence = ""
+    if feeling and feeling.strip():
+        if not sep:
+            log.warning("HEARTBEAT template lacks sentinel — feeling will not be woven")
+        else:
+            try:
+                feeling_sentence = frag.rstrip("\n").format(feeling=feeling.strip())
+            except (KeyError, IndexError, ValueError):
+                feeling_sentence = ""
+    if feeling_sentence and "{feeling_sentence}" not in body:
+        # An owner edit dropped the body's fill slot — the woven feeling would silently vanish.
+        # Surface it (the directive still renders, just mood-less) rather than dropping it quietly.
+        log.warning("HEARTBEAT body lacks {feeling_sentence} slot — mood not woven into this turn")
+    try:
+        return body.format(feeling_sentence=feeling_sentence)
+    except (KeyError, IndexError, ValueError):
+        log.warning("HEARTBEAT template malformed — using fallback proactive directive")
+        return _FALLBACK_PROACTIVE
+
+
+def build_dream_prompt(pending: list[tuple[int, str, int]], template: str | None = None) -> str:
+    """Build the dream directive from `template` (the `DREAM.md` text) and the pending learnings
+    (Story 6.2). Each item is `(id, observation, recurrence_count)`; the LLM resolves each by the
+    baked `id`. Returns `""` when nothing is pending (→ the dispatch skips, no dream, no spend) —
+    checked BEFORE the template so an empty dream needs no file. An observation's newlines are
+    flattened so each learning stays ONE line (the id<->text association can't scramble). A
+    missing/blank/malformed template degrades to `_FALLBACK_DREAM` (logged). Pure, never raises."""
     if not pending:
         return ""
     lines = "\n".join(
         f"- [id={lid}] {' '.join(obs.split())} (seen {count}×)" for lid, obs, count in pending
     )
-    return _DREAM_DIRECTIVE.format(lines=lines)
+    if not template or not template.strip() or "{lines}" not in template:
+        # No template, or an owner edit dropped the `{lines}` slot — without it the pending
+        # learnings would silently never reach the model (it can't resolve ids it can't see).
+        # Fall to the fallback, which DOES bake the learnings in, rather than drop them quietly.
+        log.warning("DREAM template missing/blank or lacks {lines} — using fallback dream directive")
+        return _FALLBACK_DREAM.format(lines=lines)
+    try:
+        return template.format(lines=lines)
+    except (KeyError, IndexError, ValueError):
+        log.warning("DREAM template malformed — using fallback dream directive")
+        return _FALLBACK_DREAM.format(lines=lines)
