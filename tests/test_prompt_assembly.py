@@ -11,10 +11,10 @@ from shelldon.core.history import HistoryStore
 from shelldon.core.memory import CuratedMemory
 from shelldon.contracts import RewriteAbout, RewriteSummary
 from shelldon.worker.prompt import (
-    SYSTEM_INSTRUCTION,
     _fts_query,
     assemble_prompt,
     gather_context,
+    seed_instructions,
 )
 
 
@@ -24,20 +24,69 @@ from shelldon.worker.prompt import (
 def test_order_is_directive_about_recent_recall_current():
     out = assemble_prompt(
         "what now?",
+        system="SYS-INSTRUCTION",
         directive="obey the owner",
         about="i am shelldon",
         recent=[("owner", "earlier hi"), ("pet", "earlier hello")],
         recall=[("owner", "long ago fact")],
     )
     # Each section appears, in the binding AD-6 order.
+    i_sys = out.index("SYS-INSTRUCTION")
     i_dir = out.index("obey the owner")
     i_about = out.index("i am shelldon")
     i_recent = out.index("earlier hi")
     i_recall = out.index("long ago fact")
     i_now = out.index("what now?")
-    assert i_dir < i_about < i_recent < i_recall < i_now
-    assert SYSTEM_INSTRUCTION in out  # system instruction present
+    assert i_sys < i_dir < i_about < i_recent < i_recall < i_now
     assert out.rstrip().endswith("what now?")  # current message is last
+
+
+def test_persona_order_identity_soul_user_after_directive_before_about():
+    """Story 10.1 — the persona files inject right after the authoritative directive and
+    before about/knowledge/recall, so persona shapes every reply (binding AD-6 order)."""
+    out = assemble_prompt(
+        "now?",
+        system="SYS",
+        directive="obey the owner",
+        identity="i am shelldon on a Pi",
+        soul="curious and warm",
+        user="owner is Elliot",
+        about="self summary",
+    )
+    i_dir = out.index("obey the owner")
+    i_identity = out.index("i am shelldon on a Pi")
+    i_soul = out.index("curious and warm")
+    i_user = out.index("owner is Elliot")
+    i_about = out.index("self summary")
+    assert i_dir < i_identity < i_soul < i_user < i_about
+    assert "# Your identity" in out and "# Your soul" in out and "# Your owner" in out
+
+
+def test_empty_persona_sections_omitted():
+    """Day-one parity hinge — empty/blank persona files contribute NO section (no empty headers)."""
+    out = assemble_prompt("hi", system="SYS", identity="", soul="   ", user=None)
+    assert "# Your identity" not in out
+    assert "# Your soul" not in out
+    assert "# Your owner" not in out
+
+
+def test_golden_day_one_no_op_equals_prior_hardcoded(tmp_path):
+    """AC7 — the prompt assembled from SEED files (BOT_INSTRUCTIONS verbatim + empty
+    SOUL/IDENTITY/USER) is byte-identical to the prior hardcoded-constant prompt for the
+    same inputs. Moving the constant to a file changes nothing observable on day one.
+
+    `gather_context` over a freshly-seeded root yields `system`==BOT_INSTRUCTIONS, empty
+    persona (omitted), so the assembled prompt == `assemble_prompt(msg, system=seed_text)`."""
+    msg = "hello shelldon"
+    ctx = gather_context(tmp_path / "memory", tmp_path / "h.db", msg)
+    assembled = assemble_prompt(msg, **ctx)
+    # The prior behavior: a single system block (the BOT_INSTRUCTIONS seed) + the owner message.
+    expected = assemble_prompt(msg, system=seed_instructions())
+    assert assembled == expected
+    # And the system block IS the verbatim repo seed.
+    assert ctx["system"] == seed_instructions()
+    assert assembled.startswith(seed_instructions())
+    assert assembled.rstrip().endswith(msg)
 
 
 def test_missing_sections_are_omitted_not_blank():
@@ -236,6 +285,26 @@ def test_gather_corrupt_about_degrades_not_raises(tmp_path):
     ctx = gather_context(mem_root, tmp_path / "history.db", "hi", recent_n=5, recall_k=5)
     assert ctx["about"] is None  # corrupt file degraded to None
     assert ctx["directive"] == "be kind"  # the readable file still came through
+
+
+def test_gather_corrupt_persona_degrades_only_its_section(tmp_path):
+    """Story 10.1 AC6 — a corrupt (non-UTF-8) SOUL.md degrades ONLY soul; the system
+    instruction + other persona sections still come through (independent fail-soft)."""
+    mem_root = tmp_path / "memory"
+    CuratedMemory(mem_root)  # seed the persona files first
+    (mem_root / "SOUL.md").write_bytes(b"\xff\xfe not utf-8")  # corrupt one file
+
+    ctx = gather_context(mem_root, tmp_path / "history.db", "hi", recent_n=5, recall_k=5)
+    assert ctx["soul"] is None  # corrupt section degraded
+    assert ctx["system"] and "You are shelldon" in ctx["system"]  # system survived
+    assert ctx["identity"] == "" and ctx["user"] == ""  # sibling persona reads survived
+
+
+def test_gather_seeds_and_reads_persona_system(tmp_path):
+    """Story 10.1 — gather over a fresh root seeds + reads BOT_INSTRUCTIONS into `system`."""
+    ctx = gather_context(tmp_path / "memory", tmp_path / "h.db", "hi")
+    assert ctx["system"] == seed_instructions()
+    assert ctx["soul"] == "" and ctx["identity"] == "" and ctx["user"] == ""
 
 
 def test_gather_reads_seeded_memory(tmp_path):

@@ -4,6 +4,12 @@ This file tracks work intentionally deferred from reviews, with reasons for why 
 
 ---
 
+## Deferred from: code review of 10-1-persona-files-seed-and-prompt-read (2026-06-25)
+
+- **Persona read accessors (`read_instructions/soul/identity/user`) use `.read_text()` without `encoding="utf-8"`** — pre-existing pattern across the whole file (`read_about`, `read_summary`, `read_directive` are identical). New accessors mirror `read_about` exactly per spec. No real risk (Pi is UTF-8 locale; BOT_INSTRUCTIONS.md is ASCII-safe). Trigger: a future encoding-hygiene pass that adds `encoding="utf-8"` to ALL read_text() calls in `core/memory.py` uniformly.
+
+---
+
 ## 🔭 Deliberate tradeoffs to revisit (post-epic / trigger-gated)
 
 > Conscious architecture choices that are RIGHT for now but should be reconsidered if a specific trigger fires. Unlike the per-story review punts below (picked up mid-epic), these are "look again once the daily-driver is real / all epics are done." Check this section during epic retrospectives.

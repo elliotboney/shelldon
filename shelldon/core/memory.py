@@ -24,6 +24,7 @@ import os
 import re
 import tempfile
 import unicodedata
+from importlib import resources
 from pathlib import Path
 
 from shelldon.contracts import LogEpisode, MemoryOp, Remember, RewriteAbout, RewriteSummary
@@ -33,6 +34,15 @@ log = logging.getLogger("shelldon.core.memory")
 #: Default memory root — one tree beside the state checkpoint. Always injectable;
 #: tests pass a `tmp_path` root and never touch real `$HOME`.
 DEFAULT_MEMORY_ROOT = Path.home() / ".shelldon" / "memory"
+
+#: Story 10.1 — the persona lives in markdown the bot reads every turn, NOT a hardcoded
+#: constant. Pristine seed templates ship in the `shelldon.persona` package; on init they
+#: are copied into the memory root copy-if-absent (the `faces.FaceRegistry.load` idiom),
+#: so the owner/bot can then edit the worktree copy without touching source. `BOT_INSTRUCTIONS.md`
+#: carries the system instruction (the only LLM-facing copy); `SOUL/IDENTITY/USER` ship empty
+#: and are populated by onboarding (Story 10.4). The repo template doubles as the recovery seed.
+_PERSONA_PKG = "shelldon.persona"
+_PERSONA_SEED_FILES = ("BOT_INSTRUCTIONS.md", "SOUL.md", "IDENTITY.md", "USER.md")
 
 #: The owner's authoritative doc — read as authoritative, NEVER written by the bot.
 _DIRECTIVE_NAME = "DIRECTIVE.md"
@@ -84,10 +94,28 @@ class CuratedMemory:
 
     def __init__(self, root=None) -> None:
         self._root = Path(root) if root is not None else DEFAULT_MEMORY_ROOT
+        self._seed_persona()
 
     @property
     def root(self) -> Path:
         return self._root
+
+    def _seed_persona(self) -> None:
+        """Copy any ABSENT persona seed file from the shipped templates into the root —
+        the copy-if-absent half of `faces.FaceRegistry.load`'s absent→seed behavior. A
+        present file is left untouched (never overwrites an owner/bot edit). FAILS SOFT:
+        a missing template or write error logs and is swallowed — construction NEVER raises
+        (this runs at core boot AND per fork worker; a failed seed just degrades that section
+        later). Only ADDS absent files, so core stays the sole writer of present files (AD-5)."""
+        for name in _PERSONA_SEED_FILES:
+            dest = self._root / name
+            if dest.exists():
+                continue
+            try:
+                text = resources.files(_PERSONA_PKG).joinpath(name).read_text(encoding="utf-8")
+                _atomic_write_text(dest, text)
+            except (OSError, ModuleNotFoundError, UnicodeError) as exc:
+                log.warning("persona seed for %s failed (%s); skipping", name, exc)
 
     def apply_memory_op(self, op: MemoryOp) -> None:
         """Validate `op` against its closed schema, then atomically write the tree —
@@ -154,6 +182,31 @@ class CuratedMemory:
         """The bot-owned running summary `summary.md`, or `None` if never written (Story 6.2).
         The 4.4 prompt assembly injects it so later turns carry bounded context."""
         path = self._root / "summary.md"
+        return path.read_text() if path.is_file() else None
+
+    def read_instructions(self) -> str | None:
+        """The system instruction `BOT_INSTRUCTIONS.md` (Story 10.1) — the persona's machine
+        contract (THOUGHT/FACE/ops), seeded from the repo template, injected as the prompt's
+        system slot (replacing the old hardcoded `SYSTEM_INSTRUCTION`). `None` if absent."""
+        path = self._root / "BOT_INSTRUCTIONS.md"
+        return path.read_text() if path.is_file() else None
+
+    def read_soul(self) -> str | None:
+        """The bot-owned `SOUL.md` (voice/values), or `None` if absent (Story 10.1). Ships empty;
+        filled by onboarding (10.4). Injected after IDENTITY; omitted while empty."""
+        path = self._root / "SOUL.md"
+        return path.read_text() if path.is_file() else None
+
+    def read_identity(self) -> str | None:
+        """The bot-owned `IDENTITY.md` (who/hardware/mission), or `None` if absent (Story 10.1).
+        Ships empty; filled by onboarding (10.4). Injected after DIRECTIVE; omitted while empty."""
+        path = self._root / "IDENTITY.md"
+        return path.read_text() if path.is_file() else None
+
+    def read_user(self) -> str | None:
+        """The bot-owned `USER.md` (owner profile), or `None` if absent (Story 10.1). Ships empty;
+        the onboarding (10.4) is the mechanism that creates it. Injected after SOUL; omitted while empty."""
+        path = self._root / "USER.md"
         return path.read_text() if path.is_file() else None
 
     def read_collection(self, collection: str) -> list[tuple[str, str]]:

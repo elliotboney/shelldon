@@ -1,12 +1,14 @@
 """Worker-side prompt assembly (AD-3 / AD-6): the worker composes each turn's prompt
 from the durable memory it can read — read-only — before proxying to the broker.
 
-Order is binding (AD-6, spine line 100): a system instruction, then `DIRECTIVE.md`
-(the owner's authoritative constitution, first), then `about.md` (the bot's
-self-summary), then the recent conversation window, then FTS5 recall, then the current
-owner message (last). The worker reads via the read-only handles built in 4.1/4.2
-(`history.open_readonly`, `CuratedMemory.read_about/read_directive`) and NEVER reads
-`vault/` (AD-6, OS-enforced).
+Order is binding (AD-6, spine line 100): the system instruction (`BOT_INSTRUCTIONS.md`),
+then `DIRECTIVE.md` (the owner's authoritative constitution), then the persona files
+`IDENTITY.md`/`SOUL.md`/`USER.md` (Story 10.1), then `about.md` (the bot's self-summary),
+then the recent conversation window, then FTS5 recall, then the current owner message (last).
+Story 10.1 moved the persona OUT of a hardcoded `SYSTEM_INSTRUCTION` constant into seed
+markdown the worker reads each turn. The worker reads via the read-only handles built in
+4.1/4.2/10.1 (`history.open_readonly`, `CuratedMemory.read_instructions/identity/soul/user/
+about/directive`) and NEVER reads `vault/` (AD-6, OS-enforced).
 
 Split like the rest of the codebase: `assemble_prompt` is PURE (data in → string out,
 unit-tested without I/O, mirrors `parse_reply`); `gather_context` wraps the read-only
@@ -18,6 +20,7 @@ raised into the turn (best-effort parity with 4.1's guarded history write).
 import logging
 import re
 import sqlite3
+from importlib import resources
 
 from shelldon.core.history import DEFAULT_HISTORY_PATH, open_readonly
 from shelldon.core.memory import DEFAULT_MEMORY_ROOT, CuratedMemory
@@ -34,65 +37,27 @@ RECALL_LIMIT = 5
 #: logged count (never silently truncated), newest-by-name kept within budget.
 KNOWLEDGE_CHAR_BUDGET = 4000
 
+#: Char budget per persona section (Story 10.1 — BOT_INSTRUCTIONS/IDENTITY/SOUL/USER). The seed
+#: instruction is ~2.2KB and persona prose is small, but a runaway/bot-bloated file must not blow
+#: the 416MB-box context — over-budget text is truncated with a logged warning (never silent).
+PERSONA_CHAR_BUDGET = 8000
+
 #: Cap the FTS5 query term count so a pathologically long message can't build a giant
 #: MATCH expression.
 _MAX_QUERY_TERMS = 32
 
-#: The system instruction — the only LLM-facing copy in the story. Tells the pet how to
-#: reply and how to emit the OPTIONAL ops block (the fenced format 4.5's `parse_reply`
-#: consumes: a ```ops fence + newline + a JSON array of `"type"`-tagged ops). Asking for
-#: a spoken reply FIRST guards the "all-ops, empty payload" case (deferred-work #138).
-SYSTEM_INSTRUCTION = (
-    "You are shelldon, a small AI pet with a face on a little screen. Reply to your "
-    "owner naturally and briefly, in your own voice. Always say something back first. "
-    "Write in plain, natural language — do NOT add robotic sound effects (no '*beep boop*', "
-    "'*whirr*', 'Beep!') or asterisk stage-directions unless your owner explicitly asks.\n"
-    # B.3: a short inner THOUGHT for the e-ink caption strip — a distilled feeling/reflection
-    # about the conversation, SEPARATE from the spoken reply. The worker strips this line from
-    # what the owner sees; absent → the screen falls back to a truncation of the reply.
-    "End your reply with a single line `THOUGHT: <a few words>` — a brief inner thought or "
-    "feeling about the conversation to show on your screen (keep it under ~6 words). It is "
-    "separate from what you say to your owner, who never sees this line.\n"
-    # B.3: the model picks its own expression as a REACTION to the message (v1 FACE: parity),
-    # rather than the face just tracking ambient mood. Core validates against this palette and
-    # falls back to the default reply face on anything else; the owner never sees this line.
-    "Also add a line `FACE: <one of: happy, excited, curious, content, grumpy, sleepy>` — the "
-    "expression that matches your reaction to this message. The owner never sees this line.\n"
-    # Story 9.1/9.2: native function-calling. The model may call registered tools when they
-    # help — get_time, plus the FREE read-only/compute pack (read_file, list_dir, python_eval).
-    "You have tools you can call when they help — e.g. `get_time` for the current date/time, "
-    "`read_file`/`list_dir` to look at files in your workspace, and `python_eval` for a quick "
-    "calculation — instead of guessing.\n"
-    "You MAY also update your own memory by appending ONE fenced ops block AFTER your "
-    "reply — a JSON array of ops. Omit it if there is nothing worth remembering. For a "
-    "`remember` op, `collection` MUST be one of: facts, people, preferences, capabilities. "
-    "Example:\n"
-    "```ops\n"
-    '[{"type":"remember","collection":"facts","name":"favorite-db","content":"BigQuery"}]\n'
-    "```\n"
-    # Story 6.1: capture_learning is a cheap private jot (sqlite, not curated memory) — the
-    # model MAY emit it for a recurring observation worth consolidating later, optionally with
-    # a pattern_key so repeats dedup. Real-model uptake is unverifiable here (no live LLM); the
-    # parse->route->write->dedup mechanism is what 6.1 tests.
-    "You MAY also privately jot a recurring observation worth remembering later with a "
-    '`capture_learning` op (give a short `pattern_key` to dedup repeats), e.g. '
-    '{"type":"capture_learning","observation":"owner codes late at night","pattern_key":"night-owl"}.\n'
-    # Story 6.2: when DREAMING you review your pending learnings (each shown with an id) and
-    # decide their fate — promote the durable ones into memory (remember/rewrite_about) and
-    # mark them resolved, prune the rest, and keep a short running summary. Op formats below;
-    # real-model uptake is unverifiable here (no live LLM) — the apply mechanism is tested.
-    "When reflecting, you MAY resolve a reviewed learning with "
-    '{"type":"resolve_learning","id":3,"status":"promoted"} (or "pruned"), and rewrite your '
-    'running conversation summary with {"type":"rewrite_summary","content":"…"}.\n'
-    # Story 9.4: the pet can write its OWN new tool. The model emits a propose_tool op carrying the
-    # tool module source + a pytest test; core gates it (runs the test, blocks LLM/core imports)
-    # and, only after the owner approves, promotes it — then it's callable for free on later turns.
-    "You MAY write a NEW tool for yourself when a capability is missing, by emitting a "
-    '`propose_tool` op: {"type":"propose_tool","name":"…","code":"…","test":"…"}. The `code` must '
-    "define a `run(**kwargs) -> str` function plus module-level `DESCRIPTION` (a string) and "
-    "`PARAMS_SCHEMA` (a JSON-schema dict), import NO LLM libraries, and ship with a pytest `test` "
-    "that imports the module by its name and checks `run`. It only goes live after your owner approves it."
-)
+#: Story 10.1 — the system instruction is no longer a hardcoded constant; it lives in
+#: `BOT_INSTRUCTIONS.md`, seeded from the `shelldon.persona` package into the memory root and
+#: read per turn. This helper returns the pristine repo SEED text (the recovery source) — used by
+#: tests and live smokes that need the canonical system copy without reaching into a seeded root.
+def seed_instructions() -> str | None:
+    """The packaged `BOT_INSTRUCTIONS.md` seed text (the repo source of the system slot), or
+    `None` if the template is unreadable. Runtime reads the *seeded* copy via `read_instructions`;
+    this is the template, identical to a freshly-seeded root."""
+    try:
+        return resources.files("shelldon.persona").joinpath("BOT_INSTRUCTIONS.md").read_text(encoding="utf-8")
+    except (OSError, ModuleNotFoundError, UnicodeError):
+        return None
 
 #: Bare word tokens for a SAFE FTS5 query — raw owner text (quotes, parens, `*`, or
 #: operators like NEAR/AND/OR) can make `MATCH` raise a syntax error. We quote each term
@@ -113,23 +78,38 @@ def assemble_prompt(
     owner_message,
     *,
     directive=None,
+    identity=None,
+    soul=None,
+    user=None,
     about=None,
     knowledge=(),
     summary=None,
     recent=(),
     recall=(),
-    system=SYSTEM_INSTRUCTION,
+    system=None,
 ) -> str:
     """PURE compose in the binding AD-6 order. `recent`/`recall` are iterables of
     `(role, content)`. A None/empty section is OMITTED entirely (no empty headers);
     the current `owner_message` is always last. `knowledge` (Epic 6 retro) is the curated
     `facts/`+`people/` the dream promotes — durable knowledge placed right after `about`, so a
-    promoted fact actually shapes later replies. `summary` (Story 6.2) is the running summary."""
+    promoted fact actually shapes later replies. `summary` (Story 6.2) is the running summary.
+
+    Story 10.1: `system` is the file-sourced `BOT_INSTRUCTIONS.md` (no longer a hardcoded
+    constant), and `identity`/`soul`/`user` are the persona files injected right after the
+    owner's authoritative `directive` and before the volatile memory layers, so persona shapes
+    every reply. They ship empty (filled by onboarding, 10.4) → omitted while blank, which keeps
+    day-one assembly byte-identical to the prior hardcoded prompt."""
     parts: list[str] = []
     if system:
         parts.append(system)
     if directive and directive.strip():
         parts.append(f"# Owner directive (authoritative)\n{directive.strip()}")
+    if identity and identity.strip():
+        parts.append(f"# Your identity\n{identity.strip()}")
+    if soul and soul.strip():
+        parts.append(f"# Your soul\n{soul.strip()}")
+    if user and user.strip():
+        parts.append(f"# Your owner\n{user.strip()}")
     if about and about.strip():
         parts.append(f"# About you\n{about.strip()}")
     know_lines = [f"- {name}: {content.strip()}" for name, content in knowledge if content.strip()]
@@ -162,10 +142,18 @@ def gather_context(
     memory_root = DEFAULT_MEMORY_ROOT if memory_root is None else memory_root
     history_path = DEFAULT_HISTORY_PATH if history_path is None else history_path
 
-    directive = about = summary = None
+    system = directive = identity = soul = user = about = summary = None
     knowledge: list[tuple[str, str]] = []
     try:
         mem = CuratedMemory(memory_root)
+        # Story 10.1: the persona files (seeded copy-if-absent by CuratedMemory init), each
+        # char-budgeted so a runaway/bot-bloated file can't blow the box context. Read each
+        # INDEPENDENTLY fail-soft (AC6): one corrupt persona file degrades only its own section,
+        # never the others (a corrupt SOUL.md must not also drop the system instruction).
+        system = _bounded_text(_safe_read(mem.read_instructions), "BOT_INSTRUCTIONS.md")
+        identity = _bounded_text(_safe_read(mem.read_identity), "IDENTITY.md")
+        soul = _bounded_text(_safe_read(mem.read_soul), "SOUL.md")
+        user = _bounded_text(_safe_read(mem.read_user), "USER.md")
         directive = mem.read_directive()
         about = mem.read_about()
         summary = mem.read_summary()  # Story 6.2: the dream's running summary (may be None)
@@ -205,6 +193,10 @@ def gather_context(
     recent_ids = {row["id"] for row in recent_rows}
     recall_rows = [row for row in recall_rows if row["id"] not in recent_ids]
     return {
+        "system": system,
+        "identity": identity,
+        "soul": soul,
+        "user": user,
         "directive": directive,
         "about": about,
         "knowledge": knowledge,
@@ -212,6 +204,26 @@ def gather_context(
         "recent": [(row["role"], row["content"]) for row in recent_rows],
         "recall": [(row["role"], row["content"]) for row in recall_rows],
     }
+
+
+def _safe_read(reader) -> str | None:
+    """Call a persona read accessor, returning None on a missing/corrupt file (Story 10.1, AC6)
+    — so a single corrupt persona file degrades only its own section, never sibling reads."""
+    try:
+        return reader()
+    except (OSError, UnicodeError) as exc:
+        log.warning("persona read failed (%s); degrading that section", exc)
+        return None
+
+
+def _bounded_text(text: str | None, label: str) -> str | None:
+    """Cap a persona section at `PERSONA_CHAR_BUDGET` chars (Story 10.1). `None`/empty pass
+    through unchanged (omitted downstream); over-budget text is truncated with a logged
+    warning (never silent). Mirrors `_bounded_knowledge`'s drop-with-log discipline."""
+    if not text or len(text) <= PERSONA_CHAR_BUDGET:
+        return text
+    log.warning("persona %s over %d chars; truncating", label, PERSONA_CHAR_BUDGET)
+    return text[:PERSONA_CHAR_BUDGET]
 
 
 def _bounded_knowledge(items: list[tuple[str, str]]) -> list[tuple[str, str]]:
