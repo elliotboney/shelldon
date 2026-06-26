@@ -13,7 +13,11 @@ import msgspec
 import pytest
 
 from shelldon.contracts import LogEpisode, MemoryOp, Remember, RewriteAbout, RewriteSummary
-from shelldon.core.memory import CuratedMemory
+from shelldon.core.memory import (
+    _PERSONA_SEED_FILES,
+    _PROMPT_TEMPLATE_SEED_FILES,
+    CuratedMemory,
+)
 
 
 def _mem(tmp_path):
@@ -103,6 +107,55 @@ def test_read_bootstrap_none_when_absent(tmp_path):
     mem = CuratedMemory(tmp_path / "memory")
     (mem.root / "BOOTSTRAP.md").unlink()
     assert mem.read_bootstrap() is None
+
+
+def test_seed_reference_docs_on_absent_and_skip_present(tmp_path):
+    """Story 10.5 (AC3/AC4): TOOLS.md/ARCHITECTURE.md seed copy-if-absent alongside the other prompt
+    templates, carry real content, and a present (owner hand-edited) copy is never overwritten."""
+    root = tmp_path / "memory"
+    mem = CuratedMemory(root)  # empty root -> both seeded
+    assert (root / "TOOLS.md").is_file() and (root / "ARCHITECTURE.md").is_file()
+    assert "get_time" in mem.read_tools()  # the tool surface
+    assert "Pi Zero" in mem.read_architecture()  # the hardware answer
+    # a present file (owner hand-edit) is left untouched on re-construction
+    (root / "TOOLS.md").write_text("OWNER TOOLS")
+    CuratedMemory(root)
+    assert mem.read_tools() == "OWNER TOOLS"
+
+
+def test_read_reference_docs_none_when_absent(tmp_path):
+    """Story 10.5 (AC3): an absent TOOLS/ARCHITECTURE reads None (is_file guard) -> the lazy-load
+    section is omitted, never raises. Delete on the SAME instance (construction re-seeds)."""
+    mem = CuratedMemory(tmp_path / "memory")
+    (mem.root / "TOOLS.md").unlink()
+    (mem.root / "ARCHITECTURE.md").unlink()
+    assert mem.read_tools() is None
+    assert mem.read_architecture() is None
+
+
+def test_migration_is_non_destructive_on_populated_root(tmp_path):
+    """Story 10.5 (AC4) — Pi migration lands non-destructively: on a populated memory root (an
+    owner-written DIRECTIVE.md + existing about.md/facts/), constructing CuratedMemory adds ONLY
+    the absent seeds (incl. the new TOOLS/ARCHITECTURE) and leaves every existing file BYTE-for-byte
+    untouched. Copy-if-absent never shadows an owner edit."""
+    root = tmp_path / "memory"
+    (root / "facts").mkdir(parents=True)
+    existing = {
+        root / "about.md": "i am shelldon, owned by Elliot",
+        root / "facts" / "x.md": "the sky is blue",
+        root / "DIRECTIVE.md": "be kind and terse",  # hand-written by the owner
+    }
+    for path, text in existing.items():
+        path.write_text(text)
+
+    CuratedMemory(root)  # the "migration" — a fresh construction on the live root
+
+    # every pre-existing file is byte-for-byte untouched
+    for path, text in existing.items():
+        assert path.read_text() == text, f"{path.name} was modified by migration"
+    # and EVERY absent seed (all 9, incl. 10.5's reference docs) was added
+    for name in _PERSONA_SEED_FILES + _PROMPT_TEMPLATE_SEED_FILES:
+        assert (root / name).is_file(), f"{name} not seeded on migration"
 
 
 def test_read_persona_accessor_none_when_file_absent(tmp_path):

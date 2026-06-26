@@ -10,10 +10,14 @@ Errors are mapped to the two `provider` exception types (never a raw SDK excepti
 so the retry (1.4) and the fallback chain (Story 2.2) can key on them uniformly.
 """
 
+import logging
+
 import anthropic
 
 from shelldon.broker.provider import PermanentProviderError, TransientProviderError
 from shelldon.contracts import Completion, Message, ToolCall, ToolDefinition
+
+log = logging.getLogger("shelldon.broker")
 
 #: Native-Claude default model; GLM (Z.ai) is selected via the chain's `glm` preset.
 _DEFAULT_MODEL = "claude-sonnet-4-6"
@@ -88,6 +92,25 @@ class AnthropicProvider:
         # Z.ai base url makes the same adapter speak to GLM.
         self._client = anthropic.AsyncAnthropic(api_key=api_key, base_url=base_url)
 
+    def _log_cache_usage(self, resp) -> None:
+        """Story 10.5 (AC2) — log this turn's prompt-cache signal at INFO. The byte-stable persona
+        prefix is the cache lever (AD-3: the persona is re-sent every turn — a stable token prefix is
+        the only way to make that cheap); this log is the ONLY way to SEE whether it's hitting. Native
+        Claude returns `usage.cache_creation_input_tokens`/`cache_read_input_tokens`; GLM/z.ai may omit
+        them (getattr-guarded → nothing logged, never a crash), so the owner's live check (out-of-CI)
+        reveals the z.ai passthrough — no silent assumption either way."""
+        usage = getattr(resp, "usage", None)
+        if usage is None:
+            return
+        created = getattr(usage, "cache_creation_input_tokens", None)
+        read = getattr(usage, "cache_read_input_tokens", None)
+        if created is None and read is None:
+            return  # provider (e.g. GLM/z.ai) didn't surface cache fields this turn
+        log.info(
+            "provider %r cache usage: cache_creation_input_tokens=%s cache_read_input_tokens=%s",
+            self.name, created, read,
+        )
+
     async def complete(self, prompt: str) -> str:
         try:
             resp = await self._client.messages.create(
@@ -109,6 +132,7 @@ class AnthropicProvider:
             if exc.status_code >= 500:
                 raise TransientProviderError(type(exc).__name__) from exc
             raise PermanentProviderError(f"status {exc.status_code}") from exc
+        self._log_cache_usage(resp)
         text = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", None) == "text")
         if not text:
             # No usable text (tool-use-only, max-tokens-with-no-text, or refusal) —
@@ -141,4 +165,5 @@ class AnthropicProvider:
             if exc.status_code >= 500:
                 raise TransientProviderError(type(exc).__name__) from exc
             raise PermanentProviderError(f"status {exc.status_code}") from exc
+        self._log_cache_usage(resp)
         return normalize_anthropic_response(resp)

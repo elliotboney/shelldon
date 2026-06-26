@@ -4,6 +4,16 @@ This file tracks work intentionally deferred from reviews, with reasons for why 
 
 ---
 
+## Deferred from: code review of 10-5-cost-caching-lazyload-reference-and-pi-migration (2026-06-25)
+
+- **`_log_cache_usage` docstring is a 90-word design diary** [`shelldon/broker/anthropic_provider.py`] — content belongs in a commit message or design doc; trim on next substantive touch of this method.
+- **`read_tools`/`read_architecture` copy-paste methods** [`shelldon/core/memory.py`] — project pattern mirrors `read_heartbeat`/`read_dream`; extract to a parameterized helper if a 4th lazy-load reader is added.
+- **Phrase/keyword collection type inconsistency** (`tuple` vs `frozenset`) [`shelldon/worker/prompt.py:65-73`] — minor style debt; standardize on next change to the keyword sets.
+- **AC2 cache test only covers `complete()` not `complete_with_tools()`** [`tests/test_anthropic_provider.py`] — same `_log_cache_usage` method; add a second test exercising the tools path on next substantive change to provider tests.
+- **AC3 ordering test doesn't assert tools/arch come after directive/identity/soul** [`tests/test_prompt_assembly.py:414-429`] — byte-stable prefix test locks that order; tighten on next change to prompt assembly tests.
+- **Pre-existing: `read_about`/`read_summary` `UnicodeDecodeError` uncaught at method level** [`shelldon/core/memory.py:251,257`] — caught safely by `gather_context` outer `UnicodeError` handler; add accessor-level guard on next change to the persona accessor pattern.
+- **Pre-existing: `resp.content is None` guard missing** [`shelldon/broker/anthropic_provider.py`] — SDK contract trusted; add guard if SDK misbehavior is ever observed.
+
 ## Deferred from: code review of 10-4-first-run-onboarding (2026-06-25)
 
 - **Proactive/dream turns inject BOOTSTRAP while USER blank** — spec §Dev Notes explicitly accepts this as "harmless, not worth special-casing." A dedicated test documenting the behavior could be added for clarity, but the design is intentional. Trigger: if a proactive-during-onboarding confusion report surfaces from real use.
@@ -351,3 +361,12 @@ All five items are pre-existing issues in `faces.py` or `worker/worker.py` — n
 
 - **Guardrail checks opening ```ops fence token only, not closing** [`shelldon/core/memory.py:_apply_rewrite_instructions`] — `_REQUIRED_INSTRUCTION_MARKERS` includes `` "```ops" `` (opening fence) but not the closing `` "```" ``; a rewrite with `\`\`\`ops` but no closing fence satisfies the check yet produces a malformed ops section. Spec explicitly requires substring check for the opening token only; working as designed. Trigger: if a model produces a dangling ops section that causes parse_reply to misbehave.
 - **Proactive-unattended directive drop has no explicit dedicated test** [`tests/test_persona_ops.py`] — AC6 says both dream and proactive turns drop `rewrite_directive`; the test only names "dream". Same `_current_turn_is_owner = False` code path (set via `_start_turn` with record_owner_text=PROACTIVE_OWNER_MARKER) handles both. Trigger: if AC6 coverage is ever audited for completeness.
+
+## Deferred from: Story 10.5 (cost/caching/lazy-load/Pi migration) (2026-06-25)
+
+- **Explicit Anthropic `cache_control` breakpoint on the persona prefix** [`shelldon/broker/anthropic_provider.py`] — both egress paths (`complete(prompt:str)` / `complete_with_tools(messages,tools)`) send the persona embedded INSIDE a single content string, so there is no content-block boundary to attach `cache_control` to. Adding one requires a worker-emitted boundary marker split out by the adapter — and that marker must be stripped by EVERY provider surface (an OpenAI-shape adapter would otherwise send the literal sentinel to the model), making it a cross-cutting worker→broker→all-adapters contract change beyond the story's timebox. Design AC2 explicitly allows the defer. Shipped instead: byte-stable prefix (free OpenAI-surface + native-Claude-auto caching) + per-turn `usage.cache_*` logging. Fallback for GLM = lazy-load + the Story 5.2 budget, never a silent cap. Trigger: if a live GLM check shows persona-prefix tokens dominating the bill AND GLM honors `cache_control` over the z.ai proxy. See `epic-10-caching-findings-2026-06-25.md`.
+- **GLM/z.ai `cache_control` passthrough unverified** [owner live-check] — whether z.ai's Anthropic-compat proxy forwards `cache_control` / surfaces `usage.cache_*` is unverifiable in CI (no live LLM). The per-turn cache logging now reveals it on the owner's next live GLM turn (8.0 live-smoke model). Trigger: owner runs a paid GLM turn and reads the `shelldon.broker` cache-usage log line.
+
+## Deferred from: code review of 10-5 (2026-06-26)
+
+- **Git-tracked packaging test is the sole untracked-seed guard, skips without git** [`tests/test_packaging.py:test_persona_seeds_are_git_tracked`] — the 10.4 failure class (a seed added to `shelldon/persona/` + the seed-file lists but never `git add`ed → absent after the Pi's `git clone`) is detected ONLY by the git-tracked test: the importlib.resources test reads the working-tree dir and the wheel test bundles present-but-untracked files (hatchling includes filesystem files regardless of VCS), so both pass on an untracked seed. The git test `pytest.skip`s when `git` is absent (installed sdist, some CI sandboxes), so on such a runner the regression would pass green. Accepted: the project CI has git and the Pi deploys via `git clone`, so the guard holds where it matters; making the importlib/wheel tests catch untracked-without-git is non-trivial. Trigger: if CI ever runs without git in PATH, or a seed is added without `git add`.

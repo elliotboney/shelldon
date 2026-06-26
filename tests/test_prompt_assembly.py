@@ -5,6 +5,7 @@ order + section omission + de-dup; `_fts_query` for punctuation safety; `gather_
 for resilience (missing/locked history, FTS-hostile messages, missing memory).
 """
 
+import re
 from datetime import UTC, datetime
 
 from shelldon.core.history import HistoryStore
@@ -12,6 +13,7 @@ from shelldon.core.memory import CuratedMemory
 from shelldon.contracts import RewriteAbout, RewriteSummary, RewriteUser
 from shelldon.worker.prompt import (
     _fts_query,
+    _needs_reference,
     assemble_prompt,
     build_prompt,
     gather_context,
@@ -394,3 +396,159 @@ def test_onboarding_fail_soft_when_bootstrap_corrupt(tmp_path):
     out = build_prompt("hello", memory_root=root, history_path=tmp_path / "h.db")
     assert "# First-run onboarding" not in out
     assert out.rstrip().endswith("hello")
+
+
+# --- Story 10.5: lazy-loaded reference docs (TOOLS.md / ARCHITECTURE.md) ---
+
+
+def test_needs_reference_matches_keywords_and_phrases():
+    """The pure keyword matcher: tools/architecture questions trigger their doc; an ordinary
+    message triggers neither; whole-word match so 'control' doesn't fire on 'tool'."""
+    assert _needs_reference("what tools do you have?") == {"tools"}
+    assert _needs_reference("how do you work?") == {"architecture"}
+    assert _needs_reference("what can you do and how were you built?") == {"tools", "architecture"}
+    assert _needs_reference("can you control the lights?") == set()  # 'control' != 'tool'
+    assert _needs_reference("good morning shelldon") == set()
+    assert _needs_reference("how do you work on a raspberry pi?") == {"architecture"}  # phrases
+
+
+def test_needs_reference_no_false_positive_on_common_words():
+    """Review patch — bare ambiguous words must NOT inject ARCHITECTURE.md on ordinary chat (the
+    cost win). 'screen'/'ram'/'pi'/'cpu'/'raspberry' alone are everyday words, not internals questions."""
+    for ordinary in (
+        "my screen is cracked",
+        "can you ram it through for me",
+        "i love raspberry jam on toast",
+        "i ate a slice of pi",
+        "the cpu of the family is grandma",
+    ):
+        assert _needs_reference(ordinary) == set(), ordinary
+
+
+def test_assemble_reference_docs_after_persona_prefix_when_present():
+    """AC3 — when present, TOOLS/ARCHITECTURE sit AFTER `about` (the volatile region), never inside
+    the cached persona prefix, and before the owner message."""
+    out = assemble_prompt(
+        "what tools do you have?",
+        system="SYS",
+        about="self summary",
+        tools="get_time, read_file",
+        architecture="a Pi Zero 2W",
+    )
+    i_about = out.index("self summary")
+    i_tools = out.index("# Available tools")
+    i_arch = out.index("# How you work")
+    i_now = out.index("# Owner says now")
+    assert i_about < i_tools < i_arch < i_now
+    assert "get_time, read_file" in out and "a Pi Zero 2W" in out
+
+
+def test_assemble_reference_docs_omitted_when_none_or_blank():
+    out = assemble_prompt("hi", system="SYS", tools=None, architecture="   ")
+    assert "# Available tools" not in out and "# How you work" not in out
+
+
+def test_gather_injects_tools_only_on_matching_message(tmp_path):
+    root = tmp_path / "memory"
+    CuratedMemory(root)  # seeds TOOLS.md/ARCHITECTURE.md
+    ctx = gather_context(root, tmp_path / "h.db", "what tools can you use?")
+    assert ctx["tools"] is not None and "get_time" in ctx["tools"]
+    assert ctx["architecture"] is None  # not an architecture question
+
+
+def test_gather_injects_architecture_only_on_matching_message(tmp_path):
+    root = tmp_path / "memory"
+    CuratedMemory(root)
+    ctx = gather_context(root, tmp_path / "h.db", "how do you work on a raspberry pi?")
+    assert ctx["architecture"] is not None and "Pi Zero" in ctx["architecture"]
+    assert ctx["tools"] is None
+
+
+def test_gather_omits_reference_docs_on_ordinary_message(tmp_path):
+    """A non-matching message reads NEITHER doc (the cost win) and the prompt omits both sections."""
+    root = tmp_path / "memory"
+    CuratedMemory(root)
+    ctx = gather_context(root, tmp_path / "h.db", "good morning, how are you feeling?")
+    assert ctx["tools"] is None and ctx["architecture"] is None
+    out = build_prompt("good morning", memory_root=root, history_path=tmp_path / "h.db")
+    assert "# Available tools" not in out and "# How you work" not in out
+
+
+def test_gather_reference_doc_corrupt_degrades_to_none(tmp_path):
+    """A matching message but TOOLS.md is corrupt (non-UTF-8) -> _safe_read degrades to None -> the
+    section is omitted, the turn proceeds, never raises. (Corruption not deletion: gather_context
+    re-seeds an absent file on construction; a present-but-corrupt file is never overwritten.)"""
+    root = tmp_path / "memory"
+    CuratedMemory(root)  # seed first
+    (root / "TOOLS.md").write_bytes(b"\xff\xfe not utf-8")  # present but undecodable
+    ctx = gather_context(root, tmp_path / "h.db", "what tools do you have?")
+    assert ctx["tools"] is None
+    out = build_prompt("what tools do you have?", memory_root=root, history_path=tmp_path / "h.db")
+    assert "# Available tools" not in out
+
+
+# --- Story 10.5: byte-stable persona prefix (the free caching lever, AC1) ---
+
+#: The volatile section headers — everything BEFORE the earliest of these is the cache-prefix region.
+_VOLATILE_HEADERS = (
+    "# Available tools", "# How you work", "# What you know", "# Conversation so far",
+    "# Recent conversation", "# Things you remember", "# Owner says now",
+)
+_ISO_TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")
+_UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+
+def _prefix_of(prompt: str) -> str:
+    """Everything before the first volatile section header (the prefix that caches). Asserts a
+    volatile header IS present so the helper can't silently return the whole prompt (and pass a
+    byte-stability check that no longer isolates a prefix) if `_VOLATILE_HEADERS` ever drifts out of
+    sync with `assemble_prompt`'s emitted headers — every real assembly ends with `# Owner says now`."""
+    idxs = [prompt.index(h) for h in _VOLATILE_HEADERS if h in prompt]
+    assert idxs, "no volatile header found — _VOLATILE_HEADERS drifted from assemble_prompt"
+    return prompt[: min(idxs)]
+
+
+def test_persona_prefix_is_byte_stable_across_assemblies(tmp_path):
+    """AC1 — the persona prefix (system…about) is byte-identical across two assemblies of the same
+    root: it is composed purely from static file text, no per-request value interpolated anywhere."""
+    root = tmp_path / "memory"
+    CuratedMemory(root)
+    (root / "IDENTITY.md").write_text("i am shelldon on a Pi")
+    (root / "SOUL.md").write_text("curious and warm")
+    (root / "USER.md").write_text("owner is Elliot")  # non-blank -> onboarding off
+    (root / "about.md").write_text("a short self summary")
+    (root / "DIRECTIVE.md").write_text("be kind and honest")
+
+    p1 = build_prompt("hello there", memory_root=root, history_path=tmp_path / "h.db")
+    p2 = build_prompt("hello there", memory_root=root, history_path=tmp_path / "h.db")
+    assert _prefix_of(p1) == _prefix_of(p2)
+    # the prefix is substantial (carries the whole persona), not just the system line
+    assert "i am shelldon on a Pi" in _prefix_of(p1) and "be kind and honest" in _prefix_of(p1)
+    assert "# About you" in _prefix_of(p1)
+
+
+def test_persona_prefix_has_no_timestamp_or_uuid(tmp_path):
+    """AC1 guard — the silent-cache-invalidator: a future change that interpolates now()/a UUID into
+    the persona prefix breaks prefix caching silently. Assert the prefix carries no ISO ts / UUID."""
+    root = tmp_path / "memory"
+    CuratedMemory(root)
+    (root / "IDENTITY.md").write_text("i am shelldon")
+    (root / "about.md").write_text("self summary")
+    prefix = _prefix_of(build_prompt("hello there", memory_root=root, history_path=tmp_path / "h.db"))
+    assert not _ISO_TS_RE.search(prefix), "persona prefix carries a timestamp -> cache invalidator"
+    assert not _UUID_RE.search(prefix), "persona prefix carries a UUID -> cache invalidator"
+
+
+def test_volatile_content_stays_after_persona_prefix():
+    """AC1 — lock the AD-6 order: volatile content (knowledge/summary/recent/recall/owner msg) is
+    strictly AFTER the prefix, so the cached prefix never carries per-turn bytes."""
+    out = assemble_prompt(
+        "what now?",
+        system="SYS", directive="be kind", about="self summary",
+        knowledge=[("fav", "BigQuery")], summary="a summary",
+        recent=[("owner", "earlier")], recall=[("owner", "long ago")],
+    )
+    prefix = _prefix_of(out)
+    for volatile in ("BigQuery", "a summary", "earlier", "long ago", "what now?"):
+        assert volatile not in prefix
+    assert "self summary" in prefix  # `about` is the last prefix section
