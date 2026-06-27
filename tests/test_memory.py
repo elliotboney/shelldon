@@ -30,18 +30,19 @@ _PERSONA_FILES = ("BOT_INSTRUCTIONS.md", "SOUL.md", "IDENTITY.md", "USER.md")
 
 
 def test_seed_persona_on_absent_creates_all_files(tmp_path):
-    """An empty root → constructing CuratedMemory copies every persona seed in from the
-    shipped templates. BOT_INSTRUCTIONS carries the system text; SOUL/IDENTITY/USER ship empty."""
+    """An empty root → constructing CuratedMemory copies every persona seed in from the shipped
+    templates. BOT_INSTRUCTIONS carries the system text; SOUL/IDENTITY ship with STARTER content (a
+    bot is born with a soul + sense of self, then evolves them); only USER ships blank (the
+    onboarding trigger — its content is the per-owner profile, learned via the interview)."""
     root = tmp_path / "memory"
     assert not root.exists()
     mem = CuratedMemory(root)
     for name in _PERSONA_FILES:
         assert (root / name).is_file(), f"{name} not seeded"
-    # BOT_INSTRUCTIONS has the system copy; the others ship empty (filled by onboarding 10.4).
     assert "You are shelldon" in mem.read_instructions()
-    assert mem.read_soul() == ""
-    assert mem.read_identity() == ""
-    assert mem.read_user() == ""
+    assert "Soul" in mem.read_soul() and mem.read_soul().strip()  # starter personality
+    assert "shelldon" in mem.read_identity()  # starter self-facts
+    assert mem.read_user() == ""  # only USER ships blank (onboarding fills it)
 
 
 def test_seed_persona_skips_present_files(tmp_path):
