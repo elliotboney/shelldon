@@ -64,6 +64,36 @@ def seed_instructions() -> str | None:
 #: (defusing operators) and OR them, so recall is robust to arbitrary punctuation.
 _WORD_RE = re.compile(r"\w+", re.UNICODE)
 
+#: Story 10.5 — heavy reference docs (`TOOLS.md`/`ARCHITECTURE.md`) are LAZY-LOADED: injected only
+#: when the owner message is actually about the bot's tools or its internals, so they cost tokens
+#: only when relevant (v1's `needs_extra_context`). Single bare words (matched whole, case-folded)
+#: plus a few phrases — kept narrow so an ordinary chat message omits both docs entirely.
+_TOOLS_KEYWORDS = frozenset({"tool", "tools", "command", "commands", "capability", "capabilities"})
+_TOOLS_PHRASES = ("what can you do", "what do you do")
+#: Only UNAMBIGUOUS hardware/internals words — bare `pi`/`ram`/`screen`/`cpu`/`raspberry` were dropped
+#: (review): they collide with everyday chat ("my screen is cracked", "raspberry jam") and would
+#: inject ARCHITECTURE.md on unrelated turns, defeating the cost win. The real signal lives in the
+#: phrases (`"raspberry pi"`, `"e-ink"`, `"how do you work"`), which can't false-positive that way.
+_ARCH_KEYWORDS = frozenset({"hardware", "architecture", "internals", "eink", "systemd"})
+_ARCH_PHRASES = (
+    "how do you work", "how you work", "how were you built", "what are you running on",
+    "raspberry pi", "e-ink",
+)
+
+
+def _needs_reference(message: str) -> set[str]:
+    """PURE keyword match → which reference docs (`"tools"`/`"architecture"`) this owner message
+    warrants. Whole-word case-folded match (so "control" doesn't trigger on "tool") plus a few
+    phrases. An empty set means an ordinary message → neither doc injected (the cost win)."""
+    text = message.casefold()
+    words = set(_WORD_RE.findall(text))
+    out: set[str] = set()
+    if words & _TOOLS_KEYWORDS or any(p in text for p in _TOOLS_PHRASES):
+        out.add("tools")
+    if words & _ARCH_KEYWORDS or any(p in text for p in _ARCH_PHRASES):
+        out.add("architecture")
+    return out
+
 
 def _fts_query(message: str) -> str | None:
     """Turn an owner message into a safe FTS5 MATCH query (`"t1" OR "t2" …`), or None
@@ -88,6 +118,8 @@ def assemble_prompt(
     recall=(),
     system=None,
     bootstrap=None,
+    tools=None,
+    architecture=None,
 ) -> str:
     """PURE compose in the binding AD-6 order. `recent`/`recall` are iterables of
     `(role, content)`. A None/empty section is OMITTED entirely (no empty headers);
@@ -119,6 +151,14 @@ def assemble_prompt(
         parts.append(f"# Your owner\n{user.strip()}")
     if about and about.strip():
         parts.append(f"# About you\n{about.strip()}")
+    # Story 10.5: lazy-loaded reference docs — present ONLY when the owner message matched their
+    # trigger keywords (gather_context gates the read). Placed here, AFTER the byte-stable persona
+    # prefix (system…about) and WITH the volatile layers, so they never sit inside the cached
+    # prefix; omitted when None/blank like every other section.
+    if tools and tools.strip():
+        parts.append(f"# Available tools\n{tools.strip()}")
+    if architecture and architecture.strip():
+        parts.append(f"# How you work\n{architecture.strip()}")
     know_lines = [f"- {name}: {content.strip()}" for name, content in knowledge if content.strip()]
     if know_lines:
         parts.append("# What you know\n" + "\n".join(know_lines))
@@ -150,6 +190,7 @@ def gather_context(
     history_path = DEFAULT_HISTORY_PATH if history_path is None else history_path
 
     system = directive = identity = soul = user = about = summary = bootstrap = None
+    tools = architecture = None
     knowledge: list[tuple[str, str]] = []
     try:
         mem = CuratedMemory(memory_root)
@@ -173,6 +214,14 @@ def gather_context(
         # Epic 6 retro: surface the curated collections the dream promotes, so a promoted
         # fact actually shapes later replies (it was durable-but-invisible before). Bounded.
         knowledge = _bounded_knowledge(mem.read_all_collections())
+        # Story 10.5: lazy-load the heavy reference docs ONLY when the owner message warrants them
+        # (keyword match), char-budgeted + fail-soft like the persona files. A non-matching message
+        # reads neither (the cost win); an absent/corrupt doc degrades only its own section.
+        needs = _needs_reference(owner_message)
+        if "tools" in needs:
+            tools = _bounded_text(_safe_read(mem.read_tools), "TOOLS.md")
+        if "architecture" in needs:
+            architecture = _bounded_text(_safe_read(mem.read_architecture), "ARCHITECTURE.md")
     except (OSError, UnicodeError) as exc:
         # UnicodeError (a corrupt non-UTF-8 about.md/DIRECTIVE.md/summary.md) subclasses
         # ValueError, not OSError — so it must be listed explicitly here, or a decode error
@@ -213,6 +262,8 @@ def gather_context(
         "user": user,
         "directive": directive,
         "about": about,
+        "tools": tools,
+        "architecture": architecture,
         "knowledge": knowledge,
         "summary": summary,
         "recent": [(row["role"], row["content"]) for row in recent_rows],

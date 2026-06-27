@@ -61,7 +61,11 @@ _PERSONA_SEED_FILES = ("BOT_INSTRUCTIONS.md", "SOUL.md", "IDENTITY.md", "USER.md
 #: `core/dispatch.py` and filled by the pure `core/proactive.py` builders.
 #: Story 10.4 — `BOOTSTRAP.md` is the first-run interview directive the WORKER injects while
 #: `USER.md` is blank; also a read-only, owner-editable prompt template (not a rewrite target).
-_PROMPT_TEMPLATE_SEED_FILES = ("HEARTBEAT.md", "DREAM.md", "BOOTSTRAP.md")
+#: Story 10.5 — `TOOLS.md`/`ARCHITECTURE.md` are heavy reference docs the worker LAZY-LOADS by
+#: keyword (injected only when the owner message is about the bot's tools/internals), so they cost
+#: tokens only when relevant. Like the other prompt templates they are owner-editable, NOT rewrite
+#: targets (no `rewrite_*` op names them).
+_PROMPT_TEMPLATE_SEED_FILES = ("HEARTBEAT.md", "DREAM.md", "BOOTSTRAP.md", "TOOLS.md", "ARCHITECTURE.md")
 
 #: The owner's authoritative doc — written ONLY via the owner-approval gate (Story 10.2),
 #: never autonomously (it is not a MemoryOp).
@@ -304,6 +308,28 @@ class CuratedMemory:
         owner profile. No write path (not a rewrite-op target); the owner may hand-edit. Fail-soft:
         absent or unreadable → `None` → onboarding section omitted, the turn proceeds normally."""
         path = self._root / "BOOTSTRAP.md"
+        try:
+            return path.read_text() if path.is_file() else None
+        except (OSError, UnicodeDecodeError):
+            return None
+
+    def read_tools(self) -> str | None:
+        """The lazy-loaded reference doc `TOOLS.md` (Story 10.5) — what tools the bot has. The
+        worker injects it only when the owner message matches the tools/capability keywords. No
+        write path (not a rewrite-op target); the owner may hand-edit. Fail-soft: absent or
+        unreadable → `None` → the section is omitted, the turn proceeds normally."""
+        path = self._root / "TOOLS.md"
+        try:
+            return path.read_text() if path.is_file() else None
+        except (OSError, UnicodeDecodeError):
+            return None
+
+    def read_architecture(self) -> str | None:
+        """The lazy-loaded reference doc `ARCHITECTURE.md` (Story 10.5) — the bot's hardware/
+        internals, the "how do you work" answer. The worker injects it only when the owner message
+        matches the hardware/architecture keywords. No write path (not a rewrite-op target); the
+        owner may hand-edit. Fail-soft: absent or unreadable → `None` → section omitted."""
+        path = self._root / "ARCHITECTURE.md"
         try:
             return path.read_text() if path.is_file() else None
         except (OSError, UnicodeDecodeError):
