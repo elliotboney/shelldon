@@ -13,11 +13,160 @@ import msgspec
 import pytest
 
 from shelldon.contracts import LogEpisode, MemoryOp, Remember, RewriteAbout, RewriteSummary
-from shelldon.core.memory import CuratedMemory
+from shelldon.core.memory import (
+    _PERSONA_SEED_FILES,
+    _PROMPT_TEMPLATE_SEED_FILES,
+    CuratedMemory,
+)
 
 
 def _mem(tmp_path):
     return CuratedMemory(tmp_path / "memory")
+
+
+# --- Story 10.1: persona files seed copy-if-absent + read accessors ---
+
+_PERSONA_FILES = ("BOT_INSTRUCTIONS.md", "SOUL.md", "IDENTITY.md", "USER.md")
+
+
+def test_seed_persona_on_absent_creates_all_files(tmp_path):
+    """An empty root → constructing CuratedMemory copies every persona seed in from the shipped
+    templates. BOT_INSTRUCTIONS carries the system text; SOUL/IDENTITY ship with STARTER content (a
+    bot is born with a soul + sense of self, then evolves them); only USER ships blank (the
+    onboarding trigger — its content is the per-owner profile, learned via the interview)."""
+    root = tmp_path / "memory"
+    assert not root.exists()
+    mem = CuratedMemory(root)
+    for name in _PERSONA_FILES:
+        assert (root / name).is_file(), f"{name} not seeded"
+    assert "You are shelldon" in mem.read_instructions()
+    assert "Soul" in mem.read_soul() and mem.read_soul().strip()  # starter personality
+    assert "shelldon" in mem.read_identity()  # starter self-facts
+    assert mem.read_user() == ""  # only USER ships blank (onboarding fills it)
+
+
+def test_seed_persona_skips_present_files(tmp_path):
+    """Seeding only fills ABSENT files — a present file (owner/bot hand-edit) is never overwritten."""
+    root = tmp_path / "memory"
+    root.mkdir(parents=True)
+    (root / "BOT_INSTRUCTIONS.md").write_text("MY OWN INSTRUCTIONS")
+    mem = CuratedMemory(root)
+    assert mem.read_instructions() == "MY OWN INSTRUCTIONS"  # untouched
+    # the absent ones still get seeded
+    assert (root / "SOUL.md").is_file()
+
+
+def test_seed_persona_is_idempotent_across_constructions(tmp_path):
+    """Re-constructing (core boot + per fork worker both build a CuratedMemory) never rewrites a
+    present file — second construction is a no-op for content."""
+    root = tmp_path / "memory"
+    CuratedMemory(root)
+    (root / "BOT_INSTRUCTIONS.md").write_text("EDITED")
+    CuratedMemory(root)  # second construction
+    assert (root / "BOT_INSTRUCTIONS.md").read_text() == "EDITED"
+
+
+def test_seed_prompt_templates_on_absent_and_skip_present(tmp_path):
+    """Story 10.3: HEARTBEAT.md/DREAM.md seed copy-if-absent alongside the persona files, and a
+    present one is never overwritten. They are read accessors with no write path (owner-editable)."""
+    root = tmp_path / "memory"
+    mem = CuratedMemory(root)  # empty root -> both seeded
+    assert (root / "HEARTBEAT.md").is_file() and (root / "DREAM.md").is_file()
+    assert "{feeling}" in mem.read_heartbeat()  # the seed carries the fill placeholder
+    assert "{lines}" in mem.read_dream()
+    # a present file (owner hand-edit) is left untouched on re-construction
+    (root / "HEARTBEAT.md").write_text("OWNER HEARTBEAT")
+    CuratedMemory(root)
+    assert mem.read_heartbeat() == "OWNER HEARTBEAT"
+
+
+def test_read_prompt_template_none_when_absent(tmp_path):
+    """An absent HEARTBEAT/DREAM reads None (the is_file guard) -> the builder falls back, never raises."""
+    mem = CuratedMemory(tmp_path / "memory")
+    (mem.root / "HEARTBEAT.md").unlink()
+    (mem.root / "DREAM.md").unlink()
+    assert mem.read_heartbeat() is None
+    assert mem.read_dream() is None
+
+
+def test_seed_bootstrap_on_absent_and_skip_present(tmp_path):
+    """Story 10.4 (AC1): BOOTSTRAP.md seeds copy-if-absent alongside the other prompt templates,
+    carries the warm interview directive, and a present (owner hand-edited) copy is never overwritten."""
+    root = tmp_path / "memory"
+    mem = CuratedMemory(root)  # empty root -> seeded
+    assert (root / "BOOTSTRAP.md").is_file()
+    assert "rewrite_user" in mem.read_bootstrap()  # the seed instructs saving the owner profile
+    # a present file (owner hand-edit) is left untouched on re-construction
+    (root / "BOOTSTRAP.md").write_text("OWNER BOOTSTRAP")
+    CuratedMemory(root)
+    assert mem.read_bootstrap() == "OWNER BOOTSTRAP"
+
+
+def test_read_bootstrap_none_when_absent(tmp_path):
+    """Story 10.4 (AC5): an absent BOOTSTRAP.md reads None (is_file guard) -> onboarding section is
+    omitted, the turn proceeds, never raises. Delete on the SAME instance (construction re-seeds)."""
+    mem = CuratedMemory(tmp_path / "memory")
+    (mem.root / "BOOTSTRAP.md").unlink()
+    assert mem.read_bootstrap() is None
+
+
+def test_seed_reference_docs_on_absent_and_skip_present(tmp_path):
+    """Story 10.5 (AC3/AC4): TOOLS.md/ARCHITECTURE.md seed copy-if-absent alongside the other prompt
+    templates, carry real content, and a present (owner hand-edited) copy is never overwritten."""
+    root = tmp_path / "memory"
+    mem = CuratedMemory(root)  # empty root -> both seeded
+    assert (root / "TOOLS.md").is_file() and (root / "ARCHITECTURE.md").is_file()
+    assert "get_time" in mem.read_tools()  # the tool surface
+    assert "Pi Zero" in mem.read_architecture()  # the hardware answer
+    # a present file (owner hand-edit) is left untouched on re-construction
+    (root / "TOOLS.md").write_text("OWNER TOOLS")
+    CuratedMemory(root)
+    assert mem.read_tools() == "OWNER TOOLS"
+
+
+def test_read_reference_docs_none_when_absent(tmp_path):
+    """Story 10.5 (AC3): an absent TOOLS/ARCHITECTURE reads None (is_file guard) -> the lazy-load
+    section is omitted, never raises. Delete on the SAME instance (construction re-seeds)."""
+    mem = CuratedMemory(tmp_path / "memory")
+    (mem.root / "TOOLS.md").unlink()
+    (mem.root / "ARCHITECTURE.md").unlink()
+    assert mem.read_tools() is None
+    assert mem.read_architecture() is None
+
+
+def test_migration_is_non_destructive_on_populated_root(tmp_path):
+    """Story 10.5 (AC4) — Pi migration lands non-destructively: on a populated memory root (an
+    owner-written DIRECTIVE.md + existing about.md/facts/), constructing CuratedMemory adds ONLY
+    the absent seeds (incl. the new TOOLS/ARCHITECTURE) and leaves every existing file BYTE-for-byte
+    untouched. Copy-if-absent never shadows an owner edit."""
+    root = tmp_path / "memory"
+    (root / "facts").mkdir(parents=True)
+    existing = {
+        root / "about.md": "i am shelldon, owned by Elliot",
+        root / "facts" / "x.md": "the sky is blue",
+        root / "DIRECTIVE.md": "be kind and terse",  # hand-written by the owner
+    }
+    for path, text in existing.items():
+        path.write_text(text)
+
+    CuratedMemory(root)  # the "migration" — a fresh construction on the live root
+
+    # every pre-existing file is byte-for-byte untouched
+    for path, text in existing.items():
+        assert path.read_text() == text, f"{path.name} was modified by migration"
+    # and EVERY absent seed (all 9, incl. 10.5's reference docs) was added
+    for name in _PERSONA_SEED_FILES + _PROMPT_TEMPLATE_SEED_FILES:
+        assert (root / name).is_file(), f"{name} not seeded on migration"
+
+
+def test_read_persona_accessor_none_when_file_absent(tmp_path):
+    """An accessor returns None for an absent file (the is_file guard, mirroring read_about) —
+    so a failed/missing seed degrades the section, never raises. Delete after seeding, then read
+    on the SAME instance (construction would re-seed)."""
+    root = tmp_path / "memory"
+    mem = CuratedMemory(root)  # seeds the files
+    (root / "SOUL.md").unlink()  # simulate an absent/failed-seed file
+    assert mem.read_soul() is None  # accessor tolerates it, no raise
 
 
 # --- Story 6.2: the running summary (rewrite_summary -> summary.md) ---
@@ -126,7 +275,9 @@ def test_invalid_collection_rejected_without_writing(tmp_path):
     mem = _mem(tmp_path)
     with pytest.raises(ValueError):
         mem.apply_memory_op(Remember(collection="bogus", name="x", content="c"))
-    assert not (tmp_path / "memory").exists()
+    # The rejected op writes nothing for its target. (The root itself now exists — Story 10.1
+    # seeds persona files on CuratedMemory init — so assert the OP's collection dir is absent.)
+    assert not (tmp_path / "memory" / "bogus").exists()
 
 
 def test_empty_content_rejected_without_writing(tmp_path):
@@ -159,7 +310,9 @@ def test_atomic_write_leaves_prior_about_on_crash(tmp_path, monkeypatch):
         mem.apply_memory_op(RewriteAbout(content="second"))
 
     assert about.read_text() == good  # prior doc intact
-    assert list((tmp_path / "memory").iterdir()) == [about]  # no stray temp
+    # No stray temp left behind. (The root also holds the Story 10.1 persona seeds; assert only
+    # that no `.tmp` artifact from the crashed write survived.)
+    assert not [p for p in (tmp_path / "memory").iterdir() if p.suffix == ".tmp" or ".tmp" in p.name]
 
 
 # --- AC2: rewrite_about persists + reads back ---

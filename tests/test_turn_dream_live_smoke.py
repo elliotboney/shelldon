@@ -27,7 +27,7 @@ from conftest import DummySpawner
 from shelldon.broker.anthropic_provider import AnthropicProvider
 from shelldon.contracts import Remember, ResolveLearning, RewriteSummary
 from shelldon.core.runtime import Core
-from shelldon.worker.prompt import SYSTEM_INSTRUCTION, assemble_prompt
+from shelldon.worker.prompt import assemble_prompt, seed_instructions
 from shelldon.worker.worker import parse_reply
 
 pytestmark = pytest.mark.live
@@ -53,7 +53,7 @@ async def test_live_turn_elicits_a_memory_op():
     prompt = assemble_prompt(
         "Please remember this for later: my favorite database is BigQuery.",
         about="I am shelldon, a small AI pet. I remember things my owner tells me.",
-        system=SYSTEM_INSTRUCTION,
+        system=seed_instructions(),
     )
     reply = await provider.complete(prompt)
     payload, ops, _, _ = parse_reply(reply)
@@ -80,7 +80,7 @@ async def test_live_dream_emits_resolve_and_summary(sock_path, tmp_path):
     prompt = assemble_prompt(
         directive,
         about="I am shelldon, a small AI pet that reflects on what it has noticed.",
-        system=SYSTEM_INSTRUCTION,
+        system=seed_instructions(),
     )
     reply = await _glm_provider().complete(prompt)
     payload, ops, _, _ = parse_reply(reply)

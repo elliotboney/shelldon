@@ -31,12 +31,16 @@ class TurnDispatcher:
     injection style). `start_turn` is a callback into `Core._start_turn` (the lifecycle
     stays on `Core`)."""
 
-    def __init__(self, *, arbiter, budget, state, faces, history, start_turn):
+    def __init__(self, *, arbiter, budget, state, faces, history, memory, start_turn):
         self.arbiter = arbiter
         self._budget = budget
         self.state = state
         self.faces = faces
         self.history = history
+        #: The curated memory tree — read (never written) here to load the self-initiated-turn
+        #: prompt templates (`HEARTBEAT.md`/`DREAM.md`, Story 10.3) at dispatch. The driver already
+        #: reads state/history; reading memory is the same role (no provider lib — AD-1 holds).
+        self.memory = memory
         #: Callback into the turn lifecycle on `Core` — injected so the dispatcher can
         #: start a turn without owning (or importing) the lifecycle it gates.
         self._start_turn = start_turn
@@ -49,7 +53,7 @@ class TurnDispatcher:
         admit critical section."""
         m = self.state.state
         feeling = self.faces.select(m.mood.valence, m.mood.arousal, m.energy)
-        return build_proactive_prompt(feeling)
+        return build_proactive_prompt(feeling, self.memory.read_heartbeat())
 
     def build_dream_prompt(self) -> str:
         """The dream Job's `prompt_builder` (Story 6.2), resolved at dispatch: read the pending
@@ -57,7 +61,10 @@ class TurnDispatcher:
         (extracted to `core/proactive.py` — Epic 6 retro). Returns "" when nothing is pending →
         the dispatch skips (no dream, no spend). A sqlite read, no await (atomic in admit)."""
         pending = self.history.pending_learnings()
-        return build_dream_prompt([(r["id"], r["observation"], r["recurrence_count"]) for r in pending])
+        return build_dream_prompt(
+            [(r["id"], r["observation"], r["recurrence_count"]) for r in pending],
+            self.memory.read_dream(),
+        )
 
     async def dispatch_turn_job(self, job: Job) -> None:
         """The arbiter-gated dispatch seam (Story 5.2) for a due TURN-tier job (AD-9/AD-14).
