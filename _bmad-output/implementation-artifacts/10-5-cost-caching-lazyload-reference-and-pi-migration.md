@@ -4,7 +4,7 @@ baseline_commit: 683e2a93273aa606af2147b3dea3e40e55293720
 
 # Story 10.5: Cost (prompt caching + lazy-load), reference files, and Pi migration
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 

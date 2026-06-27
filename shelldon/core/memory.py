@@ -310,7 +310,11 @@ class CuratedMemory:
         path = self._root / "BOOTSTRAP.md"
         try:
             return path.read_text() if path.is_file() else None
-        except (OSError, UnicodeDecodeError):
+        except (OSError, UnicodeDecodeError) as exc:
+            # Story 10.4 AC5 (review patch): read_bootstrap catches the decode/read error ITSELF, so
+            # the worker's _safe_read except never fires — log here, or corruption degrades SILENTLY
+            # and the spec's "onboarding section omitted (logged)" is unmet.
+            log.warning("BOOTSTRAP.md unreadable (%s); onboarding section omitted", exc)
             return None
 
     def read_tools(self) -> str | None:
