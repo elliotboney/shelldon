@@ -118,6 +118,10 @@ Anyone can extend the pet without touching `core/`: one generalized plugin model
 The pet gains real tools — it runs code in-the-moment and writes its own new tools — with safe ops running free and risky ops gated behind an owner approval over Telegram. Native function-calling through the broker; the agentic loop runs inside the ephemeral fork worker; self-coded tools are bot-authored, owner-reviewed, and picked up next turn via fork-reimport. Rebuilds v1 openclawgotchi's self-coding inside v2's invariants (core stays LLM-free, broker stays sole egress). Promoted from Deferred/Icebox 2026-06-21 (A-vs-B resolved → live B + tiered). Full design: `epic-9-self-coding-design-2026-06-21.md`.
 **FRs covered:** tool execution / self-coding (FR5's deferred tool-execution clause; broker = designated home, NFR9)
 
+### Epic 10: Persona-as-Files
+shelldon's character moves out of the hardcoded `SYSTEM_INSTRUCTION` constant into a folder of markdown the bot reads every turn and can rewrite itself — the v1/openclawgotchi worktree model, rebuilt inside v2's invariants. Ships seed persona templates (`BOT_INSTRUCTIONS`/`SOUL`/`IDENTITY`/`USER`), seeds any missing one into the writable memory tree on first boot, injects them into the prompt in the binding AD-6 order, and lets the bot evolve its own soul via `rewrite_*` ops (core sole writer, AD-5) — autonomously on the dream cycle, with `DIRECTIVE.md` edits owner-approval-gated through the Epic 9.3 Telegram flow. Also un-hardcodes the proactive/dream prompts, adds first-run onboarding (creates the owner profile), and makes the always-injected persona prefix cache-cheap across both provider surfaces. Promoted from this design 2026-06-25. Full design: `epic-10-persona-files-design-2026-06-25.md`.
+**FRs covered:** persona/identity continuity (extends FR6 curated-memory; closes the v1 worktree-prompt parity gap)
+
 ---
 
 ## Epic 1: Talking Pet (walking skeleton)
@@ -876,6 +880,110 @@ So that one careless Approve tap can't exfiltrate data or reach internal service
 **Given** these are defense-in-depth behind owner-approval
 **When** the hardening lands
 **Then** the spine invariants hold (import-linter 3 KEPT, no new deps, fail-soft) and the owner-approval gate remains the primary control — these raise the floor, they don't replace the tap
+
+---
+
+## Epic 10: Persona-as-Files
+
+shelldon's character lives in markdown the bot reads every turn and can rewrite itself — not a hardcoded Python constant. Rebuilds the v1/openclawgotchi worktree-prompt model inside v2's invariants. Design decisions are fixed in `epic-10-persona-files-design-2026-06-25.md`: everything moves to files; persona lives in the writable memory tree (`~/.shelldon/memory/`); the bot edits via the op path (AD-5 single-writer, never a raw `write_file`); `BOT_INSTRUCTIONS` is fully bot-writable but parse-guarded; `DIRECTIVE.md` is bot-editable only with owner approval via the Epic 9.3 flow; `VAULT.md` is NOT ported (shelldon's `vault/` = OS-isolated secrets, the opposite of v1's knowledge vault).
+
+> **Cross-cutting:** every story holds the spine — `core/` LLM-free (import-linter), core sole writer (AD-5), workers read-only to memory (AD-6), atomic markdown writes (temp+rename), fail-soft (a missing/corrupt persona file degrades the prompt, never crashes the turn). Testing follows the no-live-LLM pattern (fake providers/transport). 10.1 must be a behavior no-op on day one (golden test: assembled prompt == prior hardcoded prompt).
+
+### Story 10.1: Persona files, seed-on-boot, and prompt assembly reads them
+
+As the owner,
+I want shelldon's character to live in editable markdown files it reads every turn instead of a hardcoded constant,
+So that I can change who it is without editing code, and it always speaks from its files.
+
+**Acceptance Criteria:**
+
+**Given** a new `shelldon/persona/` dir of shipped seed templates (`BOT_INSTRUCTIONS.md` carrying today's `SYSTEM_INSTRUCTION` text verbatim, plus starter `SOUL.md`/`IDENTITY.md`/`USER.md`)
+**When** core/`CuratedMemory` initializes against the memory root
+**Then** any missing persona file is copied in from the seed (copy-if-absent, mirrors the faces-registry seed); an existing file is never overwritten
+
+**Given** the worker assembling a prompt
+**When** `gather_context` runs
+**Then** it reads `BOT_INSTRUCTIONS`/`SOUL`/`IDENTITY`/`USER` (read-only, fail-soft like the existing `about.md`/`DIRECTIVE.md` reads) and `assemble_prompt` injects them in the binding AD-6 order (`BOT_INSTRUCTIONS` → `DIRECTIVE` → `IDENTITY` → `SOUL` → `USER` → `about` → knowledge → summary → recent → recall → owner message), each char-budgeted
+**And** the hardcoded `SYSTEM_INSTRUCTION` constant is deleted; a corrupt/missing persona file degrades (section omitted + logged), never raises
+**And** a golden test asserts the assembled prompt with seed files equals the prior hardcoded prompt (zero behavior change on day one)
+
+### Story 10.2: Bot-writable persona via memory-ops (incl. awareness + approval-gated DIRECTIVE)
+
+As the owner,
+I want shelldon to be aware of its self-knowledge files and able to rewrite them itself,
+So that it can evolve its own personality and its model of me over time, with my rules changeable only on my approval.
+
+**Acceptance Criteria:**
+
+**Given** the memory-op contract
+**When** the contracts are extended
+**Then** `RewriteSoul`/`RewriteIdentity`/`RewriteUser`/`RewriteInstructions` join `MemoryOp` (mirror `RewriteAbout`), with `_apply_rewrite_*` in `CuratedMemory` (atomic temp+rename, core sole writer) applying them autonomously
+**And** `_apply_rewrite_instructions` carries a validate-on-apply guardrail: a rewrite dropping the required protocol markers (`THOUGHT:`/`FACE:`/the `ops`-fence) is rejected + logged (the bot can re-voice but not break its own parse contract); the pristine repo seed is the recovery path
+
+**Given** the bot must KNOW these files exist and may edit them (no chat instruction required)
+**When** `BOT_INSTRUCTIONS.md` is authored
+**Then** it includes a "Your self-knowledge files" section naming each file, explaining it, and stating the bot MAY rewrite them via ops — which also advertises the existing `rewrite_about` op (latent gap: today's prompt never tells the model it can)
+**And** a golden-string test asserts all rewrite ops incl. `rewrite_about` are advertised (the copy can't silently regress); the file-tool jail is NOT widened to the memory root (persona is seen via prompt-injection, `vault/` stays off the tool surface)
+
+**Given** `DIRECTIVE.md` is the owner's constitution
+**When** the bot proposes `rewrite_directive`
+**Then** it does NOT apply autonomously — it is a RISKY-tier action routed through the Epic 9.3 approval flow (`RequestToolApproval` → Telegram Approve/Deny → resumed turn applies on Approve, skips on Deny); `_apply_rewrite_directive` is reachable only from the approved-resume path
+**And** single-*authority* holds: no unapproved bot write to `DIRECTIVE` can ever land (this story's only dependency on Epic 9, which is done)
+
+### Story 10.3: Proactive & dream prompts to files + autonomous persona editing
+
+As the owner,
+I want shelldon's inner-monologue prompts to be editable files too, and the bot to update its own soul during its dream cycle,
+So that no LLM-facing prose stays hardcoded and the pet's self-knowledge consolidates on its own — without me prompting it.
+
+**Acceptance Criteria:**
+
+**Given** the hardcoded proactive/dream prompt copy in `core/proactive.py`
+**When** the prompts are ported
+**Then** they live in seed templates (`HEARTBEAT.md` for the proactive check-in, `DREAM.md` for the dream cycle), read at build time; the `{feeling}` weave and pending-learnings injection stay pure fills over file-loaded text; a missing file degrades to a minimal built-in (logged)
+
+**Given** the dream cycle (scheduled, introspective, already promotes facts / rewrites `about.md`)
+**When** it reflects and finds something durable about the bot or owner
+**Then** the `DREAM.md` prompt invites it to also update `SOUL`/`IDENTITY`/`USER` via the 10.2 ops — applied by core autonomously, no chat instruction; the dream is structurally barred from `DIRECTIVE` (no unattended constitution drift)
+**And** a scripted dream turn surfacing a durable owner preference emits `rewrite_user` and core applies it (fake provider) — proving the no-chat-instruction path end to end
+
+### Story 10.4: First-run onboarding (creates the owner profile)
+
+As the owner,
+I want shelldon to interview me on first boot to learn who I am and who it should be,
+So that `USER`/`SOUL`/`IDENTITY` start populated from a real conversation instead of bare seed defaults.
+
+**Acceptance Criteria:**
+
+**Given** a fresh worktree where persona files are still at seed defaults
+**When** the first conversation happens
+**Then** the bot runs a short warm onboarding (2-3 turns) asking who the owner is and who it should be, then emits `rewrite_identity`/`rewrite_soul`/`rewrite_user` ops to populate them (this is the mechanism that creates the USER profile)
+
+**Given** onboarding completes
+**When** the ops apply
+**Then** a sentinel (seeded `BOOTSTRAP.md` or an `onboarded` flag in personality-state) marks it done so it never re-runs; a second boot triggers no onboarding
+**And** the flow is driven/tested with a scripted fake provider (no live LLM; real-model quality verified only in the live smoke)
+
+### Story 10.5: Cost (prompt caching + lazy-load), reference files, and Pi migration
+
+As the owner,
+I want the always-injected persona to be cheap to re-send every turn and the heavy reference docs loaded only when relevant,
+So that running shelldon on a metered GLM budget and a 416MB Pi stays affordable, and the live Pi picks up the new files safely.
+
+**Acceptance Criteria:**
+
+**Given** the persona is a stable prompt prefix re-sent every turn (stateless LLM + ephemeral fork worker — no persistence is possible)
+**When** the prompt is assembled and sent
+**Then** the persona prefix is byte-stable (no `now()`/UUIDs interpolated into it) and volatile content (recent window, owner message) follows it — so the OpenAI-surface providers (`openai`/`gemini`/`groq`/… via `openai_provider.py`) cache it automatically
+**And** a timeboxed spike adds an explicit `cache_control` breakpoint on the persona prefix in `anthropic_provider.py` (serves `claude` + `glm`-via-z.ai); native Claude is verified via `cache_read_input_tokens`, and the z.ai/GLM passthrough result is logged either way (if z.ai drops it, OpenAI-surface + native Claude still cache; GLM falls back to lazy-load + budget — no silent cap)
+
+**Given** v1's reference docs (`TOOLS.md`, `ARCHITECTURE.md`)
+**When** they are ported as seed files
+**Then** they are lazy-loaded by keyword (v1's `needs_extra_context` pattern), costing tokens only when the owner asks about hardware/internals; `VAULT.md` is NOT ported
+
+**Given** the already-deployed Pi has a populated `~/.shelldon/memory/`
+**When** the new build boots
+**Then** `deploy/setup-pi.sh` ships `shelldon/persona/` and copy-if-absent adds the new files without touching existing `about.md`/`facts/`/an owner-written `DIRECTIVE.md` (verified non-destructive)
 
 ---
 

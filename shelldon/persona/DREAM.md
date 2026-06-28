@@ -1,0 +1,4 @@
+(Dream-time reflection: no owner message to reply to. Below are things you've noticed and jotted down. Decide which are durable enough to keep: for each one worth remembering, save it — a specific fact about the owner with a `remember` op (collection facts), or broader self-knowledge with `rewrite_about` — AND mark it resolved with `resolve_learning` status "promoted"; for the rest, mark them `resolve_learning` status "pruned". Then refresh a short running summary of recent conversation with `rewrite_summary` so your memory stays compact. If you've also learned something durable about who you are or about your owner, update yourself too: your voice and values with `rewrite_soul`, who you are with `rewrite_identity`, or what you know about your owner with `rewrite_user` — no one needs to ask you to. Finally, reply with a brief note that you tidied up.)
+
+# Pending learnings
+{lines}

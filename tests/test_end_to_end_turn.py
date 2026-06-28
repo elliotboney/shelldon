@@ -28,7 +28,7 @@ from shelldon.display.renderer import StubRenderer
 from shelldon.display.service import run_display
 from shelldon.transport.cli import run_cli_transport
 from shelldon.worker.forkserver import ForkServer
-from shelldon.worker.prompt import SYSTEM_INSTRUCTION
+from shelldon.worker.prompt import seed_instructions
 from shelldon.worker.worker import run_worker
 
 
@@ -437,10 +437,10 @@ async def test_cap6_fact_from_earlier_turn_reaches_later_prompt(sock_path):
     the turn. Uses the REAL assembler (`worker=run_worker`) and a recording provider, and
     asserts on the PROMPT the broker received — never on a model's (non-deterministic)
     wording. Memory roots default to the conftest-redirected tmp `$HOME`."""
-    # A distinctive token that does NOT appear in SYSTEM_INSTRUCTION's example — else the
+    # A distinctive token that does NOT appear in the system instruction's example — else the
     # assertion would pass on the static instruction alone, never actually testing recall.
     fact = "Cassandra-x9f3"
-    assert fact not in SYSTEM_INSTRUCTION  # guard the guard
+    assert fact not in seed_instructions()  # guard the guard
 
     provider = RecordingProvider()
     spawns = Spawns(worker=run_worker)  # real prompt assembly (default build_prompt)
@@ -454,8 +454,9 @@ async def test_cap6_fact_from_earlier_turn_reaches_later_prompt(sock_path):
         await _await(lambda: len(provider.seen) >= 2)
 
         assembled = provider.seen[-1]
-        # Strip the static system instruction so the fact can ONLY come from recall/recent.
-        body = assembled.replace(SYSTEM_INSTRUCTION, "")
+        # Strip the static system instruction (now file-sourced; the seeded copy == the repo
+        # seed) so the fact can ONLY come from recall/recent.
+        body = assembled.replace(seed_instructions(), "")
         assert fact in body  # the earlier fact reached the later prompt via memory
         assert "what is my preferred datastore?" in body  # current message present (last)
     finally:

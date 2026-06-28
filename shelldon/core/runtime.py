@@ -44,6 +44,7 @@ from shelldon.contracts import (
     Region,
     RequestToolApproval,
     Result,
+    RewriteDirective,
     StateSnapshot,
     ToolCall,
 )
@@ -317,6 +318,10 @@ class Core:
         #: turn start so a completed/degraded turn can be paired and recorded.
         self._current_prompt: str | None = None
         self._current_turn_id: str | None = None
+        #: Story 10.2: whether the in-flight turn is owner-present (a chat turn) vs unattended
+        #: (proactive/dream). A `rewrite_directive` proposal is gated to owner-present turns only —
+        #: the constitution can't drift while the owner isn't there to approve (AC6).
+        self._current_turn_is_owner: bool = False
         #: The face token currently on screen — both lifecycle and mood pushes update
         #: it, so a mood face re-pushes after a lifecycle face and identical mood ticks
         #: don't spam the display.
@@ -371,6 +376,7 @@ class Core:
             state=self.state,
             faces=self.faces,
             history=self.history,
+            memory=self.memory,
             start_turn=self._start_turn,
         )
         self.scheduler = Scheduler(
@@ -503,6 +509,9 @@ class Core:
         # to pair with the reply for history (4.1); the worker still gets `prompt` below.
         self._current_prompt = record_owner_text if record_owner_text is not None else prompt
         self._current_turn_id = turn_id
+        # Story 10.2: an owner chat turn passes record_owner_text=None; a proactive/dream turn
+        # passes a synthetic marker (non-None). Only owner-present turns may park a directive change.
+        self._current_turn_is_owner = record_owner_text is None
         self.fence.open(turn_id)
         try:
             await self._push_face(FACE_THINKING)
@@ -613,6 +622,20 @@ class Core:
             log.warning("approval %s: corrupt parked state (%s); dropping", approval_turn_id, exc)
             await self._send_reply("Sorry — I couldn't restore that pending action.")
             return
+        # Story 10.2: a parked DIRECTIVE change applies in CORE on approve — no worker resume (the
+        # worker can't write memory, AD-5). Handled BEFORE the arbiter.submit below so it reserves
+        # no slot (it starts no turn). Core is the sole writer; the owner is the sole authority.
+        if call.name == "rewrite_directive":
+            if approved:
+                try:
+                    self.memory._apply_rewrite_directive(call.args["content"])
+                    await self._send_reply("Done — I updated your directive.")
+                except Exception as exc:
+                    log.warning("directive rewrite apply failed (%s); leaving prior", exc)
+                    await self._send_reply("I couldn't apply that directive change, sorry.")
+            else:
+                await self._send_reply("Okay, I left your directive as-is.")
+            return
         self.arbiter.submit("[tool approval]")  # idle → reserves the ≤1 slot (returns the marker)
         await self._start_resume_turn(messages, call, approved)
 
@@ -623,6 +646,8 @@ class Core:
         turn_id = uuid4().hex
         self._current_prompt = "[resumed after tool approval]"
         self._current_turn_id = turn_id
+        # A resume follows the owner tapping Approve — owner-present (Story 10.2).
+        self._current_turn_is_owner = True
         self.fence.open(turn_id)
         try:
             await self._push_face(FACE_THINKING)
@@ -659,7 +684,15 @@ class Core:
                 approval = next(
                     (o for o in result.proposed_ops if isinstance(o, RequestToolApproval)), None
                 )
-                if approval is not None:
+                # Story 10.2: a proposed directive change also needs the Approve/Deny surface — but
+                # ONLY on an owner-present turn (a dream proposal is dropped, AC6, never surfaced).
+                directive = next(
+                    (o for o in result.proposed_ops if isinstance(o, RewriteDirective)), None
+                )
+                needs_approval = approval is not None or (
+                    directive is not None and self._current_turn_is_owner
+                )
+                if needs_approval:
                     await self._send_reply(result.payload, approval_turn_id=env.turn_id)
                 else:
                     await self._send_reply(result.payload)  # unchanged plain-reply path
@@ -1029,6 +1062,11 @@ class Core:
                 "dropping %d proposed op(s) over the cap of %d", len(ops) - MAX_PROPOSED_OPS, MAX_PROPOSED_OPS
             )
             ops = ops[:MAX_PROPOSED_OPS]
+        # Story 10.2 review fix: every approval-parking op (RequestToolApproval, RewriteDirective)
+        # parks under the SAME key (`self._current_turn_id`); `park_approval` is INSERT-OR-REPLACE,
+        # so a SECOND parking op in one Result would silently clobber the first (owner then approves
+        # the wrong thing). Park only the FIRST; log + skip any extras (mirrors the single-tool guard).
+        parked_approval = False
         for op in ops:
             try:
                 if isinstance(op, ProposeTool):
@@ -1058,12 +1096,37 @@ class Core:
                     # Story 9.3: the worker paused on a RISKY call. Park the resumable state
                     # (messages + the pending call) in sqlite keyed by this turn's id; the
                     # owner's tap (echoing the id) resumes a fresh worker. msgpack of a 2-tuple.
+                    if parked_approval:
+                        log.warning("a second approval-parking op in one turn; skipping (would clobber the first)")
+                        continue
                     if len(op.messages) > _APPROVAL_MESSAGES_WARN:
                         # A chained-approval turn shouldn't grow unbounded; warn (hard cap = 9.5).
                         log.warning("parked approval %s carries %d messages (large)",
                                     self._current_turn_id, len(op.messages))
                     blob = msgspec.msgpack.encode((op.messages, op.call))
                     self.history.park_approval(self._current_turn_id, blob, datetime.now(UTC))
+                    parked_approval = True
+                elif isinstance(op, RewriteDirective):
+                    # Story 10.2: a proposed change to the owner's constitution. NEVER applied
+                    # autonomously (not a MemoryOp). On an unattended turn it is DROPPED (AC6 — no
+                    # drift while the owner's away). On an owner turn, park it through the SAME 9.3
+                    # plumbing (encode as a (messages=(), call) blob with a rewrite_directive ToolCall),
+                    # so the owner's Approve/Deny tap resumes into the core-apply branch in
+                    # _handle_approval_decision. The approval-tagged reply is sent in _handle_result.
+                    if not self._current_turn_is_owner:
+                        log.info("dropping rewrite_directive proposed on an unattended turn (AC6)")
+                        continue
+                    if not op.content.strip():
+                        log.warning("rewrite_directive: empty content; dropping")
+                        continue
+                    if parked_approval:
+                        log.warning("a second approval-parking op in one turn; skipping rewrite_directive (would clobber the first)")
+                        continue
+                    call = ToolCall(id=self._current_turn_id, name="rewrite_directive",
+                                    args={"content": op.content})
+                    blob = msgspec.msgpack.encode(((), call))
+                    self.history.park_approval(self._current_turn_id, blob, datetime.now(UTC))
+                    parked_approval = True
                 else:
                     self.apply_memory_op(op)
             except Exception as exc:
