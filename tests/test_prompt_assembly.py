@@ -73,25 +73,27 @@ def test_empty_persona_sections_omitted():
     assert "# Your owner" not in out
 
 
-def test_golden_day_one_system_seed_plus_onboarding(tmp_path):
-    """AC7 — the prompt assembled from SEED files (BOT_INSTRUCTIONS verbatim + empty
-    SOUL/IDENTITY/USER) carries the verbatim system seed, the empty persona omitted, plus
-    (Story 10.4) the first-run onboarding directive — since USER.md ships blank, onboarding is
-    active on a freshly-seeded root.
+def test_day_one_system_starter_persona_plus_onboarding(tmp_path):
+    """Day-one shape (live-validation fix): a freshly-seeded root carries the verbatim system seed
+    (BOT_INSTRUCTIONS), STARTER SOUL + IDENTITY (a bot is born with a soul + a sense of self, then
+    evolves them), and — since USER.md ships BLANK — the first-run onboarding directive. Only USER
+    is empty (the onboarding trigger); it is omitted from the prompt.
 
-    `gather_context` over a freshly-seeded root yields `system`==BOT_INSTRUCTIONS, empty persona
-    (omitted), and a non-None `bootstrap`, so the assembled prompt ==
-    `assemble_prompt(msg, system=seed_text, bootstrap=bootstrap_seed)`."""
+    NB: this deliberately abandons the old 10.1 'day-one byte-parity with the hardcoded prompt'
+    premise — Epic 10 shipped, so starter persona content is now desirable, not a regression."""
     msg = "hello shelldon"
     ctx = gather_context(tmp_path / "memory", tmp_path / "h.db", msg)
     assembled = assemble_prompt(msg, **ctx)
-    # System seed + onboarding directive (10.4: blank USER -> onboarding) + the owner message.
-    expected = assemble_prompt(msg, system=seed_instructions(), bootstrap=ctx["bootstrap"])
-    assert assembled == expected
-    # The system block IS the verbatim repo seed, and onboarding is present (USER blank).
     assert ctx["system"] == seed_instructions()
+    assert ctx["soul"] and ctx["soul"].strip()  # starter soul ships filled
+    assert ctx["identity"] and ctx["identity"].strip()  # starter identity ships filled
+    assert ctx["user"] == ""  # only USER ships blank -> omitted + onboarding active
     assert ctx["bootstrap"] is not None
     assert assembled.startswith(seed_instructions())
+    assert "# Your soul" in assembled and "# Your identity" in assembled
+    assert "# First-run onboarding" in assembled
+    assert "# Your owner" not in assembled  # USER blank -> omitted
+    assert assembled.rstrip().endswith(msg)
     assert "# First-run onboarding" in assembled
     assert assembled.rstrip().endswith(msg)
 
@@ -304,14 +306,14 @@ def test_gather_corrupt_persona_degrades_only_its_section(tmp_path):
     ctx = gather_context(mem_root, tmp_path / "history.db", "hi", recent_n=5, recall_k=5)
     assert ctx["soul"] is None  # corrupt section degraded
     assert ctx["system"] and "You are shelldon" in ctx["system"]  # system survived
-    assert ctx["identity"] == "" and ctx["user"] == ""  # sibling persona reads survived
+    assert ctx["identity"] and ctx["user"] == ""  # siblings survived (identity ships starter, user blank)
 
 
 def test_gather_seeds_and_reads_persona_system(tmp_path):
     """Story 10.1 — gather over a fresh root seeds + reads BOT_INSTRUCTIONS into `system`."""
     ctx = gather_context(tmp_path / "memory", tmp_path / "h.db", "hi")
     assert ctx["system"] == seed_instructions()
-    assert ctx["soul"] == "" and ctx["identity"] == "" and ctx["user"] == ""
+    assert ctx["soul"] and ctx["identity"] and ctx["user"] == ""  # starter soul/identity, blank user
 
 
 def test_gather_reads_seeded_memory(tmp_path):
