@@ -4,7 +4,7 @@ baseline_commit: 102cfc02fe2f98c5e02ebf4f529d4842ead55929
 
 # Story 10.4: First-run onboarding (creates SOUL/IDENTITY/USER via a warm interview)
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -147,7 +147,7 @@ claude-opus-4-8[1m] (Opus 4.8, 1M context)
 
 ### Review Findings
 
-- [ ] [Review][Patch] AC5 logging gap — `read_bootstrap` catches `(OSError, UnicodeDecodeError)` and returns `None` silently; `_safe_read`'s except branch never fires, so corruption is never logged despite spec saying "omitted (logged)" [`shelldon/core/memory.py:309`] — fix: add `log.warning(...)` in the except branch of `read_bootstrap`; update `test_onboarding_fail_soft_when_bootstrap_corrupt` to assert `caplog` warning
+- [x] [Review][Patch] AC5 logging gap — `read_bootstrap` catches `(OSError, UnicodeDecodeError)` and returns `None` silently; `_safe_read`'s except branch never fires, so corruption is never logged despite spec saying "omitted (logged)" [`shelldon/core/memory.py`] — RESOLVED 2026-06-26 (Epic 10 retro Action 1): added `log.warning("BOOTSTRAP.md unreadable …")` in `read_bootstrap`'s except; `test_onboarding_fail_soft_when_bootstrap_corrupt` now asserts the `caplog` warning fires. 839 pass, import-linter 3 KEPT.
 - [x] [Review][Defer] Proactive/dream turns inject BOOTSTRAP while USER blank — spec §Dev Notes explicitly acknowledges as "harmless…rare pre-onboarding window…not worth special-casing"; no dedicated test (defer; behavior is documented in spec) — deferred, spec-accepted behavior
 - [x] [Review][Defer] `read_user`/`read_soul`/`read_identity` missing try/except guard [`shelldon/core/memory.py`] — pre-existing inconsistency vs. `read_heartbeat`/`read_dream`/`read_bootstrap` pattern; safe because `_safe_read` wraps all in `gather_context` — deferred, pre-existing
 

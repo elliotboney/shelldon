@@ -382,17 +382,20 @@ def test_onboarding_stops_once_user_filled(tmp_path):
     assert "# Your owner" in out and "owner is Elliot" in out
 
 
-def test_onboarding_fail_soft_when_bootstrap_corrupt(tmp_path):
+def test_onboarding_fail_soft_when_bootstrap_corrupt(tmp_path, caplog):
     """AC5 — USER still blank but BOOTSTRAP.md is corrupt (non-UTF-8) -> read fails soft to None, the
-    onboarding section is omitted, the turn proceeds as a normal turn, never raises. (Corruption, not
-    deletion, because gather_context re-seeds an absent file on construction — a present-but-corrupt
-    file is never overwritten, so it exercises the worker's fail-soft read.)"""
+    onboarding section is omitted (AND logged — review patch), the turn proceeds as a normal turn,
+    never raises. (Corruption, not deletion, because gather_context re-seeds an absent file on
+    construction — a present-but-corrupt file is never overwritten, so it exercises the fail-soft read.)"""
     root = tmp_path / "memory"
     CuratedMemory(root)  # seed first
     (root / "BOOTSTRAP.md").write_bytes(b"\xff\xfe bad bytes")  # present but undecodable
 
-    ctx = gather_context(root, tmp_path / "h.db", "hi")
+    with caplog.at_level("WARNING", logger="shelldon.core.memory"):
+        ctx = gather_context(root, tmp_path / "h.db", "hi")
     assert ctx["bootstrap"] is None  # corrupt -> None, not a raise
+    # AC5 "omitted (logged)": read_bootstrap catches the decode error itself, so IT must log.
+    assert any("BOOTSTRAP.md unreadable" in r.message for r in caplog.records)
     out = build_prompt("hello", memory_root=root, history_path=tmp_path / "h.db")
     assert "# First-run onboarding" not in out
     assert out.rstrip().endswith("hello")
