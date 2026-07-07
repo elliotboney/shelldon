@@ -16,11 +16,18 @@ import logging
 import os
 import re
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 from shelldon.contracts import InboundMessage
 from shelldon.transport.runner import run_transport
 
 log = logging.getLogger("shelldon.transport.telegram")
+
+#: Where the last permitted chat id is persisted so proactive/dream replies survive a restart.
+#: Without this the reply target lived only in RAM (set from an inbound), so after a restart the
+#: pet spoke up on schedule into the void until the owner messaged first — a single-owner bot's
+#: last chat IS its outbound target. Fail-soft: a missing/unreadable file just means "no chat yet".
+DEFAULT_CHAT_ID_PATH = Path.home() / ".shelldon" / "telegram-chat"
 
 _API = "https://api.telegram.org/bot{token}/{method}"
 _POLL_TIMEOUT = 25  # getUpdates long-poll seconds (the server holds the request open)
@@ -64,6 +71,7 @@ class TelegramChat:
         poll_timeout: int = _POLL_TIMEOUT,
         error_backoff: float = _ERROR_BACKOFF,
         typing_interval: float = _TYPING_INTERVAL,
+        chat_id_path: "Path | None" = None,
     ) -> None:
         self._client = client
         self._token = token
@@ -72,7 +80,13 @@ class TelegramChat:
         self._poll_timeout = poll_timeout
         self._error_backoff = error_backoff
         self._typing_interval = typing_interval
-        self._chat_id = None  # where to reply — set from the last permitted message
+        #: Where to reply. Set from the last permitted message AND persisted to `_chat_id_path`,
+        #: so a self-initiated turn (proactive/dream) after a restart still has a destination —
+        #: before this fix, a restart dropped the target and the pet spoke into the void until
+        #: the owner messaged again. `None` = no chat known yet (drop outbound, don't crash).
+        #: The path is resolved at call time (not a bound default) so it stays patchable in tests.
+        self._chat_id_path = Path(chat_id_path) if chat_id_path is not None else DEFAULT_CHAT_ID_PATH
+        self._chat_id = self._load_chat_id()
         self._typing_task = None  # the in-flight 'typing…' refresh loop, if any
 
     def _url(self, method: str) -> str:
@@ -80,6 +94,27 @@ class TelegramChat:
 
     def _permitted(self, user_id) -> bool:
         return self._allow_all or user_id in self._allowed
+
+    def _load_chat_id(self):
+        """Read the persisted reply target, or None. Fail-soft: a missing/blank/corrupt file
+        just means 'no chat yet' — a bad file must never wedge the transport."""
+        try:
+            return int(self._chat_id_path.read_text().strip())
+        except (OSError, ValueError):
+            return None
+
+    def _remember_chat(self, chat_id) -> None:
+        """Set the reply target and persist it when it changes, so it survives a restart. A
+        write failure is logged and swallowed — losing persistence must not break the live turn
+        (the in-RAM `_chat_id` still works this session)."""
+        if chat_id is None or chat_id == self._chat_id:
+            return  # no destination in the update, or unchanged — nothing new to persist
+        self._chat_id = chat_id
+        try:
+            self._chat_id_path.parent.mkdir(parents=True, exist_ok=True)
+            self._chat_id_path.write_text(str(chat_id))
+        except OSError as exc:
+            log.warning("telegram: could not persist chat id (%s); proactive may drop after a restart", exc)
 
     async def inbound(self) -> "AsyncIterator[str | InboundMessage]":
         """Long-poll getUpdates forever; yield the text of each PERMITTED message (recording
@@ -114,7 +149,7 @@ class TelegramChat:
                 text = msg.get("text")
                 user_id = (msg.get("from") or {}).get("id")
                 if text and self._permitted(user_id):
-                    self._chat_id = (msg.get("chat") or {}).get("id")
+                    self._remember_chat((msg.get("chat") or {}).get("id"))
                     self._start_typing()  # show 'typing…' while core works the (slow) turn
                     yield text
                 elif text:
@@ -177,7 +212,7 @@ class TelegramChat:
         # show 'typing…' while the resumed worker runs (it can take seconds).
         chat_id = ((cq.get("message") or {}).get("chat") or {}).get("id")
         if chat_id is not None:
-            self._chat_id = chat_id
+            self._remember_chat(chat_id)
         self._start_typing()
         return InboundMessage(text="", approval_turn_id=turn_id, approved=(decision == "approve"))
 

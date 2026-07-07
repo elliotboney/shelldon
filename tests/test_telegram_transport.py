@@ -11,7 +11,15 @@ import asyncio
 
 import pytest
 
+from shelldon.transport import telegram
 from shelldon.transport.telegram import TelegramChat, resolve_token
+
+
+@pytest.fixture(autouse=True)
+def _isolate_chat_id_path(tmp_path, monkeypatch):
+    """Redirect the persisted-chat-id file to a per-test tmp dir so the transport's new restart
+    persistence never reads/writes the real ~/.shelldon on the dev machine (hermetic tests)."""
+    monkeypatch.setattr(telegram, "DEFAULT_CHAT_ID_PATH", tmp_path / "telegram-chat")
 
 
 def _update(*, uid, chat, text, update_id=1):
@@ -249,3 +257,40 @@ async def test_callback_with_empty_turn_id_is_dropped():
     ])
     chat = TelegramChat(client, "TOK", allowed_users={42})
     assert await _first_n(chat, 1) == ["legit"]  # the empty-id callback yielded nothing
+
+
+async def test_chat_id_persists_across_restart(tmp_path):
+    """The restart bug: proactive/dream replies dropped for ~10 days because the reply target
+    lived only in RAM and reset on the June-27 restart. A permitted inbound must persist the
+    chat id so a fresh TelegramChat (a restart) already knows where to send — before any inbound."""
+    path = tmp_path / "telegram-chat"
+    c1 = TelegramChat(_FakeClient([[_update(uid=42, chat=99, text="hi")]]), "TOK",
+                      allowed_users={42}, chat_id_path=path)
+    await _first_n(c1, 1)
+    assert path.read_text() == "99"  # remembered to disk, not just RAM
+
+    # A brand-new instance (= a service restart) with NO inbound still knows the target.
+    client2 = _FakeClient([])
+    c2 = TelegramChat(client2, "TOK", allowed_users={42}, chat_id_path=path)
+    assert c2._chat_id == 99
+    await c2.outbound("proactive hello")
+    assert client2.sent and client2.sent[-1]["chat_id"] == 99  # POSTed instead of dropping into the void
+
+
+async def test_outbound_after_restart_reaches_the_owner(tmp_path):
+    """End-to-end of the fix: a persisted target lets a proactive reply send with no prior
+    inbound this session (the exact scenario that silently failed on the Pi)."""
+    path = tmp_path / "telegram-chat"
+    path.write_text("77")
+    client = _FakeClient([])
+    chat = TelegramChat(client, "TOK", allow_all=True, chat_id_path=path)
+    await chat.outbound("you up?")
+    assert client.sent and client.sent[-1]["chat_id"] == 77
+
+
+async def test_corrupt_chat_id_file_is_ignored(tmp_path):
+    """Fail-soft: a blank/garbage persisted file must degrade to 'no chat yet', never crash init."""
+    path = tmp_path / "telegram-chat"
+    path.write_text("not-an-int")
+    chat = TelegramChat(_FakeClient([]), "TOK", allow_all=True, chat_id_path=path)
+    assert chat._chat_id is None  # ignored, no exception
