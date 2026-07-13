@@ -38,6 +38,7 @@ from shelldon.contracts import (
     ToolTier,
 )
 from shelldon.core.bus import connect, read_frame, write_frame
+from shelldon.timeouts import COMPLETION_TIMEOUT
 from shelldon.worker.prompt import build_prompt
 from shelldon.worker.tools import ToolSpec, execute_tool, summarize_call
 
@@ -136,7 +137,9 @@ def _extract_line(text: str, pattern: re.Pattern) -> tuple[str, str]:
 #: degrade and freeze every new turn. With W < T the worker self-reports a failure Result
 #: BEFORE core abandons the turn, so the slot frees in lockstep. Module-level so tests
 #: inject a small value. See `tests/test_resilience.py::test_timeout_chain_is_coherent`.
-_COMPLETION_TIMEOUT_S = 25.0
+#: Derived from the single `SHELLDON_TURN_TIMEOUT` knob (shelldon.timeouts) as W = T-5;
+#: unset keeps the historical 25s.
+_COMPLETION_TIMEOUT_S = COMPLETION_TIMEOUT
 
 #: The worker's outbound `Result → core` write is bounded too: if core (or the hub) stalls
 #: and stops reading, the worker must not block forever on the write past its window — it

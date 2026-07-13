@@ -14,6 +14,8 @@ import logging
 import os
 import signal
 
+from shelldon.timeouts import REAP_TIMEOUT
+
 log = logging.getLogger("shelldon.forkserver")
 
 #: Bounded-reap deadline (Story 5.0): if a forked child hasn't exited within this long,
@@ -21,8 +23,9 @@ log = logging.getLogger("shelldon.forkserver")
 #: never spin the reaper forever or hold the ≤1 slot past the turn. Part of the
 #: coherent-timeout chain W < R < T (worker self-report 25s < reap SIGKILL 28s < core
 #: degrade 30s); R stays below core's turn timeout so the slot frees before/at core's
-#: degrade. Module-level so tests inject a small value.
-_REAP_TIMEOUT_S = 28.0
+#: degrade. Module-level so tests inject a small value. Derived from the single
+#: `SHELLDON_TURN_TIMEOUT` knob (shelldon.timeouts) as R = T-2; unset keeps the historical 28s.
+_REAP_TIMEOUT_S = REAP_TIMEOUT
 _REAP_POLL_S = 0.01
 
 #: After SIGKILL, reclaim the zombie by polling (NOT a blocking waitpid) for this long, so

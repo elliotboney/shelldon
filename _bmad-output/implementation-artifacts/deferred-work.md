@@ -4,6 +4,12 @@ This file tracks work intentionally deferred from reviews, with reasons for why 
 
 ---
 
+## Resolved: turn-timeout chain is now env-configurable (2026-07-08)
+
+- ~~**Expose the worker completion timeout as injectable config** (deferred item below, "COMPLETION dropped at hub…, or expose it as an injectable config")~~ — **DONE 2026-07-08.** New `shelldon/timeouts.py` is the single source of truth: one env knob `SHELLDON_TURN_TIMEOUT` (=T, core degrade) derives the whole coherent chain `W = T-5` (worker `_COMPLETION_TIMEOUT_S`) `< R = T-2` (fork `_REAP_TIMEOUT_S`) `< T` (`DEFAULT_TURN_TIMEOUT`), floored at 15s so the invariant can't be broken by config. The three previously-hardcoded constants (`core/runtime.py`, `worker/worker.py`, `worker/forkserver.py`) now import from it; unset reproduces the historical 25/28/30 exactly. **Motivation:** on the Pi, GLM latency intermittently spiked past the worker's 25s wall → the worker self-reported a failure → core degraded good turns to "…can't think right now…", and GLM's real (slower) answer landed after the turn closed and was dropped ("no connection for worker; dropping completion envelope"). `SHELLDON_TURN_TIMEOUT=60` set on the Pi (chain → 55/58/60). Documented in `.env.example`; guard test `tests/test_timeouts.py` + the existing `test_resilience.py::test_timeout_chain_is_coherent` hold the ordering.
+
+---
+
 ## Deferred from: code review of 10-5-cost-caching-lazyload-reference-and-pi-migration (2026-06-25)
 
 - **`_log_cache_usage` docstring is a 90-word design diary** [`shelldon/broker/anthropic_provider.py`] — content belongs in a commit message or design doc; trim on next substantive touch of this method.

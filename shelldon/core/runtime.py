@@ -62,6 +62,7 @@ from shelldon.core.reactions import compute_nudge_patch
 from shelldon.core.scheduler import CostTier, Idle, Interval, Job, QuietHours, Scheduler
 from shelldon.core.state import DEFAULT_CHECKPOINT_PATH, PersistentState
 from shelldon.core.turn import TurnFence
+from shelldon.timeouts import TURN_TIMEOUT
 
 log = logging.getLogger("shelldon.core.runtime")
 
@@ -112,7 +113,9 @@ def _caption_for(payload: str) -> str:
 #: `_REAP_TIMEOUT_S`) BEFORE core abandons the turn here. That keeps the arbiter slot and
 #: the fork-server guard releasing in lockstep — no ~90s freeze from a worker holding the
 #: fork past core's degrade. See `tests/test_resilience.py::test_timeout_chain_is_coherent`.
-DEFAULT_TURN_TIMEOUT = 30.0
+#: The whole chain derives from one env knob (`SHELLDON_TURN_TIMEOUT`) in shelldon.timeouts;
+#: unset keeps the historical 30s. Re-exported here so the name stays stable for callers/tests.
+DEFAULT_TURN_TIMEOUT = TURN_TIMEOUT
 
 #: Default personality-state checkpoint cadence (Story 3.1). Periodic, NOT per change
 #: (NFR7) — tests inject a small interval. Epic 5's scheduler will subsume this.
