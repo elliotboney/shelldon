@@ -522,6 +522,31 @@ def discover_self_coded_tools(workspace_root: Path, *, skipped: list[str] | None
     return specs
 
 
+#: Epic 11: the persona-rewrite tools (name → the self-knowledge file they edit). These are
+#: FIRST-CLASS function calls so the model — which reaches for a TOOL when it wants to act —
+#: has a right one instead of flailing toward `write_file`/`run_shell` (which cannot see the
+#: memory tree) or forgetting the inline ops-block path. Kept in sync with `worker.PERSONA_REWRITE_OPS`
+#: (name → ProposedOp class): the worker loop turns each call into that op, since the worker
+#: (fork child) can never write memory itself (AD-5).
+_PERSONA_REWRITE_TOOLS = {
+    "rewrite_soul": "your voice, values, and personality (SOUL.md)",
+    "rewrite_identity": "who you are, your hardware, and your mission (IDENTITY.md)",
+    "rewrite_user": "what you know about your owner (USER.md)",
+    "rewrite_about": "your short running self-summary (about.md)",
+}
+
+
+def _persona_ack(content: str) -> str:
+    """A persona-rewrite tool's body. It does NOT write — the worker (fork child) can't touch the
+    memory tree (AD-5); the worker loop converts the CALL into the matching curated-memory op that
+    core's single-writer applies after the turn (same landing as an inline ```ops block). This just
+    VALIDATES the content (reject empty — core would too) and returns a confirmation, so the model
+    gets immediate feedback and stops instead of retrying blindly."""
+    if not content or not content.strip():
+        raise ValueError("content must be the FULL replacement text for the file, and non-empty")
+    return "Saved — I'll apply this to the file right after this turn."
+
+
 def build_tool_registry(
     workspace_root: Path | None = None, memory_root: Path | None = None, *,
     import_failures: list[str] | None = None,
@@ -622,6 +647,28 @@ def build_tool_registry(
             tier=ToolTier.RISKY,
             fn=functools.partial(_git, workspace_root=ws),
         ),
+    ]
+    # Epic 11: the persona-rewrite tools. FREE tier — parity with the autonomous ops-block rewrite
+    # the bot already had (core applies `rewrite_soul` with no owner approval today); these add no
+    # new authority, only a callable entry point. They take a full-replacement `content` and produce
+    # NO write here — the worker loop converts each call into the matching curated-memory op.
+    specs += [
+        ToolSpec(
+            name=name,
+            description=(
+                f"Rewrite {desc}. Pass the FULL replacement text as `content` — include what's "
+                "still true and evolve it, don't blank the file. This is the ONLY way to edit "
+                "these self-knowledge files; `write_file` cannot see them."
+            ),
+            params_schema={
+                "type": "object",
+                "properties": {"content": {"type": "string", "description": "The full new file contents."}},
+                "required": ["content"],
+            },
+            tier=ToolTier.FREE,
+            fn=_persona_ack,
+        )
+        for name, desc in _PERSONA_REWRITE_TOOLS.items()
     ]
     registry = {s.name: s for s in specs}
     # Story 9.4: merge in the owner-approved self-coded tools (FREE). A discovered tool may NOT

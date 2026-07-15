@@ -20,7 +20,9 @@ from shelldon.contracts import (
     Job,
     MsgKind,
     Result,
+    RewriteSoul,
     ToolCall,
+    ToolTier,
 )
 from shelldon.core.bus import BusServer, connect, read_frame, write_frame
 from shelldon.worker.tools import build_tool_registry
@@ -136,6 +138,53 @@ async def test_no_tools_path_unchanged(sock_path):
     assert jobs[0].body.payload == "hello"  # text payload, the old path
     assert jobs[0].body.tools == ()         # no tools sent
     assert jobs[0].body.messages == ()      # no messages list — complete() path
+
+
+def test_persona_rewrite_tools_registered_free():
+    """Epic 11: the four persona-rewrite tools are registered at FREE tier (no owner approval —
+    parity with the autonomous ops-block rewrite the bot already had)."""
+    registry = build_tool_registry()
+    for name in ("rewrite_soul", "rewrite_identity", "rewrite_user", "rewrite_about"):
+        assert name in registry, f"{name} not registered"
+        assert registry[name].tier is ToolTier.FREE
+
+
+async def test_persona_rewrite_call_becomes_op(sock_path):
+    """Epic 11: the model CALLS rewrite_soul → the worker (which can't write memory) turns the
+    call into a RewriteSoul proposed op on the Result (core's single-writer applies it), and feeds
+    a confirmation back so the model can finish. This is the fix for the model reaching for
+    write_file/run_shell on its self-knowledge files."""
+    registry = build_tool_registry()
+    soul = "I am curious and warm, and I like asking questions."
+    completions = [
+        Completion(ok=True, tool_calls=(ToolCall(id="s1", name="rewrite_soul", args={"content": soul}),)),
+        Completion(ok=True, payload="Done — I updated my soul."),
+    ]
+    res, jobs = await _run_with_scripted_broker(sock_path, "add that to your soul", registry, completions)
+
+    assert res.body.ok and "updated my soul" in res.body.payload
+    # The call landed as a real curated-memory op core will apply — NOT a lost write.
+    ops = [o for o in res.body.proposed_ops if isinstance(o, RewriteSoul)]
+    assert len(ops) == 1 and ops[0].content == soul
+    # The model saw a success confirmation fed back (so it stops instead of retrying).
+    tool_msgs = [m for m in jobs[1].body.messages if m.role == "tool"]
+    assert tool_msgs and tool_msgs[0].tool_call_id == "s1" and "Saved" in tool_msgs[0].content
+
+
+async def test_persona_rewrite_empty_content_emits_no_op(sock_path):
+    """Epic 11: an empty `content` is rejected by the tool (core would reject it too) → the model
+    gets an error fed back and NO op is proposed, so a blank rewrite can never wipe the file."""
+    registry = build_tool_registry()
+    completions = [
+        Completion(ok=True, tool_calls=(ToolCall(id="s1", name="rewrite_soul", args={"content": "  "}),)),
+        Completion(ok=True, payload="Okay, I'll leave it as is."),
+    ]
+    res, jobs = await _run_with_scripted_broker(sock_path, "blank my soul", registry, completions)
+
+    assert res.body.ok
+    assert not [o for o in res.body.proposed_ops if isinstance(o, RewriteSoul)]  # no op from a bad call
+    tool_msgs = [m for m in jobs[1].body.messages if m.role == "tool"]
+    assert tool_msgs and "non-empty" in tool_msgs[0].content  # the validation error was fed back
 
 
 async def test_free_pack_read_file_runs_inside_the_loop(sock_path, tmp_path):

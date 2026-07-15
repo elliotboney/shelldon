@@ -54,10 +54,11 @@ def test_blank_and_whitespace_behave_like_none():
 
 
 def test_directive_is_open_ended_not_a_forced_question():
-    """The proactive framing must invite a thought/observation/hello — not exclusively a
-    question. Assert on a substring we deliberately include so this is robust to copy tweaks."""
+    """The proactive framing must invite a thought/observation — not exclusively a question.
+    Assert a question is offered as ONE option (not the whole ask) and the directive itself
+    doesn't end as a question. Robust to copy tweaks."""
     out = build_proactive_prompt("content", _heartbeat())
-    assert "on your mind" in out
+    assert "ask a question" in out  # a question is one option among several, not forced
     assert not out.rstrip(")").endswith("?")
 
 
@@ -90,27 +91,22 @@ def test_build_dream_prompt_flattens_newlines_in_observation():
     assert "\n" not in line and "line one line two line three" in line
 
 
-# --- Story 10.3: prose moved to files == prior hardcoded output (no behavior change) ---
-
-#: The EXACT strings the prior hardcoded `_DIRECTIVE`/`_FEELING_SENTENCE` constants produced.
-#: The golden no-op guard: building from the seed file must reproduce these byte-for-byte.
-_OLD_PROACTIVE_CONTENT = (
-    "(Self-prompt: there's no owner message to reply to right now — you're speaking up on "
-    "your own. You're feeling content. Share whatever's on your mind: a passing thought, "
-    "something you noticed, or just a hello. It doesn't have to be a question.)"
-)
-_OLD_PROACTIVE_NONE = (
-    "(Self-prompt: there's no owner message to reply to right now — you're speaking up on "
-    "your own. Share whatever's on your mind: a passing thought, something you noticed, or "
-    "just a hello. It doesn't have to be a question.)"
-)
+# --- HEARTBEAT.md structural contract (the anti-repetition rewrite deliberately changed the copy) ---
 
 
-def test_proactive_from_seed_file_matches_prior_constant():
-    """AC3: building from HEARTBEAT.md is byte-identical to the old hardcoded `_DIRECTIVE`
-    output — both with a feeling and with none. This is the day-one no-op guard."""
-    assert build_proactive_prompt("content", _heartbeat()) == _OLD_PROACTIVE_CONTENT
-    assert build_proactive_prompt(None, _heartbeat()) == _OLD_PROACTIVE_NONE
+def test_proactive_from_seed_file_holds_the_contract():
+    """The proactive directive built from HEARTBEAT.md must: weave the feeling when present, DROP
+    it entirely when None, wrap in the self-prompt parens, and carry the anti-repetition steer
+    (the point of the rewrite). Not byte-pinned — copy is meant to evolve — but these invariants
+    the fill logic + face-vocab weave depend on must hold."""
+    with_feeling = build_proactive_prompt("content", _heartbeat())
+    assert with_feeling.startswith("(Self-prompt") and with_feeling.rstrip().endswith(")")
+    assert "You're feeling content" in with_feeling  # the mood is woven when known
+    assert "Do NOT reuse" in with_feeling  # the anti-repeat steer is present
+
+    without = build_proactive_prompt(None, _heartbeat())
+    assert "feeling" not in without  # no mood woven, no dangling "feeling ." fragment
+    assert "Do NOT reuse" in without
 
 
 def test_dream_from_seed_file_preserves_old_and_adds_persona_invite():

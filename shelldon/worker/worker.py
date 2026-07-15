@@ -32,6 +32,10 @@ from shelldon.contracts import (
     ProposedOp,
     RequestToolApproval,
     Result,
+    RewriteAbout,
+    RewriteIdentity,
+    RewriteSoul,
+    RewriteUser,
     ToolCall,
     ToolDefinition,
     ToolResult,
@@ -233,6 +237,28 @@ def _record_tool_failure(failures, registry, tc, tr) -> None:
         failures.add(tc.name)
 
 
+#: Epic 11: the persona-rewrite tools (`tools._PERSONA_REWRITE_TOOLS`) are first-class function
+#: calls, but the worker (fork child) can NEVER write memory (AD-5) — so a call becomes the matching
+#: curated-memory op that core's single-writer applies after the turn, exactly like an inline ```ops
+#: block. This maps the tool NAME → its ProposedOp class; the loop builds `op_cls(content=…)` from
+#: the call's args on SUCCESS (an empty/rejected content already yielded `tr.ok=False` → no op).
+PERSONA_REWRITE_OPS: dict[str, type] = {
+    "rewrite_soul": RewriteSoul,
+    "rewrite_identity": RewriteIdentity,
+    "rewrite_user": RewriteUser,
+    "rewrite_about": RewriteAbout,
+}
+
+
+def _collect_persona_op(persona_ops: list, tc: ToolCall, tr: ToolResult) -> None:
+    """If `tc` is a persona-rewrite tool that SUCCEEDED, append the matching curated-memory op to
+    `persona_ops` (built from the call's `content`). The op — not the tool body — is what actually
+    edits the file, applied by core after the turn. A failed/empty call (`tr.ok=False`) adds nothing."""
+    op_cls = PERSONA_REWRITE_OPS.get(tc.name)
+    if op_cls is not None and tr.ok:
+        persona_ops.append(op_cls(content=tc.args.get("content", "")))
+
+
 async def _agentic_loop(
     reader, writer, turn_id: str, registry: dict[str, ToolSpec], messages: tuple[Message, ...],
     failures: set[str] | None = None,
@@ -257,13 +283,17 @@ async def _agentic_loop(
     )
     loop = asyncio.get_running_loop()
     loop_start = loop.time()
+    # Epic 11: persona-rewrite tool calls (rewrite_soul/…) accumulate here as curated-memory ops —
+    # the worker can't write memory (AD-5), so each successful call becomes an op core applies after
+    # the turn. Attached to the Result on EVERY success exit so a "saved" edit is never dropped.
+    persona_ops: list[ProposedOp] = []
 
     for iteration in range(_MAX_TOOL_EXECUTIONS + 1):
         elapsed = loop.time() - loop_start
         remaining = _COMPLETION_TIMEOUT_S - elapsed
         if remaining < 2.0:
             log.warning("worker: tool loop budget exhausted (%.1fs elapsed)", elapsed)
-            return Result(ok=True, payload="I'm running short on time — let me answer directly.")
+            return Result(ok=True, payload="I'm running short on time — let me answer directly.", proposed_ops=persona_ops)
 
         await write_frame(
             writer,
@@ -281,10 +311,10 @@ async def _agentic_loop(
             return Result(ok=False, error=comp.error)
         if not comp.tool_calls:
             payload, ops, thought, face = parse_reply(comp.payload)
-            return Result(ok=True, payload=payload, proposed_ops=ops, blurb=thought, face=face)
+            return Result(ok=True, payload=payload, proposed_ops=persona_ops + ops, blurb=thought, face=face)
         if iteration >= _MAX_TOOL_EXECUTIONS:
             log.warning("worker: tool loop exhausted after %d executions", iteration)
-            return Result(ok=True, payload="I've used too many steps. Let me try a different approach.")
+            return Result(ok=True, payload="I've used too many steps. Let me try a different approach.", proposed_ops=persona_ops)
 
         # 9.3: PAUSE on the first RISKY call. Execute any FREE calls that precede it (so the
         # protocol's tool_use↔tool_result pairing holds), keep the assistant message to those
@@ -302,6 +332,7 @@ async def _agentic_loop(
             for tc in comp.tool_calls[:risky_idx]:
                 tr = execute_tool(tc, registry)
                 _record_tool_failure(failures, registry, tc, tr)
+                _collect_persona_op(persona_ops, tc, tr)
                 free_results.append(Message(role="tool", content=tr.content, tool_call_id=tr.id))
             assistant_msg = Message(role="assistant", content=comp.payload, tool_calls=kept_calls)
             paused = messages + (assistant_msg,) + tuple(free_results)
@@ -310,7 +341,9 @@ async def _agentic_loop(
             return Result(
                 ok=True,
                 payload=f"I'd like to run `{summary}` — approve?",
-                proposed_ops=[RequestToolApproval(call=risky_call, summary=summary, messages=paused)],
+                # Approval op FIRST so it can't be dropped by the op cap; any persona edits made in
+                # the FREE prefix before this risky call ride along (core applies each independently).
+                proposed_ops=[RequestToolApproval(call=risky_call, summary=summary, messages=paused), *persona_ops],
             )
 
         # All-FREE completion: execute + loop (9.1/9.2 behavior). Preserve any assistant text
@@ -321,11 +354,12 @@ async def _agentic_loop(
         for tc in comp.tool_calls:
             tr = execute_tool(tc, registry)
             _record_tool_failure(failures, registry, tc, tr)
+            _collect_persona_op(persona_ops, tc, tr)
             tool_msgs.append(Message(role="tool", content=tr.content, tool_call_id=tr.id))
         messages = messages + (assistant_msg,) + tuple(tool_msgs)
 
     # Unreachable (the loop returns on text/exhaustion), but stay fail-soft.
-    return Result(ok=True, payload="I've used too many steps. Let me try a different approach.")
+    return Result(ok=True, payload="I've used too many steps. Let me try a different approach.", proposed_ops=persona_ops)
 
 
 async def _resume_loop(reader, writer, turn_id: str, registry, resume: "ResumeState",
