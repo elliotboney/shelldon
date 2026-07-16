@@ -1,12 +1,12 @@
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![GitHub stars](https://img.shields.io/github/stars/elliotboney/shelldon?style=social)](https://github.com/elliotboney/shelldon)
+
+
 <p align="center">
   <img src="docs/logo_v10.png" alt="shelldon" width="300">
 </p>
 
-<p align="center">
-  <img src="docs/shelldon_pic.png" alt="shelldon running on a Raspberry Pi Zero 2W — the E-Ink face, battery, and an on-screen thought" width="520">
-  <br>
-  <em>The real thing: the reacting face, the battery widget, and an on-screen caption — live on the panel.</em>
-</p>
+
 
 # shelldon
 
@@ -14,6 +14,12 @@
 
 <p align="center">
   <strong>📖 <a href="https://github.com/elliotboney/shelldon/wiki">Read the Wiki</a></strong> — architecture, how it works, and how to run it on real hardware.
+</p>
+
+<p align="center">
+  <img src="docs/shelldon_pic.png" alt="shelldon running on a Raspberry Pi Zero 2W — the E-Ink face, battery, and an on-screen thought" width="520">
+  <br>
+  <em>The real thing: the reacting face, the battery widget, and an on-screen caption — live on the panel.</em>
 </p>
 
 ## What is it?
@@ -34,33 +40,6 @@ shelldon is a tiny AI pet you **talk to** — a little face on a screen that tal
 **No subscription needed.** Point it at a free AI provider and it costs **$0/month** to run — or a few dollars for a fancier brain. [Jump to costs ↓](#cost-of-running-it)
 
 That's the gist. **Want to run it? [Getting started ↓](#getting-started).** Everything else below is the *how* and *why*.
-
----
-
-## Origins
-
-`shelldon` is a ground-up v2 rebuild of [openclawgotchi](https://github.com/turmyshevd/openclawgotchi) (MIT, by [Dmitry Turmyshev](https://github.com/turmyshevd)). At its core it's a **chat-bot pet**: you converse with a remote-LLM brain by text, over a **pluggable chat transport** (not hardcoded to any one service), while the pet's face and mood live on a Waveshare E-Ink screen. It's built to be genuinely *owned* — a clean, tested spine that engineers out v1's documented pains.
-
-It sits at the end of a short but meaningful lineage.
-
-**[pwnagotchi](https://pwnagotchi.ai/)** (by [@evilsocket](https://github.com/evilsocket)) pioneered the form factor: an E-Ink "virtual pet" on a Pi Zero that *feels alive*. It showed that a small, cheap piece of hardware with a face on it could become a companion object — something you put on your desk and check in on. Two things come directly from pwnagotchi's design: the **expressive E-Ink face** (expressions that shift with mood and activity, idle animations between events) and the **XP leveling system** (the pet grows and levels up through interaction, giving the relationship a sense of progression over time). Both of those are being brought forward into shelldon.
-
-**[openclawgotchi](https://github.com/turmyshevd/openclawgotchi)** (by Dmitry Turmyshev) took that same form factor and made it a chat pet — connecting the E-Ink face to an LLM brain via Telegram. The Tamagotchi-meets-AI idea is genuinely compelling. But v1 accumulated real operational pain: OOM crashes on the Pi Zero's 512MB of RAM, a 1513-line Telegram connector with safety logic scattered through it, zero test coverage, and a transport hardcoded to one service.
-
-**`shelldon`** is the v2 rebuild: same spirit, different spine. Clean-room — v1 code is studied as reference, never copied.
-
-## What makes it different
-
-### vs. openclawgotchi (v1)
-
-| v1 pain | shelldon solution |
-|---|---|
-| **OOM crashes** on Pi Zero's 512MB | **Ephemeral fork-server workers** — each turn forks a worker that runs once and dies; RAM never accumulates across turns |
-| **Hardcoded Telegram** — one transport, all safety woven into a single massive connector | **Transport-agnostic adapter contract** — CLI, Telegram, SMS, or anything else slots in; none wired into core |
-| **Zero tests** — bugs discovered in production | **M0 test harness from day one** — contract round-trips, worker-bound invariant, and atomic-write crash-safety all verified before first feature |
-| **Safety scattered** across 1513-line connector | **One security boundary** — a single capability broker is the sole holder of LLM creds; nothing else can call a model |
-| **No provider flexibility** | **Pluggable, ordered provider chain** — GLM default, Ollama/OpenAI/OpenRouter fallback, all config — never a code change |
-| **No offline life** | **Resident reflexes** (blink, idle, mood drift) run between turns so the pet never freezes when the LLM is busy |
 
 
 ## It writes its own tools
@@ -94,12 +73,6 @@ A few decisions that shape everything:
 **512MB as a design constraint, not an excuse.** The Pi Zero 2W's memory limit is the load-bearing reason for half the architectural decisions (fork-server workers, RAM-resident personality state, WAL sqlite, atomic markdown writes). Designing around it produces a cleaner system than ignoring it.
 
 **Chat-first, embodiment optional.** The pet's "soul" lives in the conversation — the face and hardware are enrichment, not the point. This means the system works fully in a terminal (CLI transport, no E-Ink) while still scaling up to full hardware.
-
-## Status
-
-🟢 **Deployed and running on real hardware.** shelldon lives on a Raspberry Pi Zero 2W as a systemd service — text it from your phone (Telegram), it thinks with a live LLM brain, replies, shows its face on the E-Ink panel, remembers you, drifts in mood between chats, and **writes its own tools on request**. **Epics 1–9 done** (45 stories, 745 tests) — including live, tiered self-coding; what's left is polish.
-
-→ Full progress, the epic-by-epic breakdown, and the roadmap: **[STATUS.md](STATUS.md)**.
 
 ## Getting started
 
@@ -208,11 +181,46 @@ Free-tier quotas are **independent per provider**, so the smart move is to stack
 
 **Under $20/month — GLM via Z.ai.** [GLM-4.7](https://z.ai) is a capable hosted model with an Anthropic-compatible API, which is why it's shelldon's default provider. Pricing is token-based and in practice lands well under $20/month for a pet that talks with you daily. [Use this link for a discount at signup.](https://z.ai/subscribe?ic=LGN84JDUIC)
 
+## Status
+
+🟢 **Deployed and running on real hardware.** shelldon lives on a Raspberry Pi Zero 2W as a systemd service — text it from your phone (Telegram), it thinks with a live LLM brain, replies, shows its face on the E-Ink panel, remembers you, drifts in mood between chats, and **writes its own tools on request**. **Epics 1–9 done** (45 stories, 745 tests) — including live, tiered self-coding; what's left is polish.
+
+→ Full progress, the epic-by-epic breakdown, and the roadmap: **[STATUS.md](STATUS.md)**.
+
+
 ## Credits
 
 Built on the ideas of **[openclawgotchi](https://github.com/turmyshevd/openclawgotchi)** by [Dmitry Turmyshev](https://github.com/turmyshevd) (MIT). `shelldon` is a clean-room reimplementation — v1 is studied as reference, never copied.
 
 Form-factor inspiration from **[pwnagotchi](https://pwnagotchi.ai/)** by [@evilsocket](https://github.com/evilsocket) — the original E-Ink virtual pet on Pi Zero.
+
+---
+
+## Origins
+
+`shelldon` is a ground-up v2 rebuild of [openclawgotchi](https://github.com/turmyshevd/openclawgotchi) (MIT, by [Dmitry Turmyshev](https://github.com/turmyshevd)). At its core it's a **chat-bot pet**: you converse with a remote-LLM brain by text, over a **pluggable chat transport** (not hardcoded to any one service), while the pet's face and mood live on a Waveshare E-Ink screen. It's built to be genuinely *owned* — a clean, tested spine that engineers out v1's documented pains.
+
+It sits at the end of a short but meaningful lineage.
+
+**[pwnagotchi](https://pwnagotchi.ai/)** (by [@evilsocket](https://github.com/evilsocket)) pioneered the form factor: an E-Ink "virtual pet" on a Pi Zero that *feels alive*. It showed that a small, cheap piece of hardware with a face on it could become a companion object — something you put on your desk and check in on. Two things come directly from pwnagotchi's design: the **expressive E-Ink face** (expressions that shift with mood and activity, idle animations between events) and the **XP leveling system** (the pet grows and levels up through interaction, giving the relationship a sense of progression over time). Both of those are being brought forward into shelldon.
+
+**[openclawgotchi](https://github.com/turmyshevd/openclawgotchi)** (by Dmitry Turmyshev) took that same form factor and made it a chat pet — connecting the E-Ink face to an LLM brain via Telegram. The Tamagotchi-meets-AI idea is genuinely compelling. But v1 accumulated real operational pain: OOM crashes on the Pi Zero's 512MB of RAM, a 1513-line Telegram connector with safety logic scattered through it, zero test coverage, and a transport hardcoded to one service.
+
+**`shelldon`** is the v2 rebuild: same spirit, different spine. Clean-room — v1 code is studied as reference, never copied.
+
+## What makes it different
+
+### vs. openclawgotchi (v1)
+
+| v1 pain | shelldon solution |
+|---|---|
+| **OOM crashes** on Pi Zero's 512MB | **Ephemeral fork-server workers** — each turn forks a worker that runs once and dies; RAM never accumulates across turns |
+| **Hardcoded Telegram** — one transport, all safety woven into a single massive connector | **Transport-agnostic adapter contract** — CLI, Telegram, SMS, or anything else slots in; none wired into core |
+| **Zero tests** — bugs discovered in production | **M0 test harness from day one** — contract round-trips, worker-bound invariant, and atomic-write crash-safety all verified before first feature |
+| **Safety scattered** across 1513-line connector | **One security boundary** — a single capability broker is the sole holder of LLM creds; nothing else can call a model |
+| **No provider flexibility** | **Pluggable, ordered provider chain** — GLM default, Ollama/OpenAI/OpenRouter fallback, all config — never a code change |
+| **No offline life** | **Resident reflexes** (blink, idle, mood drift) run between turns so the pet never freezes when the LLM is busy |
+
 
 ## License
 
